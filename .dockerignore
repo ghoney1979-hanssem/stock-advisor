@@ -1,0 +1,15 @@
+# 빌드 산출물·로컬 캐시 (이미지 빌드 컨텍스트에서 제외)
+build/
+.gradle/
+.idea/
+*.iml
+out/
+
+# 시크릿 — 절대 이미지에 포함 금지
+set-env.sh
+.env
+*.env
+
+# 기타
+.git/
+HELP.md

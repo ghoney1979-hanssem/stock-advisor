@@ -1,0 +1,13 @@
+# 운영(prod) 프로파일: SPRING_PROFILES_ACTIVE=prod
+spring:
+  jpa:
+    hibernate:
+      # 단순 스키마라 엔티티 기반 자동 생성/갱신 사용(개인 운영 기준).
+      # 엄격 운영 전환 시 Flyway/Liquibase + validate 로 교체 권장.
+      ddl-auto: update
+    show-sql: false
+
+logging:
+  level:
+    com.stockadvisor: INFO
+    org.hibernate.SQL: WARN

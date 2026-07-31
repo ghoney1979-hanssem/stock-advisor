@@ -1,0 +1,355 @@
+spring:
+  application:
+    name: stock-advisor
+
+  # 스케줄러 스레드풀 — 장기 실행(워치리스트 동기화 ~20분, 전수 스캔 ~7분, 핫 스캔)이 공시 폴링/신호 평가/청산을 막지 않도록 확장
+  task:
+    scheduling:
+      pool:
+        size: ${SCHEDULER_POOL_SIZE:4}
+
+  # PostgreSQL 데이터소스 (실제 자격증명은 환경변수로 주입)
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/stockadvisor}
+    username: ${DB_USERNAME:stockadvisor}
+    password: ${DB_PASSWORD:stockadvisor}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate          # 운영 기준. 로컬 개발 시 update 로 override
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: Asia/Seoul
+    open-in-view: false
+
+  # Redis (외부 API 응답 캐싱)
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+
+  cache:
+    type: redis
+
+server:
+  port: 8080
+
+# 외부 OpenAPI 연동 설정
+stockadvisor:
+  cache:
+    # 외부 API 응답 캐시 TTL (요구사항: 1시간)
+    api-response-ttl: 1h
+
+  # DART 전자공시시스템 OpenAPI (https://opendart.fss.or.kr)
+  dart:
+    base-url: https://opendart.fss.or.kr/api
+    api-key: ${DART_API_KEY:}
+
+  # 한국투자증권(KIS) REST API - 국내 시세 조회
+  kis:
+    base-url: ${KIS_BASE_URL:https://openapi.koreainvestment.com:9443}
+    app-key: ${KIS_APP_KEY:}
+    app-secret: ${KIS_APP_SECRET:}
+    account-number: ${KIS_ACCOUNT_NO:}              # 종합계좌 8자리(CANO) — 주문·잔고 API용(시세는 불요)
+    account-product-code: ${KIS_ACCOUNT_PRODUCT_CODE:01}  # 상품코드 2자리(ACNT_PRDT_CD), 종합위탁 보통 01
+
+  # 알림 채널 (Discord Webhook). webhook-url 이 비어 있으면 실제 발송 대신 로그만 남김(dry-run).
+  notification:
+    discord:
+      webhook-url: ${DISCORD_WEBHOOK_URL:}
+
+  # 인버스 ETF 코드(하락장 수익용, csv). 워치리스트 고정 + 점수게이트 통과 + 독립 국면버킷 태깅.
+  # 기본: KODEX 인버스(114800, 코스피 -1x), KODEX 코스닥150선물인버스(251340, 코스닥 -1x)
+  inverse-codes: ${INVERSE_CODES:114800,251340}
+
+  # 티어드 스캔 — 전수 스캔(12분) 위에 "핫셋(곧 급증 근접 소집합)"을 2분마다 별도 스캔해 급변 조기 포착. 핫셋=직전 전수스캔 volumeRatio 상위 N + 인버스.
+  tiered-scan:
+    enabled: ${TIERED_SCAN_ENABLED:true}                          # false면 핫 스캔 안 함(전수 12분만)
+    hot-set-size: ${TIERED_SCAN_HOT_SET_SIZE:50}                  # 핫셋 볼륨 상위 N종목(volumeRatio 순)
+    event-max-size: ${TIERED_SCAN_EVENT_MAX_SIZE:50}             # 이벤트(MA/RSI/수축) 편입 상위 M 캡(반등장 폭증 방지). volumeRatio 순.
+    hot-min-volume-ratio: ${TIERED_SCAN_HOT_MIN_VOLUME_RATIO:1.3} # 핫셋 편입 최소 거래량배수(조용한 종목 제외)
+
+  # 신호 판정 기준. 운영 중 튜닝 위해 환경변수 override 가능.
+  signal:
+    lookback-days: ${SIGNAL_LOOKBACK_DAYS:20}            # 거래량 평균 산정 기간
+    volume-multiplier: ${SIGNAL_VOLUME_MULTIPLIER:2.0}   # 당일 거래량 ≥ 시간보정 평균 × 2배
+    min-change-rate: ${SIGNAL_MIN_CHANGE_RATE:1.5}       # 당일 등락률 ≥ +1.5% (조기 포착)
+    min-opinion-score: ${SIGNAL_MIN_OPINION_SCORE:40.0}  # 추천 점수 ≥ 40 (중립 이상)
+    # 공시 감지 후 이 시간 안에서만 진입 신호를 재평가(진입은 공시 직후가 현실적, 호출량도 절감)
+    observation-window: ${SIGNAL_OBSERVATION_WINDOW:1h}
+    # 분봉 신선도/활성도 필터 — "이미 끝난 움직임" 배제
+    intraday-window-minutes: ${SIGNAL_INTRADAY_WINDOW:5}            # 최근 5분 기준
+    intraday-min-momentum: ${SIGNAL_INTRADAY_MIN_MOMENTUM:0.3}      # 최근 5분 +0.3% 이상(지금도 상승중)
+    intraday-min-activity-ratio: ${SIGNAL_INTRADAY_MIN_ACTIVITY:1.5} # 최근 분당거래량 ≥ 당일 평균분당 ×1.5(지금도 활발)
+    # 전략별 임계값
+    volume-leading-min-change: ${SIGNAL_B_MIN_CHANGE:0.0}  # [B] 진입 최소 등락률(%) — 미만(하락 중)은 제외(분산 회피). 비대칭 밴드 하한
+    volume-leading-max-change: ${SIGNAL_B_MAX_CHANGE:1.0}  # [B] 가격 횡보 상한(%) — 초과(이미 급등)는 제외. 비대칭 밴드 상한
+    volume-leading-inverse-max-change: ${SIGNAL_B_INVERSE_MAX_CHANGE:8.0}  # [B·인버스 전용] 인버스는 하락장에 이미 급등한 채 스캔 → 완화 상한(%)으로 포착률↑(하한 컷은 동일)
+    volume-leading-inverse-require-index: ${SIGNAL_B_INVERSE_REQUIRE_INDEX:true}  # [B·인버스] I의 지수 판정(밴드·mom·낙폭상한·fade) 통과 필수 — 혼조일 휩쏘 차단(2026-07-29 4전패 실측)
+    volume-leading-min-ratio: ${SIGNAL_B_MIN_VOLUME_RATIO:0}  # [B 실험 2026-07-30] 일반주 볼륨 하한(배) — 약한 급증 제외(WEAK_VOLUME, 대조군 역검증). 0=비활성, prod=6.0
+    # [전략 I] 인버스=지수약세 트리거 (거래량 무관, 섀도우). 인버스 ETF 볼륨이 아니라 대응 지수 당일 약세로 롱.
+    inverse-index-enabled: ${SIGNAL_INVERSE_INDEX_ENABLED:true}
+    inverse-index-min-drop: ${SIGNAL_INVERSE_INDEX_MIN_DROP:1.0}    # 지수 당일 -이값(%p) 이상 하락이면 인버스 진입
+    inverse-index-max-drop: ${SIGNAL_INVERSE_INDEX_MAX_DROP:4.0}    # 낙폭 상한 — 지수 당일 -이값% 초과 진행 후엔 진입 보류(고점매수 방지, 2026-07-20 4전패 실측). 0=비활성
+    inverse-rebound-fade-max-pct: ${SIGNAL_INVERSE_REBOUND_FADE_MAX_PCT:2.0}  # 반등일(REBOUND_DAY) 한정 진입 상한 확대 — -1% → +이값%(fade 포착). 평상일 불변. 0=비활성(2026-07-22)
+    inverse-index-map: ${SIGNAL_INVERSE_INDEX_MAP:114800:0001,251340:1001}  # 인버스코드:지수코드(0001 코스피/1001 코스닥)
+    inverse-index-require-falling: ${SIGNAL_INVERSE_INDEX_REQUIRE_FALLING:true}  # 지수 흐름 확인 — 최근 모멘텀(mom10/30)>0(회복 중)이면 진입 보류(인버스 고점매수 회피). 흐름 미가용 시 생략
+    inverse-reentry-minutes: ${SIGNAL_INVERSE_REENTRY_MINUTES:20}  # 인버스 재진입 쿨다운(분) — 청산 후 재붕괴 재포착(활성 포지션 0 + 마지막 진입 후 이 시간 경과 시 같은 날 재평가). 0=비활성(하루 1회)
+    # 신선 악재뉴스 가드(반등 계열 C/D/J) — 하락 중 최근 N분 내 악재 키워드 뉴스면 진입 보류(FRESH_BAD_NEWS). 호재/중립은 통과.
+    bad-news-keywords: ${SIGNAL_BAD_NEWS_KEYWORDS:유상증자,감자,구조조정,관리종목,상장폐지,거래정지,소송,압수수색,횡령,배임,어닝쇼크,적자전환,리콜,화재}
+    fresh-news-window-minutes: ${SIGNAL_FRESH_NEWS_WINDOW_MINUTES:60}
+    # 과열 추격 필터 — 반등계열(H/G/J) 진입 시 체결강도 ≥ 임계면 보류(EXEC_OVERHEAT). 2026-07-24 HLB 계열 실손실 계기, 근거는 7/16~20 강도별 성과. 0=비활성
+    exec-overheat-min-strength: ${SIGNAL_EXEC_OVERHEAT_MIN_STRENGTH:200.0}
+    # 다일 과열 필터 — 반등계열(H/G/J) 진입 시 최근 5일 수익률 > 이값%면 보류(RET5D_OVERHEAT). 흐름↑ 손실 분석(2026-07-29) 근거. 0=비활성
+    ret5d-overheat-max-pct: ${SIGNAL_RET5D_OVERHEAT_MAX_PCT:10.0}
+    # 반등일 순추세 보류 가드 — 당일 지수 ≥ surge% 급등 AND 기저(MA3) 라벨 비강세면 H/F/E/K 신규진입 보류(REBOUND_DAY). 2사이클 실측(7/15·7/22) 근거.
+    rebound-day-guard-enabled: ${SIGNAL_REBOUND_DAY_GUARD_ENABLED:true}
+    rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}
+    # [전략 F] 이동평균 추세추종 (거래량 무관, 섀도우). MA20 상향 돌파(이벤트)일 때만 진입 — 대조군 미추적(부하 억제).
+    ma-trend-enabled: ${SIGNAL_MA_TREND_ENABLED:true}
+    # [전략 G] RSI 과매도 반등 (거래량 무관, 섀도우). RSI(14) 30 상향 돌파(이벤트)일 때만 진입 — 대조군 미추적.
+    rsi-reversal-enabled: ${SIGNAL_RSI_REVERSAL_ENABLED:true}
+    # [전략 H] 변동성 수축 돌파 (거래량 무관, 섀도우). NR7 수축 후 전일고가 돌파(이벤트)일 때만 진입 — 대조군 미추적.
+    squeeze-breakout-enabled: ${SIGNAL_SQUEEZE_BREAKOUT_ENABLED:true}
+    # [전략 J] 저평가 반등 (거래량 무관, 섀도우). RSI 과매도 상향돌파 + 업종 대비 저평가(PER/PBR<중앙값)일 때만 진입 — 대조군 미추적.
+    value-reversal-enabled: ${SIGNAL_VALUE_REVERSAL_ENABLED:true}
+    # 전략K 개장갭(순수 시초가) — 어제국면+오늘시초가 갭으로 개장 창(09:00~end)에 판단. 갭업 유지 + 비약세면 롱(섀도우).
+    opening-gap-enabled: ${SIGNAL_OPENING_GAP_ENABLED:true}
+    opening-gap-min-gap: ${SIGNAL_OPENING_GAP_MIN_GAP:2.0}       # 최소 갭업%
+    opening-gap-max-gap: ${SIGNAL_OPENING_GAP_MAX_GAP:10.0}      # 최대 갭%(상한가 추격 회피)
+    opening-gap-min-score: ${SIGNAL_OPENING_GAP_MIN_SCORE:40.0}  # 추천 점수 게이트
+    opening-gap-window-end: ${SIGNAL_OPENING_GAP_WINDOW_END:09:30}  # 개장 창 종료(09:00~이 시각만 발동)
+    # 대조군 집중: 검증된 승자(perf-gate 통과) 전략은 대조군 수집 중단(부하↓), 손실·미검증만 수집(진단 집중). 성과저하 시 자동 재개.
+    control-focus-enabled: ${SIGNAL_CONTROL_FOCUS_ENABLED:true}
+    mean-reversion-min-drop: ${SIGNAL_C_MIN_DROP:3.0}      # [C] 역추세: 당일 -3% 이상 하락
+    mean-reversion-max-drop: ${SIGNAL_C_MAX_DROP:12.0}     # [C] -12% 초과 폭락은 제외(정리매매 등)
+    mean-reversion-min-score: ${SIGNAL_C_MIN_SCORE:40.0}   # [C] 추천 점수 ≥ 40 (공통 40과 동일로 완화 — 분봉 반등확인이 1차 선별. 50→40, C 표본 확보)
+    mean-reversion-require-rebound: ${SIGNAL_C_REQUIRE_REBOUND:true} # [C] 분봉 반등확인 필수(떨어지는 칼날 회피)
+    # [D] 지수상대 역추세 — 잔차(종목등락률−지수등락률)가 -minGap 이하(지수 대비 과하게 뒤처짐)면 롱, 상대 회귀 노림(롱온리 짝꿍 변형)
+    index-relative-min-gap: ${SIGNAL_D_MIN_GAP:2.0}        # [D] 종목이 지수보다 이 %p 이상 덜 오르거나 더 빠지면(잔차 ≤ -이값) 진입
+    index-relative-max-drop: ${SIGNAL_D_MAX_DROP:12.0}     # [D] 당일 절대 하락 -이값% 초과 폭락은 제외(정리매매·악재 회피)
+    index-relative-min-score: ${SIGNAL_D_MIN_SCORE:40.0}   # [D] 진입 최소 추천 점수(건전성)
+    index-relative-require-rebound: ${SIGNAL_D_REQUIRE_REBOUND:true} # [D] 절대하락(≤-minDrop) 후보면 분봉 반등확인 요구(떨어지는 칼날 회피)
+    # [E] 신고가 돌파 모멘텀 — 직전 N일 최고가를 거래량 급증과 함께 돌파하면 롱(강세 추격, 공격적). A~D의 역추세 편향과 반대 방향으로 다양성 부여
+    breakout-lookback: ${SIGNAL_BREAKOUT_LOOKBACK:20}      # [E] 직전 20거래일 최고가(오늘 제외) 초과면 돌파
+    breakout-min-score: ${SIGNAL_BREAKOUT_MIN_SCORE:40.0}  # [E] 진입 최소 추천 점수(건전성)
+    breakout-buffer-pct: ${SIGNAL_BREAKOUT_BUFFER_PCT:0.0} # [E] 돌파 버퍼(%) — 현재가 ≥ 직전최고가×(1+이값%)일 때만(0=신고가 즉시)
+    # 저가주/동시호가 필터
+    min-price: ${SIGNAL_MIN_PRICE:1000}                    # 1,000원 미만 종목 제외
+    session-start: ${SIGNAL_SESSION_START:09:00}           # 연속매매 시작
+    session-end: ${SIGNAL_SESSION_END:15:20}               # 연속매매 종료(이후 마감동시호가 제외)
+    control-tracking: ${SIGNAL_CONTROL_TRACKING:true}      # 대조군 추적(거래량급증했지만 전략조건/점수 탈락 종목도 수익률 기록 — 필터 검증/개선)
+
+  # 매매비용 — 분석 순수익(net) 계산용. 왕복(매수+매도) 합산 %.
+  # 기본 0.18 ≈ 위탁수수료(매수·매도 각 ~0.015%) + 증권거래세(매도 0.15%, 2025~ 코스피·코스닥 동일).
+  # 밸류에이션 점수 anchors — PER/PBR 각 0~50점, good 이하 만점 → max 이상 바닥(high-floor)으로 완만 감점.
+  # high-floor>0 라서 고평가 성장주도 0점이 아님(구버전 PBR≥2 → 0점 버그 해소).
+  valuation:
+    per-good: ${VALUATION_PER_GOOD:10}      # 이 PER 이하면 PER 만점(50)
+    per-max: ${VALUATION_PER_MAX:40}        # 이 PER 이상이면 PER 바닥점
+    pbr-good: ${VALUATION_PBR_GOOD:1.0}     # 이 PBR 이하면 PBR 만점(50)
+    pbr-max: ${VALUATION_PBR_MAX:4.0}       # 이 PBR 이상이면 PBR 바닥점
+    high-floor: ${VALUATION_HIGH_FLOOR:10}  # 고평가 시 바닥점(성장 프리미엄, 0 아님)
+    loss-score: ${VALUATION_LOSS_SCORE:15}  # PER/PBR≤0(적자·자본잠식 등) 불확실 점수
+    # 업종 상대평가 — 업종 중앙값 대비 비율로 PER/PBR 점수화(테크/바이오 고PER 편차 흡수). 중앙값 미산출/표본부족 시 위 절대기준 fallback.
+    sector:
+      enabled: ${VALUATION_SECTOR_ENABLED:true}
+      min-stocks: ${VALUATION_SECTOR_MIN_STOCKS:5}    # 업종 중앙값 신뢰 최소 종목 수
+      good-ratio: ${VALUATION_SECTOR_GOOD_RATIO:0.8}  # 종목값/업종중앙값 ≤ 이값 → 만점(업종 대비 쌈)
+      max-ratio: ${VALUATION_SECTOR_MAX_RATIO:1.5}    # ≥ 이값 → 바닥점(업종 대비 비쌈)
+
+  # 청산방식 비교(exit-comparison)용 트레일링 되돌림% 후보 그리드(CSV). 비우면 기본 1,2,3,5,7,10.
+  exit:
+    trail-grid-pct: ${EXIT_TRAIL_GRID_PCT:}
+
+  cost:
+    # 왕복 매매비용(위탁수수료 왕복 + 매도 증권거래세), 매수금액 기준 %. 0.18 → 0.22 상향(2026-07-13 실측:
+    # 실계좌 비용 2,799원/회전 128만 ≈ 0.22% — 수수료 0.0397%×2 + 매도세 0.15%). 분석 net과 실현손익 차감에 공용.
+    round-trip-pct: ${TRADING_ROUND_TRIP_COST_PCT:0.22}
+    # 체결비용(슬리피지·유동성) 모델 (레이어 4) — round-trip-pct(수수료/세금)에 더해 net 현실화.
+    # 호가창 API 없이 KRX 호가단위(tick)로 스프레드 추정 + 거래대금 유동성 필터.
+    execution:
+      enabled: ${COST_EXECUTION_ENABLED:true}                # false면 슬리피지 0·필터 통과(기존 동작)
+      spread-ticks: ${COST_EXECUTION_SPREAD_TICKS:1.0}       # 왕복 스프레드를 몇 tick으로 볼지(소형주 ↑)
+      base-slippage-pct: ${COST_EXECUTION_BASE_SLIPPAGE_PCT:0.0}  # 스프레드 외 추가 슬리피지(시장충격) 왕복 %
+      min-turnover-krw: ${COST_EXECUTION_MIN_TURNOVER_KRW:500000000}  # 1일 거래대금 하한(원) — 미만이면 거래 제외
+      max-round-trip-slippage-pct: ${COST_EXECUTION_MAX_SLIPPAGE_PCT:1.0}  # 추정 왕복 슬리피지 상한(%) 초과 시 거래 제외
+      max-impact-pct: ${COST_EXECUTION_MAX_IMPACT_PCT:0.5}  # 시장충격 상한(%) — 매수가 매도호가 +이값% 넘게 밀면 그 잔량까지로 수량 캡(호가 walk). 0=비활성
+
+  # 실전 매매 정책/안전장치 (본인 계좌 자기매매). PolicyGate 가 모든 진입을 이 값으로 검증.
+  # ⚠️ 기본 enabled=false + mode=DRY_RUN — 명시적으로 켜기 전엔 실주문이 절대 안 나감.
+  trading:
+    enabled: ${TRADING_ENABLED:false}                       # 마스터 스위치(기본 꺼짐)
+    mode: ${TRADING_MODE:DRY_RUN}                           # DRY_RUN(로깅만) | LIVE(실주문)
+    max-order-pct: ${TRADING_MAX_ORDER_PCT:0}               # 1주문 비중(%). 0=자동(100/max-positions — 최대보유 변경 시 자동 연동). >0이면 고정
+    max-orders-per-day: ${TRADING_MAX_ORDERS_PER_DAY:0}     # 1일 최대 신규주문 수. 0=무제한
+    daily-loss-limit: ${TRADING_DAILY_LOSS_LIMIT:50000}     # 일일 손실 한도(원) — 도달 시 신규진입 중단
+    daily-loss-limit-pct: ${TRADING_DAILY_LOSS_LIMIT_PCT:0}  # 일일 손실 한도 순자산 대비 %(>0이면 절대액 대신 사용, 2026-07-24). 인버스는 면제
+    max-positions: ${TRADING_MAX_POSITIONS:20}
+    max-positions-per-group: ${TRADING_MAX_POSITIONS_PER_GROUP:1}   # 같은 계열주(그룹 키 일치) 최대 활성 포지션 — HLB 동반붕괴(7/24) 방지. 0=비활성              # 최대 동시 보유 종목 수 (10→20, 2026-07-13 — 종목당 비중은 자동 5%)
+    session-end: ${TRADING_SESSION_END:15:20}              # 연속매매 종료 — 시간기반 청산이 이 시각 넘기면 진입 금지
+    time-exit-hold-minutes: ${TRADING_TIME_EXIT_HOLD_MINUTES:60}  # 시간기반 청산 보유시간(분). 진입시각+이값 ≤ session-end 일 때만 진입
+    limit-up-lock-pct: ${TRADING_LIMIT_UP_LOCK_PCT:29.0}    # 상한가 조기청산 — 당일 등락률 ≥ 이값(+30% 근접)이면 전 종목 즉시 익절(상방 천장+갭리스크). 0=비활성
+    manual-confirm: ${TRADING_MANUAL_CONFIRM:true}          # 초기 단계 수동 승인 게이트
+    swing-strategies: ${TRADING_SWING_STRATEGIES:MEAN_REVERSION_C}  # 오버나잇 스윙 전략(csv) — 장마감 강제청산 대신 익일 종가 청산, 진입 시 장마감초과 규칙 면제. ⚠️오버나잇 갭 리스크
+    swing-horizon: ${TRADING_SWING_HORIZON:nextClose}       # 스윙 전략 성과게이트 검증 horizon(청산 시점=익일종가) — 스윙은 당일종가 아닌 이 horizon으로 게이팅
+    # 스윙 트레일링 — fail-closed: 검증(swing-trail-analysis)에서 트레일(3/5/7%)이 익일보유보다 나을 때만 자동 채택. 검증 전엔 익일종가 보유(실청산 무변경).
+    swing-trail:
+      enabled: ${TRADING_SWING_TRAIL_ENABLED:true}         # false면 항상 익일종가 보유
+      min-triggered: ${TRADING_SWING_TRAIL_MIN_TRIGGERED:20}  # 트레일 채택 최소 트리거 표본(미만이면 보유)
+      margin-pct: ${TRADING_SWING_TRAIL_MARGIN_PCT:0.2}    # 트레일이 보유보다 이 %p 넘게 나아야 채택(노이즈 컷)
+      refresh-minutes: ${TRADING_SWING_TRAIL_REFRESH_MINUTES:30}  # 채택 재계산 캐시 주기(분)
+    live-strategies: ${TRADING_LIVE_STRATEGIES:}            # LIVE 실주문 허용 전략(csv). 빈값=전 전략 LIVE 차단(DRY_RUN은 전부 기록)
+    unfilled-timeout-minutes: ${TRADING_UNFILLED_TIMEOUT_MINUTES:3}  # 지정가 미체결 N분 경과 시 취소(다음 틱 재주문=추격)
+    approval-timeout-minutes: ${TRADING_APPROVAL_TIMEOUT_MINUTES:5}  # 수동 승인 대기 N분 경과 시 자동 거부(늦은 진입 방지)
+
+    # 전략 성과 기반 LIVE 진입 게이트 — 전략별 최근 net 평균수익률이 기준 미달이면 실주문만 자동 차단.
+    # (가상매수·알림·관찰은 계속 → 그림자 성과로 회복 판정 → 자동 재가동). DRY_RUN엔 영향 없음.
+    perf-gate:
+      enabled: ${TRADING_PERF_GATE_ENABLED:true}             # 게이트 사용(기본 on). false면 화이트리스트만 적용
+      lookback-days: ${TRADING_PERF_GATE_LOOKBACK_DAYS:20}    # 성과 평가 기간(최근 N 캘린더일, alertDate 기준)
+      min-samples: ${TRADING_PERF_GATE_MIN_SAMPLES:30}        # 표본 N건 미만이면 미검증으로 보고 차단(fail-closed). exit horizon 낙관편향 상쇄 위해 20→30 상향
+      min-net-avg-pct: ${TRADING_PERF_GATE_MIN_NET_AVG_PCT:0.3}  # net 평균수익률(%) 기준 — 미만 차단. 0→0.3(비용+여유 이상만) 상향
+      horizon: ${TRADING_PERF_GATE_HORIZON:exit}             # 측정 시점: exit=실제 청산 마크(권장 보유시간, OutcomeSample) / close/nextClose/d2/d3/p10/p30도 가능. 스윙은 자동 nextClose
+      regime-conditional: ${TRADING_PERF_GATE_REGIME_CONDITIONAL:true}  # 레이어2: 현재 시장국면과 같은 국면 진입분만으로 평가(미산출 시 전체 fallback)
+      regime-market-split: ${TRADING_PERF_GATE_REGIME_MARKET_SPLIT:true}  # (market,trend) 2차원: 같은 국면+같은 시장(KOSPI/KOSDAQ) 진입분만. 더 정밀하나 표본 더 희소
+      # 보수적 국면무관 fallback(②엄격바+③축소사이징+④자동졸업): 현재 국면 표본이 min-samples 미만이면(예: 갓 시작된 강세장)
+      # fail-closed 대신 국면 무관 전체 표본(같은 시장, 전 국면)으로 재평가. 단 더 엄격한 바 요구 + 통과해도 축소진입. 기본 off(opt-in).
+      fallback-enabled: ${TRADING_PERF_GATE_FALLBACK_ENABLED:false}            # 국면 표본 부족 시 국면무관 fallback 허용
+      fallback-min-samples: ${TRADING_PERF_GATE_FALLBACK_MIN_SAMPLES:50}       # fallback pool(전국면) 최소 표본 — min-samples보다 크게(더 엄격)
+      fallback-min-net-avg-pct: ${TRADING_PERF_GATE_FALLBACK_MIN_NET_AVG_PCT:0.5}  # fallback 통과 net 기준(%) — min-net-avg-pct보다 높게(더 엄격)
+      fallback-size-mult: ${TRADING_PERF_GATE_FALLBACK_SIZE_MULT:0.5}          # fallback 진입 사이징 배수(축소진입, 0<x≤1)
+      inverse-min-samples: ${TRADING_PERF_GATE_INVERSE_MIN_SAMPLES:10}         # INVERSE 버킷 전용 최소 표본(폭락일에만 쌓여 하향, net 기준은 동일) — 인버스 승격 경로
+      inverse-bootstrap-size-mult: ${TRADING_PERF_GATE_INVERSE_BOOTSTRAP_SIZE_MULT:0.3}  # INVERSE 부트스트랩 — 표본 미달이어도 이 배수 축소사이징으로 실주문(0.3=일반 비중의 30%≈순자산 1.5%). 표본 차면 자동 졸업(통과=정상 사이징/미달=차단). 0=비활성
+      flow-conditional: ${TRADING_PERF_GATE_FLOW_CONDITIONAL:true}               # 국면+흐름 3차원 — 흐름 버킷 표본 충족 시 그 버킷으로 판정, 부족/미산출(개장~30분)이면 국면만(자연 fallback)
+      flow-min-samples: ${TRADING_PERF_GATE_FLOW_MIN_SAMPLES:30}
+      inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
+      inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용   # INVERSE 버킷 실현 채점 시작일(yyyyMMdd, 빈값=제한없음) — 인버스 청산로직 세대 교체 시 구표본 제외(2026-07-20)                 # 흐름 버킷 최소 표본
+
+    # 국면연동 리스크 관리 (레이어 3 — 하락장 방어). DRY_RUN/LIVE 공통(리스크관리 흐름을 dry-run으로도 검증).
+    risk:
+      enabled: ${TRADING_RISK_ENABLED:true}                  # false면 노출/서킷 미적용
+      bull-exposure-pct: ${TRADING_RISK_BULL_EXPOSURE_PCT:100}    # 강세장 총노출 상한(순자산 대비 %)
+      neutral-exposure-pct: ${TRADING_RISK_NEUTRAL_EXPOSURE_PCT:80} # 중립장 (60→80 상향)
+      bear-exposure-pct: ${TRADING_RISK_BEAR_EXPOSURE_PCT:60}     # 약세장 (30→60 상향)
+      high-vol-exposure-mult: ${TRADING_RISK_HIGH_VOL_MULT:0.5}   # 고변동 국면이면 상한에 곱하는 계수
+      crash-halt-pct: ${TRADING_RISK_CRASH_HALT_PCT:3.0}          # 지수 장중 고점대비 -이값%p 급락+절대 -이값% 이하 → 서킷 발동. 0=비활성
+      rebound-pct: ${TRADING_RISK_REBOUND_PCT:2.0}                # 발동 후 지수가 장중 저점 대비 +이값%p 반등하면 재개(예 -6%→-4%). 절대수준 복귀 안 기다림
+      max-positions-per-sector: ${TRADING_RISK_MAX_POSITIONS_PER_SECTOR:3}  # 한 업종당 최대 동시 보유 종목 수(동반급락 분산). 0=무제한
+      catastrophic-stop-pct: ${TRADING_RISK_CATASTROPHIC_STOP_PCT:7.0}  # 개별 손절 하한(%) — 매수가 -이값% 이하 즉시 청산(재난방지 바닥, 튜닝SL 아님). 0=비활성
+      breadth-riskoff-adv-pct: ${TRADING_RISK_BREADTH_ADV_PCT:15.0}      # 시장폭 리스크오프 — 해당 시장 상승비율 <이값% AND 아래 중앙 조건이면 신규진입 차단(강제청산 없음). 0=비활성
+      breadth-riskoff-median-pct: ${TRADING_RISK_BREADTH_MEDIAN_PCT:3.0} # 시장폭 리스크오프 — 중앙 등락률 ≤ -이값% 조건(상승비율과 AND, 오발동 방지)
+
+    # 인버스 전용 청산 — 진입(지수 약세)과 대칭: 하락 지속 동안 보유, 약세 소멸(레벨 회복/모멘텀 반등) 시 청산. 시간청산·적응형 미적용(개별종목 학습값이라 부적합).
+    inverse-exit:
+      enabled: ${TRADING_INVERSE_EXIT_ENABLED:true}                       # false면 기존(산 전략의 규칙) 청산
+      recovery-pct: ${TRADING_INVERSE_EXIT_RECOVERY_PCT:0.5}              # 지수 당일 등락률 > -이값% → 약세 소멸 청산(진입 -1%보다 완화)
+      rebound-mom-pct: ${TRADING_INVERSE_EXIT_REBOUND_MOM_PCT:0.3}        # 지수 최근 모멘텀(mom30) ≥ +임계% → 반등 시작 청산(기저 임계)
+      rebound-day-scale: ${TRADING_INVERSE_EXIT_REBOUND_DAY_SCALE:0.15}   # 반등 임계 낙폭 비례 상향 thr=max(기저,|당일등락|×이값) — 폭락일 데드캣 과민 방지(2026-07-16). 0=비활성
+      stop-pct: ${TRADING_INVERSE_EXIT_STOP_PCT:2.0}                      # 인버스 가격 손절%(지수 역행) — 적응형 대체
+      max-hold-minutes: ${TRADING_INVERSE_EXIT_MAX_HOLD_MINUTES:300}      # 백스톱
+
+    # 매도 주문 컷오프 — KRX 정규장 접수 마감. 이후엔 청산 제출 보류(다음 거래일 개장 후 처리). 2026-07-16 안트로젠 장후 거부 스팸 대응.
+    exit-order-cutoff: ${TRADING_EXIT_ORDER_CUTOFF:15:30}
+
+    # 변동성기반(ATR) 포지션 사이징 (레이어 3.1). 변동성 큰 종목 적게·작은 종목 많이(거래당 리스크 균등화).
+    # 수량 = min( 순자산×risk-per-trade-pct% / (atr-mult×ATR), 순자산×max-order-pct% / 가격 ). ATR 미산출 시 고정 사이징.
+    sizing:
+      atr-enabled: ${TRADING_SIZING_ATR_ENABLED:true}        # false면 고정 max-order-pct 사이징
+      atr-period: ${TRADING_SIZING_ATR_PERIOD:14}            # ATR 평균 기간(일)
+      atr-mult: ${TRADING_SIZING_ATR_MULT:2.0}               # 손절폭 추정 배수(stop≈atr-mult×ATR). 클수록 보수적
+      risk-per-trade-pct: ${TRADING_SIZING_RISK_PER_TRADE_PCT:2.0}  # 거래당 위험예산 = 순자산 × 이 비율(%). 소액계좌 대응 0.5→2.0(1주문 10% 하드캡이 오버사이징 방어)
+
+    # 적응형 시간기반 청산 — 전략별 보유시간을 exit-timing 분석의 권장 청산시점(평균 net 수익 최대 마크)으로 자동 설정.
+    # 표본 부족 마크는 제외, 자격 마크 없으면 time-exit-hold-minutes(60분)로 fallback. DRY_RUN/LIVE 공통 적용.
+    adaptive-exit:
+      enabled: ${TRADING_ADAPTIVE_EXIT_ENABLED:true}          # false면 고정 time-exit-hold-minutes 사용
+      min-samples: ${TRADING_ADAPTIVE_EXIT_MIN_SAMPLES:20}    # 마크 채택 최소 표본(미만 마크 제외)
+      refresh-minutes: ${TRADING_ADAPTIVE_EXIT_REFRESH_MINUTES:30}  # 권장 보유시간 재계산 캐시 주기(분)
+      max-hold-minutes: ${TRADING_ADAPTIVE_EXIT_MAX_HOLD_MINUTES:300}  # 보유시간 상한(종가 권장 시 캡)
+
+    # 적응형 청산방식 — 시간기반/트레일링/VWAP이탈/추세전환 중 전략별 평균 net 수익 최대 방식을 자동 채택.
+    # (exit-comparison 시뮬레이션 기반) 표본 부족이면 시간기반(TIME) fallback. 안전 트리거(손절·서킷·장마감)는 항상 우선.
+    adaptive-exit-method:
+      enabled: ${TRADING_ADAPTIVE_EXIT_METHOD_ENABLED:true}        # false면 항상 시간기반
+      min-samples: ${TRADING_ADAPTIVE_EXIT_METHOD_MIN_SAMPLES:30}  # 방식 채택 최소 표본(미만이면 TIME)
+      refresh-minutes: ${TRADING_ADAPTIVE_EXIT_METHOD_REFRESH_MINUTES:30}  # 추천 재계산 캐시 주기(분)
+      trend-confirm: ${TRADING_ADAPTIVE_EXIT_METHOD_TREND_CONFIRM:3}  # 추세전환 청산 확인 횟수(N회 연속 하락). 라이브≈N분, 시뮬≈5N분. 1=첫 하락 즉시(종전)
+
+    # 적응형 손절 — 고정 catastrophic-stop-pct 대신 전략별 승자 MAE(worst10)로 손절선 자동 설정.
+    # fail-closed: 승자 표본 < min-samples면 고정 −7% 유지. 채택값은 [min,max] 클램프. (MaeAnalysisService 기반)
+    adaptive-stop:
+      enabled: ${TRADING_ADAPTIVE_STOP_ENABLED:true}            # false면 고정 catastrophic-stop-pct
+      min-samples: ${TRADING_ADAPTIVE_STOP_MIN_SAMPLES:30}      # 전략별 승자 채택 최소 표본(미만이면 고정값)
+      min-stop-pct: ${TRADING_ADAPTIVE_STOP_MIN_PCT:3.0}        # 손절선 하한%(이보다 타이트 금지)
+      max-stop-pct: ${TRADING_ADAPTIVE_STOP_MAX_PCT:10.0}       # 손절선 상한%(이보다 느슨 금지)
+      refresh-minutes: ${TRADING_ADAPTIVE_STOP_REFRESH_MINUTES:30}  # 손절선 재계산 캐시 주기(분)
+
+  # 시장 국면 엔진 (레이어 1) — 지수 추종 ETF(프록시) 일봉으로 추세/변동성 판정.
+  # KOSPI≈KODEX 200(069500), KOSDAQ≈KODEX 코스닥150(229200). 추후 진짜 지수 일봉 API로 교체 가능.
+  market-regime:
+    kospi-proxy-code: ${MARKET_REGIME_KOSPI_PROXY:069500}
+    kosdaq-proxy-code: ${MARKET_REGIME_KOSDAQ_PROXY:229200}
+    ma-period: ${MARKET_REGIME_MA_PERIOD:3}              # 추세 이동평균 기간(일) — 단타용 단기 국면(20→3). 며칠 회복하면 즉시 강세/중립 전환(후행성↓)
+    slope-lookback: ${MARKET_REGIME_SLOPE_LOOKBACK:2}    # MA 기울기 측정 기간(일 전 대비) — MA3에 맞춰 5→2
+    # intraday 보정(2026-07-16) — MA3 라벨 후행 보완: 당일 지수 ≤−demote%면 1단계(≤−2×demote%면 2단계) 강등,
+    # ≥+promote% AND breadth 상승비율 ≥60%(신선)면 1단계 승격(비대칭 — 축소 빠르게/확대 보수적). 0=비활성.
+    intraday-demote-pct: ${MARKET_REGIME_INTRADAY_DEMOTE_PCT:2.0}
+    intraday-promote-pct: ${MARKET_REGIME_INTRADAY_PROMOTE_PCT:2.0}
+    vol-period: ${MARKET_REGIME_VOL_PERIOD:20}           # 실현변동성 측정 기간(일간수익률 개수)
+    vol-high-pct: ${MARKET_REGIME_VOL_HIGH_PCT:2.0}      # 일간수익률 표준편차(%) ≥ → 고변동
+    vol-low-pct: ${MARKET_REGIME_VOL_LOW_PCT:1.0}        # 일간수익률 표준편차(%) < → 저변동
+    refresh-minutes: ${MARKET_REGIME_REFRESH_MINUTES:60} # 국면 재계산 캐시 주기(분)
+
+  # 워치리스트 적재 규모 (시총 상위)
+  watchlist:
+    kospi-top: ${WATCHLIST_KOSPI_TOP:1000}
+    kosdaq-top: ${WATCHLIST_KOSDAQ_TOP:500}
+
+  # 매수가정 가격추적 후속알림 — 알림 후 경과 시점에 가격 샘플링
+  followup:
+    first-delay: ${FOLLOWUP_FIRST_DELAY:5m}    # +5분 가격 샘플(분석용)
+    second-delay: ${FOLLOWUP_SECOND_DELAY:10m} # +10분 가격 샘플(분석용)
+    third-delay: ${FOLLOWUP_THIRD_DELAY:30m}   # +30분 가격 샘플(분석용)
+    # (alert-delay 제거됨 — +1시간 후속 Discord 알림 폐지, 데이터 수집만 유지)
+    # 보유시간별 청산시점 분석용 샘플 마크(진입 후 경과분). EOD(종가)는 별도 자동 수집.
+    # 가격 샘플 마크(청산시점 최적화용) — 5분 단위 300분까지(촘촘). 가격은 매분 조회값 재활용이라 추가 호출 0.
+    exit-marks: ${FOLLOWUP_EXIT_MARKS:5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300}
+    # VWAP 조회 마크(성김) — VWAP은 청산방식(VWAP이탈) 시뮬용이라 정밀도 불요. 이 마크에서만 fetchVwapVolume → KIS 부하 절감.
+    vwap-marks: ${FOLLOWUP_VWAP_MARKS:5,10,15,30,45,60,90,120,180,240,300}
+
+  # 스케줄 (장중 중심, 평일). cron: 초 분 시 일 월 요일
+  scheduler:
+    disclosure-poll-cron: ${DISCLOSURE_POLL_CRON:0 */1 8-16 * * MON-FRI}
+    signal-eval-cron: ${SIGNAL_EVAL_CRON:0 */1 9-16 * * MON-FRI}
+    # 매수가정 후속 추적: 1분 주기 (장중)
+    follow-up-cron: ${FOLLOW_UP_CRON:0 */1 9-16 * * MON-FRI}
+    # 워치리스트 전 종목 스캔(B/C 시장 전략): 15분 주기 (장중)
+    market-scan-cron: ${MARKET_SCAN_CRON:0 */15 9-15 * * MON-FRI}
+    hot-scan-cron: ${HOT_SCAN_CRON:0 */2 9-15 * * MON-FRI}   # 티어드 스캔 — 핫셋(곧 급증 근접) 소집합만 2분마다
+    # 워치리스트 동기화: 장 마감 후 1일 1회(평일 16:00). 전 종목 순회라 ~20분 소요.
+    watchlist-sync-cron: ${WATCHLIST_SYNC_CRON:0 0 16 * * MON-FRI}
+    # 장 시작 알림 (평일 09:00 — 시초 국면 + 전략 진입 태세 통지)
+    market-open-cron: ${MARKET_OPEN_CRON:0 0 9 * * MON-FRI}
+    # 게이트 통과 집합 변화 감시 (장중 5분 — 전이 시에만 통지)
+    gate-change-cron: ${GATE_CHANGE_CRON:0 */5 9-15 * * MON-FRI}
+    # 일별 성과 리포트 Discord 발송 (평일 16:30 — 당일종가 확정 후)
+    daily-report-cron: ${DAILY_REPORT_CRON:0 30 16 * * MON-FRI}
+    # 업종 밸류에이션 중앙값 재계산 (장전 평일 08:40 — 전 종목 순회라 무거움, 1일 1회)
+    sector-valuation-cron: ${SECTOR_VALUATION_CRON:0 40 8 * * MON-FRI}
+    zone: Asia/Seoul
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+logging:
+  level:
+    com.stockadvisor: INFO

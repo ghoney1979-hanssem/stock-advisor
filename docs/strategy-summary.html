@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Apple SD Gothic Neo', 'AppleGothic', sans-serif; background: #f4f6fa; }
+  .wrap { width: 1120px; padding: 32px 36px; }
+  h1 { font-size: 30px; color: #1a2b4a; margin-bottom: 4px; }
+  .sub { font-size: 14px; color: #6b7689; margin-bottom: 20px; }
+  .common { background: #eef2fb; border: 1px solid #d6e0f5; border-radius: 12px; padding: 14px 18px; margin-bottom: 20px; }
+  .common b { color: #2b4a8a; font-size: 15px; }
+  .common span { color: #44506a; font-size: 13.5px; }
+  .cards { display: flex; gap: 16px; }
+  .card { flex: 1; background: #fff; border-radius: 14px; padding: 18px; border-top: 6px solid; box-shadow: 0 2px 10px rgba(20,40,80,.06); }
+  .card.a { border-color: #2f6fed; }
+  .card.b { border-color: #1aa86b; }
+  .card.c { border-color: #e8893b; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 700; color: #fff; border-radius: 6px; padding: 2px 9px; margin-bottom: 8px; }
+  .a .tag { background: #2f6fed; } .b .tag { background: #1aa86b; } .c .tag { background: #e8893b; }
+  .card h2 { font-size: 18px; color: #1a2b4a; margin-bottom: 12px; }
+  .row { margin-bottom: 10px; }
+  .row .k { font-size: 11.5px; color: #97a0b3; font-weight: 700; letter-spacing: .3px; }
+  .row .v { font-size: 14px; color: #2a3450; line-height: 1.4; margin-top: 1px; }
+  .v .hl { color: #d6336c; font-weight: 700; }
+  .foot { margin-top: 20px; background: #fff; border-radius: 12px; padding: 14px 18px; border: 1px solid #e3e8f2; }
+  .foot b { color: #2b4a8a; font-size: 14px; }
+  .foot span { color: #44506a; font-size: 13px; }
+  .disc { margin-top: 12px; font-size: 11.5px; color: #9aa3b5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📊 3개 전략 요약</h1>
+  <div class="sub">한국 주식 신호 추천 시스템 · 섀도우 paper-trade 비교 운용</div>
+
+  <div class="common">
+    <b>공통 전제</b>
+    <span>&nbsp;&nbsp;거래량 ≥ 시간보정 20일평균 ×2 &nbsp;·&nbsp; 추천의견 중립 이상(매도 제외) &nbsp;·&nbsp; 저가주·관리종목·정리매매·투자경고 제외 &nbsp;·&nbsp; 동시호가(연속매매 09:00~15:20 밖) 제외</span>
+  </div>
+
+  <div class="cards">
+    <div class="card a">
+      <div class="tag">A</div>
+      <h2>공시 모멘텀 확인형</h2>
+      <div class="row"><div class="k">가설</div><div class="v">공시가 촉매 → 상승 지속</div></div>
+      <div class="row"><div class="k">트리거</div><div class="v"><span class="hl">공시 발생</span> 종목</div></div>
+      <div class="row"><div class="k">고유 조건</div><div class="v">당일 <span class="hl">+1.5%↑</span> + 분봉 신선·활발<br>(지금도 상승·거래 활발)</div></div>
+      <div class="row"><div class="k">진입 시점</div><div class="v">움직임 확인 후 (확인형)</div></div>
+      <div class="row"><div class="k">공시 연관</div><div class="v">O — 공시 기반</div></div>
+    </div>
+
+    <div class="card b">
+      <div class="tag">B</div>
+      <h2>거래량 선행형</h2>
+      <div class="row"><div class="k">가설</div><div class="v">거래량이 가격을 선행</div></div>
+      <div class="row"><div class="k">트리거</div><div class="v">전 종목 <span class="hl">15분 스캔</span></div></div>
+      <div class="row"><div class="k">고유 조건</div><div class="v">거래량 급증인데 가격 <span class="hl">±1% 횡보</span><br>(아직 안 움직임)</div></div>
+      <div class="row"><div class="k">진입 시점</div><div class="v">돌파 <span class="hl">전</span> 선취</div></div>
+      <div class="row"><div class="k">공시 연관</div><div class="v">X — 공시 무관</div></div>
+    </div>
+
+    <div class="card c">
+      <div class="tag">C</div>
+      <h2>눌림목·역추세</h2>
+      <div class="row"><div class="k">가설</div><div class="v">우량주 과매도 → 반등</div></div>
+      <div class="row"><div class="k">트리거</div><div class="v">전 종목 <span class="hl">15분 스캔</span></div></div>
+      <div class="row"><div class="k">고유 조건</div><div class="v">당일 <span class="hl">-3%~-12% 하락</span><br>(폭락·정리매매 제외)</div></div>
+      <div class="row"><div class="k">진입 시점</div><div class="v">하락 후 반등 기대</div></div>
+      <div class="row"><div class="k">공시 연관</div><div class="v">X — 공시 무관</div></div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>공통 후처리</b>
+    <span>&nbsp;&nbsp;진입 후 보유시간별 가격 추적(5·10·15·30·45·60·90·120·180·240·300분 + 종가) &nbsp;·&nbsp; +1시간 후속 알림 &nbsp;·&nbsp; 권장 청산시점(평균수익 최대 보유시간) 산출 &nbsp;·&nbsp; 상승장/하락장 국면별 성과 분석</span>
+    <div class="disc">⚠️ 임계값은 예시값(튜닝 가능) · 검증 데이터 누적 단계 · 투자 참고용이며 투자권유가 아닙니다.</div>
+  </div>
+</div>
+</body>
+</html>
