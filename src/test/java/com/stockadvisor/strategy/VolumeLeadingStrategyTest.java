@@ -23,7 +23,7 @@ class VolumeLeadingStrategyTest {
                 5, 0.3, 1.5,
                 0.0, 1.0, 8.0,           // volumeLeading: min=0, max=1, inverse-max=8
                 3.0, 12.0, 40.0, true,
-                2.0, 12.0, 40.0, true,
+                2.0, 12.0, 40.0, true, false,
                 20, 40.0, 0.0,
                 1000, "09:00", "15:20", true);
     }

@@ -61,6 +61,12 @@ public class IndexRelativeStrategy implements TradingStrategy {
                 && change <= -props.meanReversionMinDrop()
                 && !ctx.signal().reboundActive()) return "NO_REBOUND";
         if (ctx.recScore() < props.indexRelativeMinScore()) return "SCORE";
+        // 흐름↓ 스킵(마지막 게이트) — 다른 D 조건을 모두 통과한 후보만 흐름으로 최종 판정.
+        // 그래야 FLOW_DOWN 대조군 = "D 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
+        // 흐름 미산출(개장 ~30분·조회실패)이면 null → 미적용(degrade open, 기존 흐름 가드와 동일 원칙).
+        if (props.indexRelativeRequireRisingFlow()
+                && ctx.indexMom30() != null
+                && ctx.indexMom30() < 0.0) return "FLOW_DOWN";
         return null;
     }
 

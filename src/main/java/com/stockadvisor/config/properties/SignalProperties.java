@@ -27,6 +27,9 @@ import java.time.Duration;
  * @param indexRelativeMaxDrop      [전략D] 당일 절대 하락폭 이 값(%) 초과 폭락은 제외(정리매매·악재)
  * @param indexRelativeMinScore     [전략D] 진입 최소 추천 점수(건전성)
  * @param indexRelativeRequireRebound [전략D] 절대하락(≤-meanReversionMinDrop) 후보면 분봉 반등확인 요구(떨어지는 칼날 회피)
+ * @param indexRelativeRequireRisingFlow [전략D] 진입 시점 지수 장중 흐름(mom30) < 0(흐름↓)이면 진입 보류(FLOW_DOWN).
+ *                                  근거: flow-analysis 실측 D 흐름↑ +0.22%(n299) vs 흐름↓ -0.82%(n132), 양 lag(30/60) 일관.
+ *                                  흐름 미산출(개장 ~30분·조회실패)이면 미적용(degrade open). 기본 false(현행 유지).
  * @param breakoutLookback          [전략E] 신고가 돌파 판정용 직전 최고가 산정 기간(거래일). 오늘 제외 이 기간의 고가 최댓값 초과면 돌파
  * @param breakoutMinScore          [전략E] 진입 최소 추천 점수(건전성)
  * @param breakoutBufferPct         [전략E] 돌파 버퍼(%) — 현재가 ≥ 직전최고가 ×(1+이값/100)일 때만 진입(0=신고가 갱신 즉시, 노이즈 억제용 여유)
@@ -57,6 +60,7 @@ public record SignalProperties(
         double indexRelativeMaxDrop,
         double indexRelativeMinScore,
         boolean indexRelativeRequireRebound,
+        boolean indexRelativeRequireRisingFlow,
         int breakoutLookback,
         double breakoutMinScore,
         double breakoutBufferPct,

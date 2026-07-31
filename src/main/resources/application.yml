@@ -135,6 +135,7 @@ stockadvisor:
     index-relative-max-drop: ${SIGNAL_D_MAX_DROP:12.0}     # [D] 당일 절대 하락 -이값% 초과 폭락은 제외(정리매매·악재 회피)
     index-relative-min-score: ${SIGNAL_D_MIN_SCORE:40.0}   # [D] 진입 최소 추천 점수(건전성)
     index-relative-require-rebound: ${SIGNAL_D_REQUIRE_REBOUND:true} # [D] 절대하락(≤-minDrop) 후보면 분봉 반등확인 요구(떨어지는 칼날 회피)
+    index-relative-require-rising-flow: ${SIGNAL_D_REQUIRE_RISING_FLOW:false} # [D] 진입시점 지수 흐름(mom30)<0(흐름↓)이면 보류(FLOW_DOWN). flow-analysis 흐름↑+0.22 vs 흐름↓-0.82 근거
     # [E] 신고가 돌파 모멘텀 — 직전 N일 최고가를 거래량 급증과 함께 돌파하면 롱(강세 추격, 공격적). A~D의 역추세 편향과 반대 방향으로 다양성 부여
     breakout-lookback: ${SIGNAL_BREAKOUT_LOOKBACK:20}      # [E] 직전 20거래일 최고가(오늘 제외) 초과면 돌파
     breakout-min-score: ${SIGNAL_BREAKOUT_MIN_SCORE:40.0}  # [E] 진입 최소 추천 점수(건전성)

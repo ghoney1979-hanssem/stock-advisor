@@ -15,16 +15,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class IndexRelativeStrategyTest {
 
-    private final IndexRelativeStrategy strategy = new IndexRelativeStrategy(props());
+    private final IndexRelativeStrategy strategy = new IndexRelativeStrategy(props(false));
+    private final IndexRelativeStrategy flowStrategy = new IndexRelativeStrategy(props(true));
 
-    /** D 관련 값만 의미, 나머지는 임의 유효값. */
-    private static SignalProperties props() {
+    /** D 관련 값만 의미, 나머지는 임의 유효값. requireRisingFlow만 변주. */
+    private static SignalProperties props(boolean requireRisingFlow) {
         return new SignalProperties(
                 20, 2.0, 1.5, 40.0, Duration.ofHours(1),
                 5, 0.3, 1.5,
                 0.0, 1.0, 8.0,           // volumeLeading: min=0, max=1, inverse-max=8
                 3.0, 12.0, 40.0, true,   // meanReversion*: minDrop=3
-                2.0, 12.0, 40.0, true,   // indexRelative: minGap=2, maxDrop=12, minScore=40, requireRebound
+                2.0, 12.0, 40.0, true, requireRisingFlow, // indexRelative: minGap=2, maxDrop=12, minScore=40, requireRebound, requireRisingFlow
                 20, 40.0, 0.0,           // breakout: lookback=20, minScore=40, buffer=0
                 1000, "09:00", "15:20", true);
     }
@@ -36,6 +37,11 @@ class IndexRelativeStrategyTest {
 
     private StrategyContext ctx(double changeRate, Double indexChange, boolean rebound, double score) {
         return new StrategyContext("005930", signal(changeRate, rebound), score, RecommendationType.HOLD, indexChange, false, false);
+    }
+
+    /** indexMom30(흐름) 실은 컨텍스트 — 흐름 필터 검증용. */
+    private StrategyContext ctxFlow(double changeRate, Double indexChange, double score, Double indexMom30) {
+        return new StrategyContext("005930", signal(changeRate, false), score, RecommendationType.HOLD, indexChange, false, false, null, indexMom30);
     }
 
     @Test
@@ -77,5 +83,29 @@ class IndexRelativeStrategyTest {
     void 점수미달이면_SCORE() {
         // 잔차 충족·반등불요(절대상승)인데 점수 30 < 40
         assertThat(strategy.rejectReason(ctx(0.5, 3.0, false, 30))).isEqualTo("SCORE");
+    }
+
+    @Test
+    void 흐름필터_켜짐_흐름하락이면_FLOW_DOWN() {
+        // 지수 +3.0%, 종목 +0.5% → 잔차 -2.5(진입 조건 통과)인데, 흐름 mom30 = -0.5(흐름↓) → 보류
+        assertThat(flowStrategy.rejectReason(ctxFlow(0.5, 3.0, 50, -0.5))).isEqualTo("FLOW_DOWN");
+    }
+
+    @Test
+    void 흐름필터_켜짐_흐름상승이면_진입() {
+        // 동일 후보인데 흐름 mom30 = +0.5(흐름↑) → 진입
+        assertThat(flowStrategy.rejectReason(ctxFlow(0.5, 3.0, 50, 0.5))).isNull();
+    }
+
+    @Test
+    void 흐름필터_켜짐_흐름미산출이면_미적용_진입() {
+        // 흐름 mom30 = null(개장 ~30분·조회실패) → degrade open, 흐름 무관 진입
+        assertThat(flowStrategy.rejectReason(ctxFlow(0.5, 3.0, 50, null))).isNull();
+    }
+
+    @Test
+    void 흐름필터_꺼짐이_기본_흐름하락이어도_진입() {
+        // requireRisingFlow=false(기본)면 흐름↓여도 FLOW_DOWN 미적용(현행 유지)
+        assertThat(strategy.rejectReason(ctxFlow(0.5, 3.0, 50, -0.5))).isNull();
     }
 }

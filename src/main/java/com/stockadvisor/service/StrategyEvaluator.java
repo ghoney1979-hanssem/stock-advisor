@@ -351,7 +351,9 @@ public class StrategyEvaluator {
         }
 
         // 전략 판단 컨텍스트 (지수 등락률 포함 — 전략D 지수상대 잔차 계산용)
-        StrategyContext ctx = new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend);
+        // 지수 장중 흐름(mom30)도 실어 D "흐름↓ 스킵" 필터에 사용(위에서 이미 조회한 flow 재사용, 추가 KIS 0).
+        Double indexMom30 = (flow != null && flow.available()) ? flow.mom30Pct() : null;
+        StrategyContext ctx = new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, indexMom30);
 
         int alerts = 0;
         // 뉴스·체결강도 feature(진입 시 태깅) — 종목당 각 1콜 lazy(첫 진입 때만 조회, 대조군은 부하상 미태깅)
