@@ -112,6 +112,8 @@ stockadvisor:
     rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}
     # [전략 F] 이동평균 추세추종 (거래량 무관, 섀도우). MA20 상향 돌파(이벤트)일 때만 진입 — 대조군 미추적(부하 억제).
     ma-trend-enabled: ${SIGNAL_MA_TREND_ENABLED:true}
+    ma-trend-require-fresh: ${SIGNAL_MA_TREND_REQUIRE_FRESH:false}        # [F 보완①] 분봉 신선도 확인(죽은 돌파 회피). 기본 off=현행 무변경
+    ma-trend-breakout-buffer-pct: ${SIGNAL_MA_TREND_BREAKOUT_BUFFER_PCT:0.0} # [F 보완②] MA20 대비 이 %p 이상 위 돌파만(whipsaw 제외). 0=off
     # [전략 G] RSI 과매도 반등 (거래량 무관, 섀도우). RSI(14) 30 상향 돌파(이벤트)일 때만 진입 — 대조군 미추적.
     rsi-reversal-enabled: ${SIGNAL_RSI_REVERSAL_ENABLED:true}
     # [전략 H] 변동성 수축 돌파 (거래량 무관, 섀도우). NR7 수축 후 전일고가 돌파(이벤트)일 때만 진입 — 대조군 미추적.

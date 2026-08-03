@@ -17,6 +17,9 @@ package com.stockadvisor.service;
  * @param atrPct          진입 종목 ATR% (변동성, 일봉 TR 평균/현재가×100). 셋업 분석용. 데이터 없으면 0.
  * @param distFromHighPct 직전 고가(priorHigh) 대비 현재가 거리%((close−priorHigh)/priorHigh×100, 보통 ≤0). 데이터 없으면 0.
  * @param ret5dPct        최근 5거래일 수익률%((close−5일전종가)/5일전종가×100). 단기 모멘텀 상태. 데이터 없으면 0.
+ * @param maBreakoutFresh [F] MA돌파 후보의 분봉 신선도+활성도 충족(maCrossUp 후보일 때만 계산, 아니면 false).
+ *                        F 흐름확인 필터(SIGNAL_MA_TREND_REQUIRE_FRESH)가 "죽은 돌파" 회피에 사용.
+ * @param maDistPct       [F] 현재가의 MA20 대비 이격%((close−ma20)/ma20×100). 돌파 강도(버퍼) 판정용. maCrossUp이면 보통 소폭 +. 데이터 없으면 0.
  */
 public record SignalResult(
         double volumeRatio,
@@ -33,13 +36,24 @@ public record SignalResult(
         double atrPct,
         double distFromHighPct,
         double ret5dPct,
-        double gapPct           // 개장갭%((오늘시가−전일종가)/전일종가×100). 개장갭 전략(K)용. 데이터 없으면 0.
+        double gapPct,          // 개장갭%((오늘시가−전일종가)/전일종가×100). 개장갭 전략(K)용. 데이터 없으면 0.
+        boolean maBreakoutFresh,
+        double maDistPct
 ) {
-    /** 기존 11-인자 호환 — 셋업/갭 feature 0 기본. 테스트·구 호출 무변경 유지용. */
+    /** 기존 11-인자 호환 — 셋업/갭/MA feature 0 기본. 테스트·구 호출 무변경 유지용. */
     public SignalResult(double volumeRatio, double changeRate, long closePrice, long todayVolume,
                         boolean volumeSpike, boolean freshActive, boolean reboundActive, long priorHigh,
                         boolean maCrossUp, boolean rsiCrossUp, boolean squeezeBreakout) {
         this(volumeRatio, changeRate, closePrice, todayVolume, volumeSpike, freshActive, reboundActive,
-                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, 0, 0, 0, 0);
+                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, 0, 0, 0, 0, false, 0);
+    }
+
+    /** 기존 15-인자 호환(gapPct까지) — MA feature 0 기본. 테스트·구 호출 무변경 유지용. */
+    public SignalResult(double volumeRatio, double changeRate, long closePrice, long todayVolume,
+                        boolean volumeSpike, boolean freshActive, boolean reboundActive, long priorHigh,
+                        boolean maCrossUp, boolean rsiCrossUp, boolean squeezeBreakout,
+                        double atrPct, double distFromHighPct, double ret5dPct, double gapPct) {
+        this(volumeRatio, changeRate, closePrice, todayVolume, volumeSpike, freshActive, reboundActive,
+                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, atrPct, distFromHighPct, ret5dPct, gapPct, false, 0);
     }
 }

@@ -83,6 +83,9 @@ public class MarketSignalService {
         java.util.List<Long> priorCloses = new java.util.ArrayList<>();
         for (int i = 1; i < rows.size(); i++) priorCloses.add(parseLong(rows.get(i).closePrice()));
         boolean maCrossUp = computeMaCrossUp(priorCloses, closePrice, MA_TREND_PERIOD);
+        // [F] MA20 대비 이격%((현재가−MA)/MA×100) — 돌파 강도(버퍼) 판정용. 같은 일봉 재활용(추가 호출 0).
+        double ma20 = computeMa(priorCloses, MA_TREND_PERIOD);
+        double maDistPct = (ma20 > 0 && closePrice > 0) ? (closePrice - ma20) / ma20 * 100 : 0;
         // [G] RSI(14) 과매도 상향 돌파 이벤트 — 같은 일봉 재활용(추가 호출 0).
         boolean rsiCrossUp = computeRsiCrossUp(priorCloses, closePrice, RSI_PERIOD, RSI_OVERSOLD);
         // [H] NR7 변동성 수축 돌파 — 같은 일봉 재활용. 전일 고가/저가로 일중변동폭 계산.
@@ -104,12 +107,13 @@ public class MarketSignalService {
         boolean uptrend = changeRate >= properties.minChangeRate();
         boolean reboundCandidate = changeRate <= -properties.meanReversionMinDrop();   // 당일 하락(C 후보)
 
-        // 분봉 신선도/활성도는 모멘텀(A: 상승) 또는 역추세(C: 하락) 후보일 때만 1회 계산(분봉 호출 절감).
-        // 횡보(B)는 분봉확인을 쓰지 않으므로 계산도 생략.
-        boolean freshAndActive = volumeSpike && (uptrend || reboundCandidate)
-                && isFreshAndActive(stockCode, todayVolume, sessionFraction);
-        boolean freshActive = freshAndActive && uptrend;          // [A] 상승 + 분봉 신선·활발
-        boolean reboundActive = freshAndActive && reboundCandidate; // [C] 하락이어도 분봉은 반등 중
+        // 분봉 신선도/활성도는 모멘텀(A: 상승)·역추세(C: 하락)·MA돌파(F) 후보일 때만 1회 계산(분봉 호출 절감).
+        // 횡보(B)는 분봉확인을 쓰지 않으므로 계산도 생략. F는 볼륨무관 트리거라 volumeSpike 없이도 돌파면 계산.
+        boolean needFresh = (volumeSpike && (uptrend || reboundCandidate)) || maCrossUp;
+        boolean freshAndActive = needFresh && isFreshAndActive(stockCode, todayVolume, sessionFraction);
+        boolean freshActive = freshAndActive && volumeSpike && uptrend;          // [A] 상승 + 분봉 신선·활발
+        boolean reboundActive = freshAndActive && volumeSpike && reboundCandidate; // [C] 하락이어도 분봉은 반등 중
+        boolean maBreakoutFresh = freshAndActive && maCrossUp;                    // [F] MA돌파 + 분봉 신선·활발(죽은 돌파 회피)
 
         log.debug("신호지표 stockCode={} 거래량배수(보정)={} 등락률={}% 급증={} 신선활발(A)={} 반등(C)={}",
                 stockCode, String.format("%.2f", volumeRatio), changeRate, volumeSpike, freshActive, reboundActive);
@@ -130,7 +134,7 @@ public class MarketSignalService {
 
         return Optional.of(new SignalResult(volumeRatio, changeRate, closePrice, todayVolume,
                 volumeSpike, freshActive, reboundActive, priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout,
-                atrPct, distFromHighPct, ret5dPct, gapPct));
+                atrPct, distFromHighPct, ret5dPct, gapPct, maBreakoutFresh, maDistPct));
     }
 
     /**
@@ -186,6 +190,18 @@ public class MarketSignalService {
      * [F] MA{@code period} 상향 돌파 이벤트 — 직전 확정종가 ≤ MA 이고 현재가 > MA면 true("오늘 처음 위로 뚫음").
      * priorCloses는 오늘 제외 최근 확정종가(최신순, [0]=전일). 데이터 부족/무효면 false. 순수 함수(단위테스트 용이).
      */
+    /** 직전 종가들의 단순이동평균(SMA). 표본 부족·비정상값이면 0. */
+    static double computeMa(java.util.List<Long> priorCloses, int period) {
+        if (priorCloses.size() < period) return 0;
+        long sum = 0;
+        for (int i = 0; i < period; i++) {
+            long c = priorCloses.get(i);
+            if (c <= 0) return 0;
+            sum += c;
+        }
+        return (double) sum / period;
+    }
+
     static boolean computeMaCrossUp(java.util.List<Long> priorCloses, long currentPrice, int period) {
         if (currentPrice <= 0 || priorCloses.size() < period) return false;
         long sum = 0;

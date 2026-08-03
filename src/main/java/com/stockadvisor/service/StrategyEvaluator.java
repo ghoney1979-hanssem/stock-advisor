@@ -419,10 +419,13 @@ public class StrategyEvaluator {
             // REBOUND_DAY 차단분은 전략의 대조군 설정(tracksControl/집중)과 무관하게 기록(2026-07-23) —
             // H/F 등 control-off 전략이 가드에 막히면 흔적이 없어 "가드가 막은 게 옳았나"를 검증할 수 없다.
             // 반등일 하루 × TREND_FAMILY 한정이라 추적 부담 제한적. 가드 유지/완화 판단의 유일한 데이터 소스.
+            // NOT_FRESH/WEAK_BREAKOUT(F 보완 필터)도 tracksControl 무관 강제 기록 — F는 control-off라
+            // 흔적이 없으면 "필터가 막은 게 옳았나"(ENTERED vs 필터탈락 net)를 forward 검증할 수 없다(REBOUND_DAY와 동일 취지).
             boolean trackControl = properties.controlTracking()
                     && ((strategy.tracksControl() && needsControl(strategy.name()))
                         || "REBOUND_DAY".equals(reject) || "EXEC_OVERHEAT".equals(reject)
-                        || "RET5D_OVERHEAT".equals(reject));
+                        || "RET5D_OVERHEAT".equals(reject)
+                        || "NOT_FRESH".equals(reject) || "WEAK_BREAKOUT".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }
