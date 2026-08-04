@@ -196,6 +196,12 @@ public class PositionExitService {
                 if (pos.getStatus() == OrderStatus.SUBMITTED) {
                     continue;   // LIVE 미체결(아직 매입 안 됨) — 청산 대상 아님
                 }
+                // 아직 부분체결 중인 매수는 청산 보류 — filledQty가 움직이는 값이라(예: 13→14) 그 시점 수량으로
+                // 매도하면 뒤늦게 체결된 잔량이 고아가 됨(2026-08-03 골프존 215000: 14체결인데 13매도 → 1주 고아).
+                // OrderCancelService가 3분 내 stale 부분매수를 FILLED(부분수량)로 정산하므로, 확정된 수량으로 매도.
+                if (pos.getStatus() == OrderStatus.PARTIALLY_FILLED) {
+                    continue;
+                }
                 // 가격경로 추적(트레일링/추세전환)을 위해 매 점검마다 현재가 조회.
                 long price = kisApiClient.fetchLatestClose(pos.getStockCode());
                 if (price <= 0) {

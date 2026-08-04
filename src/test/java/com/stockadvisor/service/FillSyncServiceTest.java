@@ -14,6 +14,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -84,10 +85,11 @@ class FillSyncServiceTest {
         when(sell.getSide()).thenReturn(OrderSide.SELL);
         when(sell.getIdempotencyKey()).thenReturn("SELL:42");
         when(sell.getFilledQty()).thenReturn(10L);
-        // 원 매수 포지션
+        // 원 매수 포지션 (10주 보유 = 매도 10주와 일치 → 전량 청산확정)
         Order buy = mock(Order.class);
         when(buy.isClosed()).thenReturn(false);
         when(buy.getRequestedPrice()).thenReturn(9_000L);
+        when(buy.getFilledQty()).thenReturn(10L);
         when(buy.getStrategy()).thenReturn("MEAN_REVERSION_C");
         when(buy.getStockCode()).thenReturn("005930");
 
@@ -100,6 +102,38 @@ class FillSyncServiceTest {
 
         verify(sell).markFilled(10, 9_500);
         verify(buy).closePosition(4_802L);   // (9500-9000)×10 − 비용 198(90000×0.22%)
+    }
+
+    @Test
+    void 매도수량이_매수보유보다_부족하면_청산확정_대신_부분정산() {
+        // 골프존 케이스: 매수 14주 보유인데 매도 13주만 체결 → closePosition(고아 1주) 대신 applyPartialSell(잔여 1주 미청산 유지)
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order sell = mock(Order.class);
+        when(sell.getBrokerOrderNo()).thenReturn("S1");
+        when(sell.getRequestedQty()).thenReturn(13L);
+        when(sell.getStrategy()).thenReturn("INDEX_RELATIVE_D");
+        when(sell.getStockCode()).thenReturn("215000");
+        when(sell.getSide()).thenReturn(OrderSide.SELL);
+        when(sell.getIdempotencyKey()).thenReturn("SELL:842");
+        when(sell.getFilledQty()).thenReturn(13L);
+        Order buy = mock(Order.class);
+        when(buy.isClosed()).thenReturn(false);
+        when(buy.getRequestedPrice()).thenReturn(37_050L);
+        when(buy.getFilledQty()).thenReturn(14L);   // 매수는 14주 전량 체결
+        when(buy.getStrategy()).thenReturn("INDEX_RELATIVE_D");
+        when(buy.getStockCode()).thenReturn("215000");
+
+        when(repo.findByModeAndStatusIn(any(), any())).thenReturn(List.of(sell));
+        when(kis.fetchTodayFills()).thenReturn(List.of(new FillInfo("S1", 13, 13, 0, 37_050)));
+        when(repo.findById(842L)).thenReturn(java.util.Optional.of(buy));
+        FillSyncService svc = new FillSyncService(repo, kis, policy, mock(OrderService.class));
+
+        svc.syncFills();
+
+        // 청산확정(closePosition) 대신 부분정산(applyPartialSell) — 잔여 1주 미청산 유지(고아 방지)
+        verify(buy, never()).closePosition(anyLong());
+        verify(buy).applyPartialSell(eq(13L), anyLong());
     }
 
     @Test

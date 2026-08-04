@@ -103,17 +103,28 @@ public class FillSyncService {
             if (buy.isClosed()) return;
             long buyPrice = (buy.getAvgFillPrice() != null && buy.getAvgFillPrice() > 0)
                     ? buy.getAvgFillPrice() : buy.getRequestedPrice();
+            long soldQty = sell.getFilledQty();
             // 실현손익 = 체결가 차익 − 왕복 매매비용(수수료+거래세, 매수금액 기준) → 실계좌 실현손익과 정합(net).
-            long cost = Math.round(buyPrice * sell.getFilledQty() * roundTripCostPct / 100.0);
-            long pnl = (sellAvgPrice - buyPrice) * sell.getFilledQty() - cost;
+            long cost = Math.round(buyPrice * soldQty * roundTripCostPct / 100.0);
+            long pnl = (sellAvgPrice - buyPrice) * soldQty - cost;
+            // 매도수량이 매수 보유수량보다 부족하면(부분매도) 청산확정 대신 부분정산 — 잔여를 고아로 만들지 않는다.
+            // (2026-08-03 골프존 215000: 매수 14체결인데 매도 13 → closePosition이 1주 고아로 남기고 미청산 리스트서 사라짐.)
+            long buyHeld = (buy.getFilledQty() != null && buy.getFilledQty() > 0) ? buy.getFilledQty() : buy.getRequestedQty();
+            if (soldQty < buyHeld) {
+                buy.applyPartialSell(soldQty, pnl);   // 잔여수량(buyHeld−soldQty)로 미청산 유지 → 리스트 노출 + reconcile 대상
+                orderRepository.save(buy);
+                log.warn("[부분청산] [{}] {} 매도 {}주 < 매수보유 {}주 — 잔여 {}주 미청산 유지(고아 방지). 손익누적 {}원",
+                        buy.getStrategy(), buy.getStockCode(), soldQty, buyHeld, buyHeld - soldQty, pnl);
+                return;
+            }
             buy.closePosition(pnl);
             orderRepository.save(buy);
             log.info("[청산확정] [{}] {} 매수 {}원 → 매도 {}원 ×{}주 손익 {}원",
-                    buy.getStrategy(), buy.getStockCode(), buyPrice, sellAvgPrice, sell.getFilledQty(), pnl);
+                    buy.getStrategy(), buy.getStockCode(), buyPrice, sellAvgPrice, soldQty, pnl);
             double pct = buyPrice > 0 ? (sellAvgPrice - buyPrice) * 100.0 / buyPrice : 0;
             orderService.notifyEvent(String.format("💰 **청산 확정 · %s** %s\n• 전략: %s · 매수 %,d → 매도 %,d ×%,d주\n• 손익 **%+,d원 (%+.2f%%)**",
                     pnl >= 0 ? "✅ 익절" : "🛑 손절", orderService.stockDisplay(buy.getStockCode()),
-                    orderService.label(buy.getStrategy()), buyPrice, sellAvgPrice, sell.getFilledQty(), pnl, pct));
+                    orderService.label(buy.getStrategy()), buyPrice, sellAvgPrice, soldQty, pnl, pct));
         });
     }
 
