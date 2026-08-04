@@ -635,4 +635,65 @@ class PositionExitServiceTest {
         svc.closeDuePositions();   // 서킷 ON 전이 발생 상황
         verify(orderService, never()).notifyEvent(org.mockito.ArgumentMatchers.anyString());
     }
+
+    // ── 조기청산 방지 ② 방식청산 최소 보유시간 ──
+    @Test
+    void 방식청산_최소보유시간_안엔_신호기반청산_보류() {
+        // D whipsaw 대응: 진입 10분(min-hold 15분 안) → VWAP 아래여도 신호청산 보류(숨 쉴 시간).
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(10);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(69_000L);                       // VWAP(70000) 아래
+        when(kis.fetchVwapVolume("005930")).thenReturn(new KisApiClient.VwapVol(70_000.0, 1000));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), riskGuard(false), exitMethod(ExitMethodType.VWAP, 0), "", stopProvider());
+        svc.setMethodMinHoldMinutes(15);
+
+        assertThat(svc.closeDuePositions()).isEqualTo(0);
+        verify(orderService, never()).submit(any());
+    }
+
+    @Test
+    void 방식청산_최소보유시간_경과후엔_신호기반청산_발동() {
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(20);                                                    // min-hold 15 경과
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(69_000L);
+        when(kis.fetchVwapVolume("005930")).thenReturn(new KisApiClient.VwapVol(70_000.0, 1000));
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), riskGuard(false), exitMethod(ExitMethodType.VWAP, 0), "", stopProvider());
+        svc.setMethodMinHoldMinutes(15);
+
+        assertThat(svc.closeDuePositions()).isEqualTo(1);
+        verify(orderService).submit(any());   // VWAP이탈 청산
+    }
+
+    // ── 조기청산 방지 ③ VWAP 이탈 히스테리시스 버퍼 ──
+    @Test
+    void VWAP버퍼_안이면_보유_밖이면_청산() {
+        // buffer 0.5% → 임계 70000×0.995=69650. 69800(버퍼 안)은 보유, 69600(하향돌파)은 청산.
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(30);   // min-hold 무관
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchVwapVolume("005930")).thenReturn(new KisApiClient.VwapVol(70_000.0, 1000));
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), riskGuard(false), exitMethod(ExitMethodType.VWAP, 0), "", stopProvider());
+        svc.setVwapBufferPct(0.5);
+
+        when(kis.fetchLatestClose("005930")).thenReturn(69_800L);   // 버퍼 안(69650~70000) → 보유
+        assertThat(svc.closeDuePositions()).isEqualTo(0);
+        verify(orderService, never()).submit(any());
+
+        when(kis.fetchLatestClose("005930")).thenReturn(69_600L);   // 버퍼 하향돌파(<69650) → 청산
+        assertThat(svc.closeDuePositions()).isEqualTo(1);
+        verify(orderService).submit(any());
+    }
 }

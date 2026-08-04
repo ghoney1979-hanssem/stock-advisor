@@ -53,6 +53,14 @@ public class PositionExitService {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.limit-up-lock-pct:29.0}")
     private double limitUpLockPct;
 
+    // [조기청산 방지 ②] 진입 후 이 분(minutes) 안에는 신호기반(VWAP/트레일링/추세전환/흐름반전) 청산 금지 — 포지션이 숨 쉴 시간.
+    // TIME(시간경과)·손절·서킷·상한가·장마감은 이 가드 밖이라 무관. 0=비활성(종전). D whipsaw(진입 1~7분 저가매도) 대응.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.adaptive-exit-method.min-hold-minutes:0}")
+    private int methodMinHoldMinutes;
+    // [조기청산 방지 ③] VWAP 이탈 히스테리시스 — 단일 터치가 아니라 VWAP×(1−이값/100) 하향돌파 시에만 청산(라이브 1분 과민 완화). 0=종전(터치).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.adaptive-exit-method.vwap-buffer-pct:0.0}")
+    private double vwapBufferPct;
+
     // 왕복 매매비용(수수료+거래세, 매수금액 기준 %) — DRY_RUN 즉시청산 손익도 LIVE(FillSync)와 동일하게 net 기록.
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.cost.round-trip-pct:0.22}")
     private double roundTripCostPct = 0.22;   // 테스트(생성자 생성)는 초기값 사용
@@ -97,6 +105,8 @@ public class PositionExitService {
     private MarketRegimeService marketRegimeService;   // 모멘텀 반등 판정(미주입/미가용 시 레벨 판정만 — degrade)
     void setMarketRegimeService(MarketRegimeService s) { this.marketRegimeService = s; }   // 테스트용
     void setLimitUpLockPct(double p) { this.limitUpLockPct = p; }     // 테스트용
+    void setMethodMinHoldMinutes(int m) { this.methodMinHoldMinutes = m; }   // 테스트용
+    void setVwapBufferPct(double p) { this.vwapBufferPct = p; }              // 테스트용
 
     private final java.util.Set<String> swingStrategies;   // 오버나잇 스윙 — 장마감 강제청산 대신 익일 종가 청산
     // 서킷브레이커 전이 알림용(edge-trigger) — 시장별(KOSPI/KOSDAQ) 발동/해제 시 1회만 통지
@@ -337,6 +347,12 @@ public class PositionExitService {
      */
     private String methodExitReason(Order pos, long price, long heldMin, Long prevPrice) {
         ExitStrategyService.BestExit m = exitMethodProvider.methodFor(pos.getStrategy());
+        // [조기청산 방지 ②] 진입 후 min-hold 분 안에는 신호기반 청산 보류(TIME 제외) — 역추세(D)가 진입 직후
+        // VWAP 아래에서 즉시 컷되는 whipsaw 방지. 손절·서킷·상한가·장마감은 이 함수 밖(상위 안전 오버라이드)이라 무관.
+        if (methodMinHoldMinutes > 0 && m.type() != com.stockadvisor.domain.ExitMethodType.TIME
+                && heldMin < methodMinHoldMinutes) {
+            return null;
+        }
         switch (m.type()) {
             case TRAILING -> {
                 long peak = pos.getPeakPrice() == null ? price : pos.getPeakPrice();
@@ -346,8 +362,11 @@ public class PositionExitService {
             }
             case VWAP -> {
                 Double vwap = safeVwap(pos.getStockCode());
-                if (vwap != null && vwap > 0 && price < vwap) {
-                    return String.format("VWAP이탈(%.0f)", vwap);
+                // [조기청산 방지 ③] 단일 터치가 아니라 VWAP×(1−buffer%) 하향돌파 시에만(라이브 1분 과민 완화). buffer 0=종전(터치).
+                if (vwap != null && vwap > 0 && price < vwap * (1.0 - vwapBufferPct / 100.0)) {
+                    return vwapBufferPct > 0
+                            ? String.format("VWAP이탈(%.0f, -%.1f%%)", vwap, vwapBufferPct)
+                            : String.format("VWAP이탈(%.0f)", vwap);
                 }
             }
             case FLOW_REVERSAL -> {

@@ -283,6 +283,8 @@ stockadvisor:
       min-samples: ${TRADING_ADAPTIVE_EXIT_METHOD_MIN_SAMPLES:30}  # 방식 채택 최소 표본(미만이면 TIME)
       refresh-minutes: ${TRADING_ADAPTIVE_EXIT_METHOD_REFRESH_MINUTES:30}  # 추천 재계산 캐시 주기(분)
       trend-confirm: ${TRADING_ADAPTIVE_EXIT_METHOD_TREND_CONFIRM:3}  # 추세전환 청산 확인 횟수(N회 연속 하락). 라이브≈N분, 시뮬≈5N분. 1=첫 하락 즉시(종전)
+      min-hold-minutes: ${TRADING_ADAPTIVE_EXIT_METHOD_MIN_HOLD_MIN:0}  # [조기청산 방지②] 진입 후 이 분 안엔 신호기반 청산 금지(TIME/손절/서킷 제외). 0=비활성. D whipsaw 대응
+      vwap-buffer-pct: ${TRADING_ADAPTIVE_EXIT_METHOD_VWAP_BUFFER_PCT:0.0}  # [조기청산 방지③] VWAP×(1−이값%) 하향돌파 시에만 청산(라이브 과민 완화). 0=종전(터치)
 
     # 적응형 손절 — 고정 catastrophic-stop-pct 대신 전략별 승자 MAE(worst10)로 손절선 자동 설정.
     # fail-closed: 승자 표본 < min-samples면 고정 −7% 유지. 채택값은 [min,max] 클램프. (MaeAnalysisService 기반)
