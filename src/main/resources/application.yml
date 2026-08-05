@@ -259,6 +259,7 @@ stockadvisor:
 
     # 매도 주문 컷오프 — KRX 정규장 접수 마감. 이후엔 청산 제출 보류(다음 거래일 개장 후 처리). 2026-07-16 안트로젠 장후 거부 스팸 대응.
     exit-order-cutoff: ${TRADING_EXIT_ORDER_CUTOFF:15:30}
+    exit-session-close-aggressive-pct: ${TRADING_EXIT_SESSION_CLOSE_AGGRESSIVE_PCT:0.0}  # 마감청산(장마감/스윙) 매도를 현재가 −이값% marketable 지정가로 → 즉시 체결(미체결·오버나잇 방지). 0=현재가 지정가
 
     # 변동성기반(ATR) 포지션 사이징 (레이어 3.1). 변동성 큰 종목 적게·작은 종목 많이(거래당 리스크 균등화).
     # 수량 = min( 순자산×risk-per-trade-pct% / (atr-mult×ATR), 순자산×max-order-pct% / 가격 ). ATR 미산출 시 고정 사이징.

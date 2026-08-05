@@ -60,6 +60,11 @@ public class PositionExitService {
     // [조기청산 방지 ③] VWAP 이탈 히스테리시스 — 단일 터치가 아니라 VWAP×(1−이값/100) 하향돌파 시에만 청산(라이브 1분 과민 완화). 0=종전(터치).
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.adaptive-exit-method.vwap-buffer-pct:0.0}")
     private double vwapBufferPct;
+    // [마감청산 공격성 ②] 장마감 강제청산(스윙 익일종가 포함) 매도를 현재가 −이값% 지정가(marketable)로 접수해 즉시 체결
+    // → 마감 미체결 취소 스팸·오버나잇 방지(2026-08-05 D 오버나잇 6건 계기). 실체결은 ≈매수호가라 손익 왜곡 미미(손익계산은 현재가 유지).
+    // 마감청산 사유(장마감/스윙청산)에만 적용 — 손절·서킷·적응형 청산은 무관. 0=비활성(종전, 현재가 지정가).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.exit-session-close-aggressive-pct:0.0}")
+    private double sessionCloseAggressivePct;
 
     // 왕복 매매비용(수수료+거래세, 매수금액 기준 %) — DRY_RUN 즉시청산 손익도 LIVE(FillSync)와 동일하게 net 기록.
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.cost.round-trip-pct:0.22}")
@@ -107,6 +112,7 @@ public class PositionExitService {
     void setLimitUpLockPct(double p) { this.limitUpLockPct = p; }     // 테스트용
     void setMethodMinHoldMinutes(int m) { this.methodMinHoldMinutes = m; }   // 테스트용
     void setVwapBufferPct(double p) { this.vwapBufferPct = p; }              // 테스트용
+    void setSessionCloseAggressivePct(double p) { this.sessionCloseAggressivePct = p; }   // 테스트용
 
     private final java.util.Set<String> swingStrategies;   // 오버나잇 스윙 — 장마감 강제청산 대신 익일 종가 청산
     // 서킷브레이커 전이 알림용(edge-trigger) — 시장별(KOSPI/KOSDAQ) 발동/해제 시 1회만 통지
@@ -416,6 +422,11 @@ public class PositionExitService {
         }
     }
 
+    /** 마감 강제청산 사유인지(장마감/스윙 익일종가) — marketable 지정가 대상. 손절·서킷·적응형은 제외. */
+    private static boolean isSessionCloseReason(String reason) {
+        return reason != null && (reason.startsWith("장마감") || reason.startsWith("스윙청산"));
+    }
+
     /** 실제 매입가 — 체결조회로 채워진 값 우선(없거나 0이면 주문값=DRY_RUN). */
     private long effectiveBuyPrice(Order pos) {
         return (pos.getAvgFillPrice() != null && pos.getAvgFillPrice() > 0) ? pos.getAvgFillPrice() : pos.getRequestedPrice();
@@ -428,9 +439,15 @@ public class PositionExitService {
         if (qty <= 0) {
             return false;
         }
+        // [마감청산 공격성 ②] 마감 강제청산(장마감/스윙 익일종가)은 현재가 −pct% marketable 지정가로 접수해 즉시 체결
+        // (마감 미체결→취소→오버나잇 방지). 그 외(손절·서킷·적응형)는 현재가 지정가 유지. OrderService가 tick 스냅(매도 내림).
+        long limitPrice = price;
+        if (sessionCloseAggressivePct > 0 && isSessionCloseReason(reason)) {
+            limitPrice = Math.max(1, (long) Math.floor(price * (1 - sessionCloseAggressivePct / 100.0)));
+        }
         OrderService.OrderResult r = orderService.submit(new OrderService.OrderCommand(
                 pos.getStrategy(), pos.getStockCode(), OrderSide.SELL,
-                qty, price, 0, "SELL:" + pos.getId(), pos.getSector(), null, null,   // 매도는 보유시간·시장 무관(서킷 면제)
+                qty, limitPrice, 0, "SELL:" + pos.getId(), pos.getSector(), null, null,   // 매도는 보유시간·시장 무관(서킷 면제)
                 reason));   // 청산 사유 — 매도 접수 알림에 표시
         if (!r.isAccepted()) {
             if (isHolidayRejection(r.message())) {

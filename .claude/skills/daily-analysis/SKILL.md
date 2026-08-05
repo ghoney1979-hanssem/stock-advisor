@@ -1,13 +1,13 @@
 ---
 name: daily-analysis
-description: 주식 자동매매 시스템의 일별 성과·전략 진단 종합 분석. 모든 집계 데이터(게이트·대조군·흐름·MAE·breadth·집행품질)를 수집해 전략 옥석을 가리고, 시스템 보완 조치와 수익률 개선(전략 수정·임계치 조정)을 제안한다.
+description: 주식 자동매매 시스템의 일별 성과·전략 진단 종합 분석. 모든 집계 데이터(게이트·대조군·흐름·MAE·breadth·집행품질)를 수집해 전략 옥석을 가리고, 시스템 보완 조치 + 전략별 보정방안(수집 데이터 기반 진입/청산/손절/사이징 튜닝) + 데이터 공백을 메울 추가 지표까지 제안한다.
 user-invocable: true
 ---
 
 # daily-analysis
 
 장 마감 후(또는 요청 시점) 시스템의 **모든 집계 데이터**를 수집해 종합 분석 리포트를 만든다.
-산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ③ 시스템 보완 조치사항 ④ 수익률 개선 제안(전략 수정·임계치 조정) 4부.
+산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ③ 시스템 보완 조치 ④ 전역 수익률 개선 ⑤ **전략별 보정방안(수집 데이터 기반 진입·청산·손절·사이징 튜닝)** ⑥ **데이터 공백 & 추가 지표 제안** 6부.
 
 ## 환경 (고정 사실 — 재탐색 불필요)
 
@@ -25,6 +25,7 @@ SSH 한 번에 여러 curl을 묶어 호출(왕복 절감). 수집 대상 GET �
 | 게이트/국면/리스크 | `strategy-gate`, `market-regime`, `risk-status` |
 | 승자/패자·대조군 | `outcome-analysis?horizon=close`, `control-analysis?horizon=close` (스윙 C는 `nextClose`도) |
 | 집행·청산 | `execution-quality`, `exit-hold`, `exit-stop`, `exit-method`, `exit-timing`, `exit-comparison` |
+| 손절·MAE(전략별 보정용) | `heat-analysis` (승자/패자 MAE 분포·손절선 시뮬 — 전략별 손절 튜닝 근거) |
 | 스윙 | `swing-exit`, `swing-trail-analysis` |
 | 장중흐름 | `flow-analysis?lag=30` **및** `lag=60` (둘 다 — lag별 표본이 다름, 아래 함정 참조) |
 | 시장 폭 | `market-breadth` |
@@ -89,7 +90,7 @@ group by alert_date order by alert_date;
 5. **장중흐름 축**: 전략별 흐름↑/↓ net 비교 + what-if. **전략별 방향이 반대**(B=딥바잉 흐름↓, F/G/H=흐름↑)이므로 단일 게이트 제안 금지 — 전략별 조건부만.
 6. **집행·청산 인프라**: execution-quality gap(음수=집행 드래그), entrySlip, 적응형 손절/보유시간/청산방식 현황(auto 여부·근거 표본).
 
-## Phase 4. 조치 제안 (2종 분리)
+## Phase 4. 조치 제안 (4종 분리 — A 시스템 / B 전역 수익률 / C 전략별 보정 / D 데이터 공백·추가 지표)
 
 **A. 시스템 보완 조치사항** — 로그 에러, 오버나잇 잔류 포지션, 미체결→취소 후 재주문 실패, 스냅샷/태깅 누락, 게이트 구조 약점(예: min-samples를 단일일 클러스터가 채우는 문제 → 다중 거래일 분산 요건) 등. 버그성은 근거(로그/DB)와 함께 수정안 제시.
 
@@ -99,6 +100,38 @@ group by alert_date order by alert_date;
 - 진입 시간대 제한(lag60 편향 활용), 손절선 조정(heat-analysis 승자/패자 MAE 분리), 보유시간(exit-timing 곡선)
 - 임계치는 env 이름으로 구체 제안(`SIGNAL_*`/`TRADING_*`). ⚠️ **prod 반영은 `docker-compose.prod.yml`의 `environment:`에 해당 키 패스스루가 있어야 함** — 없으면 추가 필요하다고 명시.
 - 제안 vs 즉시 적용 구분: 사용자가 "국면/흐름 데이터 쌓이면 판단" 방침이면 손실전략 중단·게이트 변경은 **제안만** 하고 적용하지 않는다.
+
+**C. 전략별 보정방안 (수집 데이터 기반)** — A(시스템)·B(전역)와 별개로, **표본이 충분한**(대략 게이트 min-samples≈30↑) 전략마다 아래 8축을 순회해 **구체적 보정안**을 낸다. 각 축은 "데이터 소스 → 진단 신호 → 보정 레버(env/code)". 전략마다 **가장 임팩트 큰 1~3개만** 제시(전 축 나열 금지). 출력 형식: **[전략] 진단(근거 n·net) → 보정안(env 이름/코드 위치) → 기대효과 → 리스크·표본충분성**.
+
+| 축 | 데이터 소스 | 진단 신호 | 보정 레버 |
+|---|---|---|---|
+| ① 진입 필터 강도 | `control-analysis` (reject 사유별 net vs ENTERED) | 특정 reject분이 ENTERED보다 **나쁨→필터 유효**(더 조여도 됨) / **좋음→과도**(완화) | 해당 전략 `SIGNAL_*` 임계(min-drop/gap/score/buffer/min-ratio 등) |
+| ② 국면 조건부 | `outcome-analysis` byMarketRegime + gate 국면버킷 | 한 국면에서만 음수(예 하락장 −2%) | 그 국면 진입 하드컷(`entryTrend`) — 게이트가 이미 국면조건부지만 후행적이라 전략단 컷이 더 빠름 |
+| ③ 흐름 조건부 | `flow-analysis` byFlow/byRegimeFlow (**lag30·60 일관** 필수) | 흐름부호별 net 갈림(양 lag 일관 + 표본충분) | 흐름↑/↓ 스킵 env(예 D `SIGNAL_D_REQUIRE_RISING_FLOW`). ⚠️ **전략별 방향 반대**(B=흐름↓ 우위) — 단일게이트 금지 |
+| ④ 승패 feature | `outcome-analysis` numericFeatures(승 avg vs 패 avg diff) | 특정 feature가 승패를 가름(거래량배수·PER·PBR·시총·체결강도·ret5d·ATR·고가거리) | 그 feature 상/하한 필터 신설. **없는 축이면 D(추가지표)로 넘김** |
+| ⑤ 손절선 | `heat-analysis` (승자 MAE p10/p30) | 고정/현행 손절이 승자 과다희생 or 방어부족 | `TRADING_ADAPTIVE_STOP`(자동) — 표본·클램프([min,max]) 재확인. peak/trough 순서 근사 주의 |
+| ⑥ 보유시간 | `exit-timing` 곡선(평균net 최대 마크) | 권장마크 이동/이중딥(낙관편향) | `TRADING_ADAPTIVE_EXIT`(자동) — 곡선 신뢰성(표본·단일일 클러스터) 확인 후 |
+| ⑦ 청산방식 | `exit-comparison` + **라이브 실보유시간 분포**(아래 쿼리) | 신호기반(VWAP/추세전환) 채택인데 **라이브 보유가 수분(과민 조기청산·저가매도)** | `min-hold-minutes`/`vwap-buffer-pct`(방식청산 지연) 또는 TIME 고정. 시뮬(성긴 마크) vs 라이브(1분) 과민 괴리 유의 |
+| ⑧ 집행 품질 | `execution-quality` (gap/entrySlip) | gap 음수(집행 드래그)·진입슬립 큼 | 지정가 오프셋·유동성 필터(`min-turnover`)로 저유동 종목 배제 |
+
+⑦ 검증용 **라이브 실보유시간 분포**(게이트 exit-horizon과 실제 청산 괴리 = 조기/지연청산 진단, Phase 1엔 없음):
+```sql
+select b.strategy, round(extract(epoch from (s.created_at-b.created_at))/60) hold_min, count(*) n
+from trade_order b join trade_order s on s.idempotency_key='SELL:'||b.id
+where b.mode='LIVE' and b.closed and b.order_date>='YYYYMMDD'
+group by b.strategy, hold_min order by b.strategy, hold_min;
+```
+분포가 게이트 horizon(예 D 55분)보다 **왼쪽(1~수분)에 몰리면 조기청산 저가매도** — ⑦ 보정 대상.
+
+**전략별 성격 힌트**(보정 방향 판단용): A=공시촉매·상승 / B=거래량선행·딥바잉(흐름↓)·강급증에서만 / C=역추세 스윙(D+1)·떨어지는칼날 회피 / **D=지수상대 준헤지·흐름↑ 우위·역추세라 즉시청산(VWAP) 방식과 충돌** / E=신고가돌파 공격적·손실폭 큼 / F·H=추세돌파(확인장치 부재 시 false breakout)·흐름↑ / G·J=반등계열(체결강도·ret5d 과열 가드 대상) / K=개장갭·약세장 취약 / I=인버스 헤지(폭락일 한정, 실현손익 채점). → 보정은 **전략 성격에 맞는 방향만**(예 F/H는 강도확인 추가, D는 청산 지연, 반등계열은 과열 컷).
+
+**D. 데이터 공백 & 추가 지표 제안** — A·B·C 진단 중 **현 수집 데이터로 결론이 안 나는 지점**을 명시하고, 그걸 풀 **신규 지표/태깅/엔드포인트**를 구체 제안한다("측정 먼저" 원칙). 형식: **[막힌 질문] → [필요 지표] → [수집 방법(진입태깅 신규컬럼 / KIS 필드 / 신규 엔드포인트) · 비용]**. 자주 재발하는 공백(해당되면 지목, 없으면 생략):
+- **표본이 단일 거래일 클러스터**라 독립성 부족(Phase 2-1) → 게이트/분석에 **교차 거래일 수(distinct alert_date) 요건·컬럼** 추가 제안.
+- **승패 feature에 없는 축**(시총구간·업종·변동성구간·**진입 시각대**·호가 스프레드) → 해당 축이 승패를 가르는지 보려면 `TradeOutcome`에 entry feature 신규 태깅 필요(forward-only).
+- **청산 what-if가 앵커 보간 근사**(마크 시점 지수흐름·breadth) → `OutcomeSample` 실측 저장으로 대체(일부 `idx_mom30`/`breadth_pct` 이미 있음 — 커버리지 확인).
+- **라이브 청산 실측**(체결 시각·실체결가) vs 섀도우 마크 괴리 → 체결 로그 기반 **실보유시간·실슬리피지 분포** 수집(C⑦·집행품질 정밀화).
+- **뉴스/체결강도 feature가 측정만 되고** 승격 판단 표본 부족 → 누적 후 재검 시점(표본 목표치)을 명시.
+- ⚠️ 신규 태깅은 **forward-only(소급 불가)** → 판단 보류 중이어도 **"측정은 지금 시작"** 제안을 우선(빨리 붙일수록 검증이 빨라짐).
 
 ## 인버스 분리 표기 (2026-07-30 추가)
 

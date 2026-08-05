@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import org.mockito.ArgumentCaptor;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -671,6 +672,51 @@ class PositionExitServiceTest {
 
         assertThat(svc.closeDuePositions()).isEqualTo(1);
         verify(orderService).submit(any());   // VWAP이탈 청산
+    }
+
+    // ── 마감청산 공격성 ② (marketable 지정가) ──
+    @Test
+    void 마감청산은_marketable_지정가로_접수() {
+        // 장마감 강제청산 매도를 현재가 −1% 지정가로 접수(즉시 체결 → 미체결·오버나잇 방지).
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(10);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(69_500L);   // 매수 70000 대비 −0.7%(손절 미발동)
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("00:00", 60),
+                holdProvider(60), riskGuard(false), timeMethod(), "", stopProvider());   // session 00:00 → 항상 장마감
+        svc.setSessionCloseAggressivePct(1.0);
+
+        svc.closeDuePositions();
+
+        ArgumentCaptor<OrderService.OrderCommand> cap = ArgumentCaptor.forClass(OrderService.OrderCommand.class);
+        verify(orderService).submit(cap.capture());
+        assertThat(cap.getValue().note()).startsWith("장마감");
+        assertThat(cap.getValue().price()).isEqualTo(68_805L);   // floor(69500×0.99) — marketable
+    }
+
+    @Test
+    void 마감청산_아닌_시간경과는_현재가_지정가_유지() {
+        // 시간경과(TIME, session 아님)는 aggressive 미적용 — 현재가 그대로 접수.
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(200);   // 보유 200분 > hold 60 → 시간경과 청산
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(69_500L);   // 손절·상한가 미발동
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), riskGuard(false), timeMethod(), "", stopProvider());   // session 23:59 → 장마감 아님
+        svc.setSessionCloseAggressivePct(1.0);
+
+        svc.closeDuePositions();
+
+        ArgumentCaptor<OrderService.OrderCommand> cap = ArgumentCaptor.forClass(OrderService.OrderCommand.class);
+        verify(orderService).submit(cap.capture());
+        assertThat(cap.getValue().note()).isEqualTo("시간경과");
+        assertThat(cap.getValue().price()).isEqualTo(69_500L);   // marketable 미적용(현재가 유지)
     }
 
     // ── 조기청산 방지 ③ VWAP 이탈 히스테리시스 버퍼 ──
