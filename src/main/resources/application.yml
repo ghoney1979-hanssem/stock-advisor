@@ -232,7 +232,8 @@ stockadvisor:
       flow-conditional: ${TRADING_PERF_GATE_FLOW_CONDITIONAL:true}               # 국면+흐름 3차원 — 흐름 버킷 표본 충족 시 그 버킷으로 판정, 부족/미산출(개장~30분)이면 국면만(자연 fallback)
       flow-min-samples: ${TRADING_PERF_GATE_FLOW_MIN_SAMPLES:30}
       inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
-      inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용   # INVERSE 버킷 실현 채점 시작일(yyyyMMdd, 빈값=제한없음) — 인버스 청산로직 세대 교체 시 구표본 제외(2026-07-20)                 # 흐름 버킷 최소 표본
+      inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용
+      close-net-avg-pct: ${TRADING_PERF_GATE_CLOSE_NET_AVG_PCT:0.3}   # 히스테리시스 닫기 문턱(%) — 열려있으면 이 값까지 유지(열 땐 min-net 0.3). <min-net이면 활성(예 −0.2), ≥min-net이면 off(기본 0.3=off). 문턱 근처 여닫이 진동·역선택 억제
 
     # 국면연동 리스크 관리 (레이어 3 — 하락장 방어). DRY_RUN/LIVE 공통(리스크관리 흐름을 dry-run으로도 검증).
     risk:

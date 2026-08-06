@@ -60,7 +60,11 @@ public record StrategyPerformanceProperties(
         boolean flowConditional,
         int flowMinSamples,
         String inverseRealizedSince,   // INVERSE 버킷 실현 채점 시작일(yyyyMMdd, 빈값=제한없음) — 청산 로직 세대 교체 시 구로직 표본 제외
-        double inverseMinNetAvgPct     // INVERSE 버킷 전용 net 문턱(%) — 헤지 다리라 알파 문턱(min-net 0.3)보다 완화 가능(2026-07-24). ≤0이면 min-net 사용
+        double inverseMinNetAvgPct,    // INVERSE 버킷 전용 net 문턱(%) — 헤지 다리라 알파 문턱(min-net 0.3)보다 완화 가능(2026-07-24). ≤0이면 min-net 사용
+        // 히스테리시스(2026-08-06): 게이트가 문턱(min-net) 근처에서 여닫이를 반복하며 "평균회귀 성과곡선"을 고점매수-저점매도
+        // 하는 역선택(실측: G Δ−3.95·B Δ−1.81)을 막기 위한 비대칭 밴드. 열 땐 min-net(0.3), 닫을 땐 이 값(예 −0.2)까지
+        // 유지 → 그 사이(밴드)는 직전 상태 유지(진동 억제). 활성 조건: closeNetAvgPct < minNetAvgPct(아니면 off=stateless).
+        double closeNetAvgPct
 ) {
     public StrategyPerformanceProperties {
         if (lookbackDays <= 0) lookbackDays = 20;

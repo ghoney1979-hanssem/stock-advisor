@@ -28,25 +28,25 @@ class StrategyPerformanceGateTest {
     // 국면 무관(regimeConditional=false) — 순수 net평균 로직 검증용. fallback off(기존 fail-closed).
     private StrategyPerformanceProperties props(boolean enabled, int minSamples, double minNetAvg) {
         return new StrategyPerformanceProperties(enabled, 20, minSamples, minNetAvg, "close", false, false,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
     }
 
     // 국면조건부(trend만, 시장 분리 off) — 기존 레이어2 검증
     private StrategyPerformanceProperties regimeProps(int minSamples) {
         return new StrategyPerformanceProperties(true, 20, minSamples, 0.0, "close", true, false,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
     }
 
     // (market,trend) 2차원 분리 on
     private StrategyPerformanceProperties marketSplitProps(int minSamples) {
         return new StrategyPerformanceProperties(true, 20, minSamples, 0.0, "close", true, true,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
     }
 
     // 국면조건부 + 보수적 fallback on(엄격바) — fallback 경로 검증용
     private StrategyPerformanceProperties fallbackProps(int minSamples, int fbMinSamples, double fbMinNet) {
         return new StrategyPerformanceProperties(true, 20, minSamples, 0.0, "close", true, false,
-                true, fbMinSamples, fbMinNet, 0.5, 10, 0.3, true, 30, "", 0);
+                true, fbMinSamples, fbMinNet, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
     }
 
     /** buyPrice 대비 closeReturnPct% 오른(또는 내린) 종가의 가상매수 표본 n건. trend 태깅 가능. */
@@ -182,7 +182,7 @@ class StrategyPerformanceGateTest {
     @Test
     void 인버스_부트스트랩_비활성이면_표본미달_차단() {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 30, 0.0, "close", true, true,
-                false, 50, 0.5, 0.5, 10, 0, true, 30, "", 0);   // bootstrap mult 0 = 비활성
+                false, 50, 0.5, 0.5, 10, 0, true, 30, "", 0, 999.0);   // bootstrap mult 0 = 비활성
         StrategyPerformanceGate g = gate(p, samples("INVERSE_INDEX_I", 8, 2.0, null, "INVERSE"), null);
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("INVERSE_INDEX_I", "INVERSE");
@@ -274,7 +274,7 @@ class StrategyPerformanceGateTest {
         // 로직 세대 교체(2026-07-20): 구로직(7/16 휩쏘)이 만든 실현 11표본이 개선판을 영구 차단하는
         // 캐치22 해소 — inverse-realized-since 이후 표본만 채점 → 구표본 전부 제외되면 0/10 부트스트랩 재개.
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 30, 0.0, "close", true, true,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "20260717", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "20260717", 0, 999.0);
         StrategyPerformanceGate g = gate(p, List.of(), null);
         var orderRepo = mock(com.stockadvisor.repository.OrderRepository.class);
         var orders = new java.util.ArrayList<com.stockadvisor.domain.Order>();
@@ -472,7 +472,7 @@ class StrategyPerformanceGateTest {
         OutcomeSampleRepository sampleRepo = mock(OutcomeSampleRepository.class);
         when(sampleRepo.findByStrategyAndMarkMinutesBetween("VOLUME_LEADING_B", 30, 90)).thenReturn(samples);
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
                 List.of(), COST, "", "nextClose");
 
@@ -507,7 +507,7 @@ class StrategyPerformanceGateTest {
         OutcomeSampleRepository sampleRepo = mock(OutcomeSampleRepository.class);
         when(sampleRepo.findByStrategyAndMarkMinutesBetween("VOLUME_LEADING_B", 30, 90)).thenReturn(samples);
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
-                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0);
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
                 List.of(), COST, "", "nextClose");
 
@@ -579,5 +579,50 @@ class StrategyPerformanceGateTest {
         assertThat(d.fallback()).isFalse();                 // ④ 졸업: 엄격 경로
         assertThat(d.reason()).contains("통과");
         assertThat(d.reason()).doesNotContain("fallback");
+    }
+
+    @Test
+    void 히스테리시스_열땐0_3_닫을땐m0_2_밴드에선_직전상태_유지() {
+        // 열기 0.3 / 닫기 −0.2. 밴드(−0.2~0.3)에선 직전 상태 유지 → 문턱 근처 여닫이 진동 억제.
+        // props: min=0.3, close=−0.2, regimeConditional=false, minSamples=5.
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.3, "close",
+                false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, -0.2);
+        List<TradeOutcome> rows = new ArrayList<>();   // 가변 — 매 호출 사이 net 교체(같은 gate 인스턴스=상태 유지)
+        StrategyPerformanceGate g = gate(p, rows, null);
+        // net = closeReturnPct − COST(0.18)
+        java.util.function.DoubleConsumer setNet = net -> {
+            rows.clear();
+            rows.addAll(samples("MOMENTUM_A", 5, net + COST, null));
+        };
+
+        // ① 닫힘 상태 + 밴드(net 0.1 < 열기 0.3) → 계속 닫힘
+        setNet.accept(0.1);
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isFalse();
+        // ② net 0.4 ≥ 0.3 → 오픈
+        setNet.accept(0.4);
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isTrue();
+        // ③ 오픈 상태 + 밴드(net 0.1, 열기 0.3엔 미달이지만 닫기 −0.2 이상) → 유지(오픈)
+        setNet.accept(0.1);
+        StrategyPerformanceGate.GateDecision hold = g.evaluate("MOMENTUM_A", "KOSPI");
+        assertThat(hold.allowed()).isTrue();
+        assertThat(hold.reason()).contains("히스테리시스");
+        // ④ net −0.3 < 닫기 −0.2 → 닫힘
+        setNet.accept(-0.3);
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isFalse();
+    }
+
+    @Test
+    void 히스테리시스_off면_밴드에서_닫힘_유지안됨() {
+        // close(0.3) ≥ min(0.3) → 히스테리시스 off = stateless. 오픈 뒤 net 0.1이면 그냥 닫힘(기존 동작).
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.3, "close",
+                false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 0.3);   // close=min → off
+        List<TradeOutcome> rows = new ArrayList<>();
+        StrategyPerformanceGate g = gate(p, rows, null);
+        rows.addAll(samples("MOMENTUM_A", 5, 0.4 + COST, null));   // net 0.4 → 오픈
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isTrue();
+        rows.clear(); rows.addAll(samples("MOMENTUM_A", 5, 0.1 + COST, null));   // net 0.1
+        StrategyPerformanceGate.GateDecision d = g.evaluate("MOMENTUM_A", "KOSPI");
+        assertThat(d.allowed()).isFalse();                  // off라 유지 안 됨(0.1<0.3)
+        assertThat(d.reason()).doesNotContain("히스테리시스");
     }
 }

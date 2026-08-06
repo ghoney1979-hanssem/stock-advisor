@@ -50,6 +50,9 @@ public class StrategyPerformanceGate {
     private final java.util.Set<String> swingStrategies;   // 스윙 전략은 청산 horizon(swingHorizon)으로 게이트 검증
     private final String swingHorizon;                       // 스윙 전략 게이트 검증 horizon(기본 nextClose=D+1)
     private final List<String> strategyNames;                // 가시화용 전략명(등록된 TradingStrategy 빈에서 동적 — 새 전략 자동 포함)
+    // 히스테리시스 상태(2026-08-06): (strategy:market) → 현재 오픈 여부. 열 땐 min-net, 열려있으면 close-net까지 유지.
+    // 인메모리(재기동 시 리셋 → 기본 closed=fail-safe). 흐름·국면 버킷 판정에서만 갱신(fallback/부트스트랩/시뮬 제외).
+    private final java.util.Map<String, Boolean> openState = new java.util.concurrent.ConcurrentHashMap<>();
 
     public StrategyPerformanceGate(TradeOutcomeRepository tradeOutcomeRepository,
                                    StrategyPerformanceProperties props,
@@ -178,6 +181,14 @@ public class StrategyPerformanceGate {
         }
         // 국면조건부: 종목 시장의 현재(또는 가정) 국면과 같은 국면 진입분만 집계. 미산출이면 국면 무관(null).
         // 인버스 버킷("INVERSE")은 방향 베팅 자체라 진입 시 국면태그가 null → 국면조건부 건너뜀(전체 인버스 표본 집계).
+        // 히스테리시스: 밴드 = [closeNet, minNet). 열려있으면 closeNet까지 유지(닫힘 지연) → 문턱 근처 여닫이 진동 억제.
+        // 활성 조건 closeNet<minNet. 시뮬(forcedRegime!=null)은 상태 미변경(가시화·실판정 = null만 갱신).
+        final boolean hystActive = props.closeNetAvgPct() < props.minNetAvgPct();
+        final String hystKey = strategy + ":" + (market == null ? "_" : market);
+        final boolean wasOpen = hystActive && Boolean.TRUE.equals(openState.get(hystKey));
+        final double effMinNet = wasOpen ? props.closeNetAvgPct() : props.minNetAvgPct();
+        final boolean mutateHyst = hystActive && forcedRegime == null;
+        final String hystTag = wasOpen ? " ·히스테리시스(닫기바 유지)" : "";
         MarketTrend regime = (props.regimeConditional() && !"INVERSE".equals(market))
                 ? (forcedRegime != null ? forcedRegime : marketRegimeService.trendOf(market)) : null;
         String regimeName = regime == null ? null : regime.name();
@@ -264,23 +275,21 @@ public class StrategyPerformanceGate {
             Double avgF = round2(sumF / nF);
             String flowTag = regimeTag.isEmpty() ? "" : regimeTag.substring(0, regimeTag.length() - 2)
                     + "·흐름" + (flowUp ? "↑" : "↓") + "] ";
-            if (avgF < props.minNetAvgPct()) {
-                return new GateDecision(strategy, false,
-                        String.format("%s흐름버킷 성과 미달(net %.2f%% < 기준 %.2f%%, n=%d)", flowTag, avgF, props.minNetAvgPct(), nF),
-                        nF, avgF, regimeName, market, false);
-            }
-            return new GateDecision(strategy, true,
-                    String.format("%s흐름버킷 통과(net %.2f%% ≥ 기준 %.2f%%, n=%d)", flowTag, avgF, props.minNetAvgPct(), nF),
+            boolean allow = avgF >= effMinNet;
+            if (mutateHyst) openState.put(hystKey, allow);
+            return new GateDecision(strategy, allow,
+                    String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
+                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNet, nF, hystTag),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
         if (n >= minSamples) {
-            if (avg < props.minNetAvgPct()) {
-                return new GateDecision(strategy, false,
-                        String.format("%s성과 미달(net %.2f%% < 기준 %.2f%%, n=%d)", regimeTag, avg, props.minNetAvgPct(), n), n, avg, regimeName, market, false);
-            }
-            return new GateDecision(strategy, true,
-                    String.format("%s통과(net %.2f%% ≥ 기준 %.2f%%, n=%d)", regimeTag, avg, props.minNetAvgPct(), n), n, avg, regimeName, market, false);
+            boolean allow = avg >= effMinNet;
+            if (mutateHyst) openState.put(hystKey, allow);
+            return new GateDecision(strategy, allow,
+                    String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
+                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNet, n, hystTag),
+                    n, avg, regimeName, market, false);
         }
         // ② 국면 표본 부족 + fallback 활성 → 국면무관 전국면 pool로 재평가(더 엄격한 바). regimeName==null(미산출/off)이면
         // primary가 이미 전국면이라 fallback 무의미 → 건너뜀.
