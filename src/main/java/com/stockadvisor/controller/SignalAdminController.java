@@ -66,6 +66,12 @@ public class SignalAdminController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private HoldScoreService holdScoreService;   // 필드주입 — 생성자 무churn
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.repository.OutcomeDailyMarkRepository dailyMarkRepository;   // 멀티데이 일봉마크(Phase 1 측정) — 필드주입
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.MultidayExitAnalysisService multidayExitAnalysisService;   // 멀티데이 청산 시뮬(Phase 2) — 필드주입
+
     private final DisclosurePollingService pollingService;
     private final SignalAlertService signalAlertService;
     private final MarketSignalService marketSignalService;
@@ -198,6 +204,22 @@ public class SignalAdminController {
         return flowBacktagService.backfill();
     }
 
+    /**
+     * 멀티데이 일봉 종가 경로 소급 백필(Phase 2 즉시가동) — 기존 C/D/J 진입분에 KIS 일봉(~30거래일)으로
+     * D0..D+15 종가를 채운다. 결과: 처리한 outcome 수. 이후 /multiday-exit-comparison 으로 시뮬.
+     */
+    @PostMapping("/backfill-multiday-marks")
+    public java.util.Map<String, Object> backfillMultidayMarks() {
+        return java.util.Map.of("touched", tradeFollowUpService.backfillMultidayMarks());
+    }
+
+    /** 멀티데이 청산 트리거 시뮬 — 일봉 경로에 보유D+N/트레일%/MA이탈/손절 시뮬해 전략별 net 최대 방식(Phase 2). */
+    @GetMapping("/multiday-exit-comparison")
+    public Object multidayExitComparison() {
+        if (multidayExitAnalysisService == null) return java.util.Map.of("error", "service unavailable");
+        return multidayExitAnalysisService.compare();
+    }
+
     /** 장중흐름 분석 — 전략별 진입시 지수흐름(mom lag) 부호별 net·승률(exit-horizon)·국면분리·what-if. lag=30|60. */
     /** 보유 점수(2026-07-23, 관찰 전용) — 미청산 포지션별 7신호 합의 "계속 들고갈만한가". 청산 결정과 무관. */
     @GetMapping("/hold-score")
@@ -291,6 +313,35 @@ public class SignalAdminController {
     @GetMapping("/trailing-grid")
     public List<ExitStrategyService.StrategyTrailGrid> trailingGrid() {
         return exitStrategyService.trailingGrid();
+    }
+
+    /**
+     * 멀티데이(2-3주) 일봉 종가 경로 수집 현황 (2026-08-07, Phase 1 — 측정 검증용).
+     * strategy 지정 시 outcome별 D+N 종가 경로(수익률%)까지, 미지정이면 전략별 요약(행수·outcome수·최대 D+N).
+     */
+    @GetMapping("/multiday-marks")
+    public Object multidayMarks(@org.springframework.web.bind.annotation.RequestParam(required = false) String strategy) {
+        if (dailyMarkRepository == null) return java.util.Map.of("error", "repository unavailable");
+        String[] targets = (strategy != null && !strategy.isBlank())
+                ? new String[]{strategy}
+                : new String[]{"MEAN_REVERSION_C", "INDEX_RELATIVE_D", "VALUE_REVERSAL_J"};
+        List<java.util.Map<String, Object>> out = new java.util.ArrayList<>();
+        for (String s : targets) {
+            List<com.stockadvisor.domain.OutcomeDailyMark> marks = dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(s);
+            java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("strategy", s);
+            row.put("rows", marks.size());
+            row.put("outcomes", marks.stream().map(com.stockadvisor.domain.OutcomeDailyMark::getOutcomeId).distinct().count());
+            row.put("maxMarkDays", marks.stream().mapToInt(com.stockadvisor.domain.OutcomeDailyMark::getMarkDays).max().orElse(-1));
+            if (strategy != null && !strategy.isBlank()) {
+                row.put("marks", marks.stream().map(m -> java.util.Map.of(
+                        "outcomeId", m.getOutcomeId(), "d", m.getMarkDays(),
+                        "date", m.getBusinessDate(), "close", m.getClosePrice(),
+                        "retPct", Math.round(m.returnPct() * 100) / 100.0)).toList());
+            }
+            out.add(row);
+        }
+        return out;
     }
 
     /**

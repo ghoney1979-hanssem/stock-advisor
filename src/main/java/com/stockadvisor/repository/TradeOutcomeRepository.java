@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 
 public interface TradeOutcomeRepository extends JpaRepository<TradeOutcome, Long> {
@@ -30,6 +31,10 @@ public interface TradeOutcomeRepository extends JpaRepository<TradeOutcome, Long
 
     /** 전략별 최근 진입분 (성과 게이트용, alertDate ≥ cutoff) */
     List<TradeOutcome> findByStrategyAndAlertDateGreaterThanEqual(String strategy, String alertDate);
+
+    /** 멀티데이 백필 대상 — 지정 전략들의 비대조군 진입분(alertDate ≥ cutoff, KIS 일봉 창 내). */
+    List<TradeOutcome> findByStrategyInAndControlFalseAndAlertDateGreaterThanEqual(
+            Collection<String> strategies, String alertDate);
 
     /** 국면 태그가 비어있는 (시장, 진입일) 조합 — 소급 태깅 대상 (시장 미상은 제외). */
     @Query("select distinct o.entryMarket, o.alertDate from TradeOutcome o "

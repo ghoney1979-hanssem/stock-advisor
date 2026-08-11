@@ -38,22 +38,36 @@ public record SignalResult(
         double ret5dPct,
         double gapPct,          // 개장갭%((오늘시가−전일종가)/전일종가×100). 개장갭 전략(K)용. 데이터 없으면 0.
         boolean maBreakoutFresh,
-        double maDistPct
+        double maDistPct,
+        // [H] 스퀴즈 돌파 후보의 분봉 신선도+활성도 충족(squeezeBreakout 후보일 때만 계산, 아니면 false).
+        // H 돌파확인 필터(SIGNAL_SQUEEZE_REQUIRE_CONFIRM)가 "죽은/페이드 돌파" 회피에 사용(F maBreakoutFresh와 동일 취지).
+        boolean squeezeBreakoutFresh
 ) {
-    /** 기존 11-인자 호환 — 셋업/갭/MA feature 0 기본. 테스트·구 호출 무변경 유지용. */
+    /** 기존 11-인자 호환 — 셋업/갭/MA/H feature 0 기본. 테스트·구 호출 무변경 유지용. */
     public SignalResult(double volumeRatio, double changeRate, long closePrice, long todayVolume,
                         boolean volumeSpike, boolean freshActive, boolean reboundActive, long priorHigh,
                         boolean maCrossUp, boolean rsiCrossUp, boolean squeezeBreakout) {
         this(volumeRatio, changeRate, closePrice, todayVolume, volumeSpike, freshActive, reboundActive,
-                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, 0, 0, 0, 0, false, 0);
+                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, 0, 0, 0, 0, false, 0, false);
     }
 
-    /** 기존 15-인자 호환(gapPct까지) — MA feature 0 기본. 테스트·구 호출 무변경 유지용. */
+    /** 기존 15-인자 호환(gapPct까지) — MA/H feature 0 기본. 테스트·구 호출 무변경 유지용. */
     public SignalResult(double volumeRatio, double changeRate, long closePrice, long todayVolume,
                         boolean volumeSpike, boolean freshActive, boolean reboundActive, long priorHigh,
                         boolean maCrossUp, boolean rsiCrossUp, boolean squeezeBreakout,
                         double atrPct, double distFromHighPct, double ret5dPct, double gapPct) {
         this(volumeRatio, changeRate, closePrice, todayVolume, volumeSpike, freshActive, reboundActive,
-                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, atrPct, distFromHighPct, ret5dPct, gapPct, false, 0);
+                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, atrPct, distFromHighPct, ret5dPct, gapPct, false, 0, false);
+    }
+
+    /** 기존 17-인자 호환(maDistPct까지) — H feature false 기본. 테스트·구 호출 무변경 유지용. */
+    public SignalResult(double volumeRatio, double changeRate, long closePrice, long todayVolume,
+                        boolean volumeSpike, boolean freshActive, boolean reboundActive, long priorHigh,
+                        boolean maCrossUp, boolean rsiCrossUp, boolean squeezeBreakout,
+                        double atrPct, double distFromHighPct, double ret5dPct, double gapPct,
+                        boolean maBreakoutFresh, double maDistPct) {
+        this(volumeRatio, changeRate, closePrice, todayVolume, volumeSpike, freshActive, reboundActive,
+                priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout, atrPct, distFromHighPct, ret5dPct, gapPct,
+                maBreakoutFresh, maDistPct, false);
     }
 }

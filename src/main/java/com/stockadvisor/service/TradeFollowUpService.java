@@ -1,9 +1,11 @@
 package com.stockadvisor.service;
 
+import com.stockadvisor.domain.OutcomeDailyMark;
 import com.stockadvisor.domain.OutcomeSample;
 import com.stockadvisor.domain.TradeOutcome;
 import com.stockadvisor.market.KisApiClient;
 import com.stockadvisor.market.dto.KisDailyPriceResponse.DailyPrice;
+import com.stockadvisor.repository.OutcomeDailyMarkRepository;
 import com.stockadvisor.repository.OutcomeSampleRepository;
 import com.stockadvisor.repository.TradeOutcomeRepository;
 import org.slf4j.Logger;
@@ -43,6 +45,7 @@ public class TradeFollowUpService {
 
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final OutcomeSampleRepository outcomeSampleRepository;
+    private final OutcomeDailyMarkRepository dailyMarkRepository;
     private final KisApiClient kisApiClient;
     private final Duration firstDelay;
     private final Duration secondDelay;
@@ -52,15 +55,19 @@ public class TradeFollowUpService {
 
     public TradeFollowUpService(TradeOutcomeRepository tradeOutcomeRepository,
                                 OutcomeSampleRepository outcomeSampleRepository,
+                                OutcomeDailyMarkRepository dailyMarkRepository,
                                 KisApiClient kisApiClient,
                                 @Value("${stockadvisor.followup.first-delay:5m}") Duration firstDelay,
                                 @Value("${stockadvisor.followup.second-delay:10m}") Duration secondDelay,
                                 @Value("${stockadvisor.followup.third-delay:30m}") Duration thirdDelay,
                                 @Value("${stockadvisor.followup.exit-marks}") int[] exitMarks,
                                 @Value("${stockadvisor.followup.vwap-marks}") int[] vwapMarks,
-                                @Value("${stockadvisor.trading.swing-strategies:MEAN_REVERSION_C}") String swingCsv) {
+                                @Value("${stockadvisor.trading.swing-strategies:MEAN_REVERSION_C}") String swingCsv,
+                                @Value("${stockadvisor.trading.multiday-strategies:}") String multidayCsv,
+                                @Value("${stockadvisor.trading.multiday-max-hold-days:15}") int multidayMaxHoldDays) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.outcomeSampleRepository = outcomeSampleRepository;
+        this.dailyMarkRepository = dailyMarkRepository;
         this.kisApiClient = kisApiClient;
         this.firstDelay = firstDelay;
         this.secondDelay = secondDelay;
@@ -68,9 +75,16 @@ public class TradeFollowUpService {
         this.exitMarks = exitMarks;
         this.vwapMarks = java.util.Arrays.stream(vwapMarks).boxed().collect(Collectors.toSet());
         this.swingStrategies = PolicyGate.parseCsv(swingCsv);
+        this.multidayStrategies = PolicyGate.parseCsv(multidayCsv);
+        this.multidayMaxHoldDays = multidayMaxHoldDays;
+        // 만료 백스톱: 목표 거래일의 2배 캘린더일(주말·연휴 여유). 실제 종료는 D+maxHoldDays 수집.
+        this.multidayTrackWindow = Duration.ofDays(Math.max(1, multidayMaxHoldDays) * 2L);
     }
 
     private final java.util.Set<String> swingStrategies;   // 스윙 전략 — 트레일링 검증가 수집 대상
+    private final java.util.Set<String> multidayStrategies; // 멀티데이(2-3주) 전략 — 일봉 종가 경로 수집 대상(Phase 1, 측정)
+    private final int multidayMaxHoldDays;                  // D+N 까지 일봉 종가 수집(거래일)
+    private final Duration multidayTrackWindow;             // 멀티데이 추적 만료 백스톱(캘린더일)
 
     /**
      * 미완료 가상매수들의 horizon 가격을 수집/갱신한다. (후속 알림은 제거 — 데이터 수집 전용)
@@ -89,6 +103,30 @@ public class TradeFollowUpService {
             }
         }
         return pending.size();
+    }
+
+    /**
+     * 멀티데이 일봉 종가 경로 <b>소급(backfill)</b> — 이미 쌓인 C/D/J 비대조군 진입분에 대해
+     * KIS 일봉(~30거래일 창)으로 D0..D+maxHoldDays 종가를 지금 채운다(Phase 2 시뮬을 forward 없이 즉시 가동).
+     * null만 채우고 재실행 안전. 종목당 1콜(전역 rateGate 직렬화). @return 조회·처리한 outcome 수.
+     */
+    public int backfillMultidayMarks() {
+        if (multidayStrategies.isEmpty()) return 0;
+        String since = LocalDate.now(SEOUL).minusDays(45).format(YYYYMMDD);  // 45캘린더일 ≈ 30거래일 창 커버
+        List<TradeOutcome> outcomes = tradeOutcomeRepository
+                .findByStrategyInAndControlFalseAndAlertDateGreaterThanEqual(multidayStrategies, since);
+        int touched = 0;
+        for (TradeOutcome o : outcomes) {
+            if (dailyMarkRepository.existsByOutcomeIdAndMarkDays(o.getId(), multidayMaxHoldDays)) continue; // 이미 완전
+            try {
+                List<DailyPrice> rows = kisApiClient.fetchDailyPrices(o.getStockCode()).output();
+                if (rows != null && !rows.isEmpty()) { collectDailyMarks(o, rows); touched++; }
+            } catch (Exception ex) {
+                log.warn("멀티데이 백필 실패 outcome={} stock={}: {}", o.getId(), o.getStockCode(), ex.getMessage());
+            }
+        }
+        log.info("멀티데이 일봉마크 백필: {}건 처리(대상 {})", touched, outcomes.size());
+        return touched;
     }
 
     /** 보유시간 마크/EOD 시점 가격 + VWAP/거래량을 OutcomeSample 에 적재 (청산시점·신호청산 분석용). */
@@ -147,7 +185,7 @@ public class TradeFollowUpService {
     }
 
     /** 미완료 가상매수 1건의 horizon 가격/마크를 수집·갱신(후속 알림은 제거됨 — 데이터 수집 전용). */
-    private void process(TradeOutcome o, Instant now) {
+    void process(TradeOutcome o, Instant now) {
         Duration elapsed = Duration.between(o.getAlertTime(), now);
         boolean changed = false;
 
@@ -155,7 +193,16 @@ public class TradeFollowUpService {
         boolean needIntraday = o.getPrice5min() == null || o.getPrice10min() == null || o.getPrice30min() == null;
         boolean needDaily = o.getPriceClose() == null || o.getPriceNextClose() == null;
 
-        List<DailyPrice> rows = (needIntraday || needDaily)
+        // 멀티데이(2-3주) 일봉 종가 경로 수집 — 새 종가는 하루 1회(마감 후)만 확정되므로,
+        // "장 마감 후 AND 오늘분 미수집"일 때만 일봉 조회(포지션당 1일 1콜로 제한). 대조군 제외(부하).
+        java.time.LocalDateTime nowSeoul = java.time.LocalDateTime.ofInstant(now, SEOUL);
+        String today = nowSeoul.toLocalDate().format(YYYYMMDD);
+        boolean afterClose = nowSeoul.toLocalTime().isAfter(MARKET_CLOSE);
+        boolean multiday = !o.isControl() && multidayStrategies.contains(o.getStrategy());
+        boolean needMultidayDaily = multiday && afterClose
+                && !dailyMarkRepository.existsByOutcomeIdAndBusinessDate(o.getId(), today);
+
+        List<DailyPrice> rows = (needIntraday || needDaily || needMultidayDaily)
                 ? kisApiClient.fetchDailyPrices(o.getStockCode()).output() : null;
 
         if (rows != null && !rows.isEmpty()) {
@@ -201,14 +248,40 @@ public class TradeFollowUpService {
             if (!o.isControl()) {
                 sampleExitMarks(o, currentPrice, elapsed.toMinutes());
             }
+
+            // 4) 멀티데이 일봉 종가 경로(D0..D+maxHoldDays) — 마감 후 1일 1회. 미수집 거래일만 저장(재기동/휴장 복원).
+            if (needMultidayDaily) {
+                collectDailyMarks(o, rows);
+            }
         }
 
-        // 종료 조건: D+3 종가 수집 완료 or 만료
-        if (o.getPriceD3() != null || elapsed.compareTo(MAX_TRACK) > 0) {
+        // 종료 조건: (멀티데이) D+maxHoldDays 수집 완료 / (일반) D+3 종가 수집 완료, 둘 다 만료 백스톱.
+        boolean collected = multiday
+                ? dailyMarkRepository.existsByOutcomeIdAndMarkDays(o.getId(), multidayMaxHoldDays)
+                : o.getPriceD3() != null;
+        Duration trackWindow = multiday ? multidayTrackWindow : MAX_TRACK;
+        if (collected || elapsed.compareTo(trackWindow) > 0) {
             o.markCompleted(); changed = true;
         }
         if (changed) {
             tradeOutcomeRepository.save(o);
+        }
+    }
+
+    /**
+     * 멀티데이 일봉 종가 경로 수집 — D0..D+maxHoldDays 중 아직 저장 안 된 확정 거래일만 {@link OutcomeDailyMark}로 적재.
+     * (재기동으로 하루 놓쳐도 KIS 일봉 ~30거래일 창 안이면 다음 실행에 소급 복원됨.)
+     */
+    private void collectDailyMarks(TradeOutcome o, List<DailyPrice> rows) {
+        for (int n = 0; n <= multidayMaxHoldDays; n++) {
+            if (dailyMarkRepository.existsByOutcomeIdAndMarkDays(o.getId(), n)) continue;
+            Optional<DailyPrice> rowOpt = findCloseRow(rows, o.getAlertDate(), n);
+            if (rowOpt.isEmpty()) continue;
+            DailyPrice row = rowOpt.get();
+            long close = parseLong(row.closePrice());
+            if (close <= 0) continue;
+            dailyMarkRepository.save(new OutcomeDailyMark(
+                    o.getId(), o.getStrategy(), o.getBuyPrice(), n, row.businessDate(), close));
         }
     }
 
@@ -219,6 +292,11 @@ public class TradeFollowUpService {
      *                          확정된(마감 후) 거래일만 반환하고, 그 외엔 empty.
      */
     private Optional<Long> findClose(List<DailyPrice> rows, String alertDate, int businessDayOffset) {
+        return findCloseRow(rows, alertDate, businessDayOffset).map(r -> parseLong(r.closePrice()));
+    }
+
+    /** {@link #findClose}와 동일 규칙이되 확정된 일봉 행(거래일·종가)을 그대로 반환. */
+    private Optional<DailyPrice> findCloseRow(List<DailyPrice> rows, String alertDate, int businessDayOffset) {
         DailyPrice picked;
         if (businessDayOffset <= 0) {
             picked = rows.stream()
@@ -236,7 +314,7 @@ public class TradeFollowUpService {
         if (picked == null || !isFinalized(picked.businessDate())) {
             return Optional.empty();
         }
-        return Optional.of(parseLong(picked.closePrice()));
+        return Optional.of(picked);
     }
 
     /** 해당 거래일의 종가가 확정되었는지(과거일 or 오늘 마감 후). */

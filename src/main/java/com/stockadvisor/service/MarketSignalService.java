@@ -107,13 +107,14 @@ public class MarketSignalService {
         boolean uptrend = changeRate >= properties.minChangeRate();
         boolean reboundCandidate = changeRate <= -properties.meanReversionMinDrop();   // 당일 하락(C 후보)
 
-        // 분봉 신선도/활성도는 모멘텀(A: 상승)·역추세(C: 하락)·MA돌파(F) 후보일 때만 1회 계산(분봉 호출 절감).
-        // 횡보(B)는 분봉확인을 쓰지 않으므로 계산도 생략. F는 볼륨무관 트리거라 volumeSpike 없이도 돌파면 계산.
-        boolean needFresh = (volumeSpike && (uptrend || reboundCandidate)) || maCrossUp;
+        // 분봉 신선도/활성도는 모멘텀(A)·역추세(C)·MA돌파(F)·스퀴즈돌파(H) 후보일 때만 1회 계산(분봉 호출 절감).
+        // 횡보(B)는 분봉확인을 쓰지 않으므로 계산도 생략. F/H는 볼륨무관 트리거라 volumeSpike 없이도 돌파면 계산.
+        boolean needFresh = (volumeSpike && (uptrend || reboundCandidate)) || maCrossUp || squeezeBreakout;
         boolean freshAndActive = needFresh && isFreshAndActive(stockCode, todayVolume, sessionFraction);
         boolean freshActive = freshAndActive && volumeSpike && uptrend;          // [A] 상승 + 분봉 신선·활발
         boolean reboundActive = freshAndActive && volumeSpike && reboundCandidate; // [C] 하락이어도 분봉은 반등 중
         boolean maBreakoutFresh = freshAndActive && maCrossUp;                    // [F] MA돌파 + 분봉 신선·활발(죽은 돌파 회피)
+        boolean squeezeBreakoutFresh = freshAndActive && squeezeBreakout;         // [H] 스퀴즈돌파 + 분봉 신선·활발(페이드 돌파 회피)
 
         log.debug("신호지표 stockCode={} 거래량배수(보정)={} 등락률={}% 급증={} 신선활발(A)={} 반등(C)={}",
                 stockCode, String.format("%.2f", volumeRatio), changeRate, volumeSpike, freshActive, reboundActive);
@@ -134,7 +135,7 @@ public class MarketSignalService {
 
         return Optional.of(new SignalResult(volumeRatio, changeRate, closePrice, todayVolume,
                 volumeSpike, freshActive, reboundActive, priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout,
-                atrPct, distFromHighPct, ret5dPct, gapPct, maBreakoutFresh, maDistPct));
+                atrPct, distFromHighPct, ret5dPct, gapPct, maBreakoutFresh, maDistPct, squeezeBreakoutFresh));
     }
 
     /**

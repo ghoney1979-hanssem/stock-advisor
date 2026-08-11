@@ -118,6 +118,7 @@ stockadvisor:
     rsi-reversal-enabled: ${SIGNAL_RSI_REVERSAL_ENABLED:true}
     # [전략 H] 변동성 수축 돌파 (거래량 무관, 섀도우). NR7 수축 후 전일고가 돌파(이벤트)일 때만 진입 — 대조군 미추적.
     squeeze-breakout-enabled: ${SIGNAL_SQUEEZE_BREAKOUT_ENABLED:true}
+    squeeze-require-confirm: ${SIGNAL_SQUEEZE_REQUIRE_CONFIRM:false}   # [H 보완] 돌파 확인장치(분봉 신선도) — 페이드 돌파 회피. 기본 off=현행 무변경. NOT_CONFIRMED 대조군으로 forward 검증
     # [전략 J] 저평가 반등 (거래량 무관, 섀도우). RSI 과매도 상향돌파 + 업종 대비 저평가(PER/PBR<중앙값)일 때만 진입 — 대조군 미추적.
     value-reversal-enabled: ${SIGNAL_VALUE_REVERSAL_ENABLED:true}
     # 전략K 개장갭(순수 시초가) — 어제국면+오늘시초가 갭으로 개장 창(09:00~end)에 판단. 갭업 유지 + 비약세면 롱(섀도우).
@@ -201,6 +202,11 @@ stockadvisor:
     manual-confirm: ${TRADING_MANUAL_CONFIRM:true}          # 초기 단계 수동 승인 게이트
     swing-strategies: ${TRADING_SWING_STRATEGIES:MEAN_REVERSION_C}  # 오버나잇 스윙 전략(csv) — 장마감 강제청산 대신 익일 종가 청산, 진입 시 장마감초과 규칙 면제. ⚠️오버나잇 갭 리스크
     swing-horizon: ${TRADING_SWING_HORIZON:nextClose}       # 스윙 전략 성과게이트 검증 horizon(청산 시점=익일종가) — 스윙은 당일종가 아닌 이 horizon으로 게이팅
+    # 멀티데이(2-3주) 일봉 종가 경로 수집(2026-08-07, Phase 1 — 측정 전용, 실청산 동작 무변경).
+    # 이 전략들의 섀도우 진입분에 대해 D0..D+multiday-max-hold-days 일봉 종가를 forward 수집(하루 1회, 마감 후).
+    # 백테스트 불가라 forward-only → 표본 쌓이면 Phase 2에서 멀티데이 청산 트리거를 데이터로 선택.
+    multiday-strategies: ${TRADING_MULTIDAY_STRATEGIES:MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J}
+    multiday-max-hold-days: ${TRADING_MULTIDAY_MAX_HOLD_DAYS:15}  # D+N 거래일까지 수집(15거래일 ≈ 3주)
     # 스윙 트레일링 — fail-closed: 검증(swing-trail-analysis)에서 트레일(3/5/7%)이 익일보유보다 나을 때만 자동 채택. 검증 전엔 익일종가 보유(실청산 무변경).
     swing-trail:
       enabled: ${TRADING_SWING_TRAIL_ENABLED:true}         # false면 항상 익일종가 보유
