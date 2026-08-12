@@ -72,6 +72,9 @@ public class SignalAdminController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.MultidayExitAnalysisService multidayExitAnalysisService;   // 멀티데이 청산 시뮬(Phase 2) — 필드주입
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.FeatureMiningService featureMiningService;   // feature-space 마이닝(생성적 분석) — 필드주입
+
     private final DisclosurePollingService pollingService;
     private final SignalAlertService signalAlertService;
     private final MarketSignalService marketSignalService;
@@ -218,6 +221,23 @@ public class SignalAdminController {
     public Object multidayExitComparison() {
         if (multidayExitAnalysisService == null) return java.util.Map.of("error", "service unavailable");
         return multidayExitAnalysisService.compare();
+    }
+
+    /**
+     * Feature-space 마이닝(생성적 분석) — 쌓인 진입을 feature 축으로 bin해 "어떤 조건 구간이 수익이었나" 스캔.
+     * 교차거래일 가드로 단일일 클러스터 pocket은 highlights에서 제외. 아직 전략화 안 된 수익 조건 발굴용.
+     * 파라미터: lookbackDays(40)·market·regime(국면 세그먼트)·minSamples(20)·maxDayShare(80)·includeControl(false).
+     */
+    @GetMapping("/feature-mining")
+    public Object featureMining(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "40") int lookbackDays,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String market,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String regime,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "20") int minSamples,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "80") double maxDayShare,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean includeControl) {
+        if (featureMiningService == null) return java.util.Map.of("error", "service unavailable");
+        return featureMiningService.mine(lookbackDays, market, regime, minSamples, maxDayShare, includeControl);
     }
 
     /** 장중흐름 분석 — 전략별 진입시 지수흐름(mom lag) 부호별 net·승률(exit-horizon)·국면분리·what-if. lag=30|60. */
