@@ -240,6 +240,7 @@ stockadvisor:
       inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
       inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용
       close-net-avg-pct: ${TRADING_PERF_GATE_CLOSE_NET_AVG_PCT:0.3}   # 히스테리시스 닫기 문턱(%) — 열려있으면 이 값까지 유지(열 땐 min-net 0.3). <min-net이면 활성(예 −0.2), ≥min-net이면 off(기본 0.3=off). 문턱 근처 여닫이 진동·역선택 억제
+      max-single-day-share-pct: ${TRADING_PERF_GATE_MAX_SINGLE_DAY_SHARE_PCT:80}   # 교차거래일 요건 — 버킷 표본의 한 거래일 점유율이 이 %를 넘으면 단일일 클러스터로 보고 LIVE 졸업 차단(fail-closed). C의 6/26 78%·D KOSPI중립 85% 같은 이벤트1개 졸업 방지. 기본 80(보수적 시작, 60까지 조일 수 있음). 0=비활성
 
     # 국면연동 리스크 관리 (레이어 3 — 하락장 방어). DRY_RUN/LIVE 공통(리스크관리 흐름을 dry-run으로도 검증).
     risk:

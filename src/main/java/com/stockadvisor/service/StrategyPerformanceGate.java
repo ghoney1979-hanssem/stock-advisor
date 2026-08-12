@@ -63,7 +63,9 @@ public class StrategyPerformanceGate {
                                    List<TradingStrategy> strategies,
                                    @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct,
                                    @Value("${stockadvisor.trading.swing-strategies:MEAN_REVERSION_C}") String swingCsv,
-                                   @Value("${stockadvisor.trading.swing-horizon:nextClose}") String swingHorizon) {
+                                   @Value("${stockadvisor.trading.swing-horizon:nextClose}") String swingHorizon,
+                                   // 교차거래일 요건 — 버킷의 한 거래일 점유율이 이 %를 넘으면 단일일 클러스터로 보고 LIVE 졸업 차단. 0=비활성.
+                                   @Value("${stockadvisor.trading.perf-gate.max-single-day-share-pct:80}") double maxSingleDaySharePct) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.props = props;
         this.marketRegimeService = marketRegimeService;
@@ -74,7 +76,10 @@ public class StrategyPerformanceGate {
         this.roundTripCostPct = roundTripCostPct;
         this.swingStrategies = PolicyGate.parseCsv(swingCsv);
         this.swingHorizon = swingHorizon;
+        this.maxSingleDaySharePct = maxSingleDaySharePct;
     }
+
+    private final double maxSingleDaySharePct;
 
     /**
      * @param allowed      LIVE 실주문 허용 여부, netAvgReturnPct 표본 없으면 null
@@ -242,6 +247,10 @@ public class StrategyPerformanceGate {
         double sumR = 0; int nR = 0;
         double sumAll = 0; int nAll = 0;
         double sumF = 0; int nF = 0;
+        // 교차 거래일 요건: 버킷별 (alertDate → 표본수) — 단일일 지배(클러스터) 판정용.
+        java.util.Map<String, Integer> daysR = new java.util.HashMap<>();
+        java.util.Map<String, Integer> daysAll = new java.util.HashMap<>();
+        java.util.Map<String, Integer> daysF = new java.util.HashMap<>();
         for (TradeOutcome o : rows) {
             if (o.isControl()) continue;   // 대조군(미진입) 제외 — 게이트는 '진입 성과'만 검증(스윙 nextClose에서 대조군 오염 방지)
             if (marketSplit && !market.equals(o.getEntryMarket())) continue;   // 2D: 다른 시장 제외(양쪽 공통)
@@ -251,11 +260,12 @@ public class StrategyPerformanceGate {
                     : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());   // 없으면 tick 추정
             double cost = roundTripCostPct + slip;
             double net = (double) (price - o.getBuyPrice()) / o.getBuyPrice() * 100 - cost;
-            sumAll += net; nAll++;                                              // 전국면 pool
+            String d = o.getAlertDate();
+            sumAll += net; nAll++; bump(daysAll, d);                            // 전국면 pool
             boolean regimeMatch = regimeName == null || regimeName.equals(o.getEntryMarketTrend());
-            if (regimeMatch) { sumR += net; nR++; }                              // 국면 매칭
+            if (regimeMatch) { sumR += net; nR++; bump(daysR, d); }              // 국면 매칭
             if (regimeMatch && flowUp != null && o.getEntryIndexMom30() != null
-                    && (o.getEntryIndexMom30() >= 0) == flowUp) { sumF += net; nF++; }   // 국면+흐름 매칭
+                    && (o.getEntryIndexMom30() >= 0) == flowUp) { sumF += net; nF++; bump(daysF, d); }   // 국면+흐름 매칭
         }
         int n = nR;
         Double avg = n == 0 ? null : round2(sumR / nR);
@@ -275,6 +285,11 @@ public class StrategyPerformanceGate {
             Double avgF = round2(sumF / nF);
             String flowTag = regimeTag.isEmpty() ? "" : regimeTag.substring(0, regimeTag.length() - 2)
                     + "·흐름" + (flowUp ? "↑" : "↓") + "] ";
+            double shareF = singleDaySharePct(daysF, nF);
+            if (clustered(shareF)) {   // 교차거래일 미충족 — 단일일 클러스터는 net이 좋아도 LIVE 졸업 차단(fail-closed)
+                if (mutateHyst) openState.put(hystKey, false);
+                return clusterBlock(strategy, flowTag, shareF, nF, daysF.size(), avgF, regimeName, market);
+            }
             boolean allow = avgF >= effMinNet;
             if (mutateHyst) openState.put(hystKey, allow);
             return new GateDecision(strategy, allow,
@@ -284,6 +299,11 @@ public class StrategyPerformanceGate {
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
         if (n >= minSamples) {
+            double shareR = singleDaySharePct(daysR, n);
+            if (clustered(shareR)) {   // 교차거래일 미충족 — 단일일 클러스터는 net이 좋아도 LIVE 졸업 차단(fail-closed)
+                if (mutateHyst) openState.put(hystKey, false);
+                return clusterBlock(strategy, regimeTag, shareR, n, daysR.size(), avg, regimeName, market);
+            }
             boolean allow = avg >= effMinNet;
             if (mutateHyst) openState.put(hystKey, allow);
             return new GateDecision(strategy, allow,
@@ -295,6 +315,11 @@ public class StrategyPerformanceGate {
         // primary가 이미 전국면이라 fallback 무의미 → 건너뜀.
         if (props.fallbackEnabled() && regimeName != null) {
             Double avgAll = nAll == 0 ? null : round2(sumAll / nAll);
+            // 교차거래일 미충족 — 전국면 fallback pool도 단일일 클러스터면 축소진입 졸업 차단(fail-closed)
+            if (nAll >= props.fallbackMinSamples() && avgAll != null && clustered(singleDaySharePct(daysAll, nAll))) {
+                return clusterBlock(strategy, regimeTag + "전국면 ", singleDaySharePct(daysAll, nAll),
+                        nAll, daysAll.size(), avgAll, regimeName, market);
+            }
             if (nAll >= props.fallbackMinSamples() && avgAll != null && avgAll >= props.fallbackMinNetAvgPct()) {
                 // ③ 통과 → fallback=true(OrderService가 축소사이징 적용)
                 return new GateDecision(strategy, true,
@@ -360,5 +385,32 @@ public class StrategyPerformanceGate {
 
     private double round2(double v) {
         return Math.round(v * 100.0) / 100.0;
+    }
+
+    // ── 교차 거래일 요건(단일일 클러스터 방지, 2026-08-12) ──
+    private static void bump(java.util.Map<String, Integer> m, String d) {
+        if (d != null) m.merge(d, 1, Integer::sum);
+    }
+
+    /** 버킷의 최대 단일 거래일 점유율(%). 표본 없으면 0. */
+    private static double singleDaySharePct(java.util.Map<String, Integer> days, int n) {
+        if (n <= 0 || days.isEmpty()) return 0;
+        int max = 0;
+        for (int c : days.values()) if (c > max) max = c;
+        return 100.0 * max / n;
+    }
+
+    /** 한 거래일 점유율이 문턱(maxSingleDaySharePct)을 초과하면 단일일 클러스터로 판정(0=비활성). */
+    private boolean clustered(double sharePct) {
+        return maxSingleDaySharePct > 0 && sharePct > maxSingleDaySharePct;
+    }
+
+    /** 단일일 클러스터 버킷 — net 무관 LIVE 차단(fail-closed). netAvg는 참고용으로 실어 가시화. */
+    private GateDecision clusterBlock(String strategy, String tag, double sharePct, int n, int distinctDays,
+                                      Double avg, String regimeName, String market) {
+        return new GateDecision(strategy, false,
+                String.format("%s단일일 클러스터(최대 %.0f%% > %.0f%%, n=%d/%d거래일) — 교차거래일 미충족(미검증)",
+                        tag, sharePct, maxSingleDaySharePct, n, distinctDays),
+                n, avg, regimeName, market, false);
     }
 }
