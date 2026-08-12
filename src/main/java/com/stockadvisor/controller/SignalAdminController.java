@@ -236,7 +236,7 @@ public class SignalAdminController {
             @org.springframework.web.bind.annotation.RequestParam(required = false) String regime,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "20") int minSamples,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "80") double maxDayShare,
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean includeControl) {
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeControl) {
         if (featureMiningService == null) return java.util.Map.of("error", "service unavailable");
         return featureMiningService.mine(lookbackDays, horizon, market, regime, minSamples, maxDayShare, includeControl);
     }

@@ -48,8 +48,14 @@ public class FeatureMiningService {
         this.roundTripCostPct = roundTripCostPct;
     }
 
+    /**
+     * @param n/netAvgPct/winRatePct/clustered/topStrategy  진입(entered) 기준 pocket 통계
+     * @param controlN/controlNetPct                        같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나" 비교
+     * @param edgeVsControlPct                              진입net − 대조군net(양수면 진입이 이 조건에서 가치 추가). 둘 중 하나 없으면 null
+     */
     public record Bucket(String feature, String range, int n, int distinctDays, double maxDaySharePct,
-                         double netAvgPct, double winRatePct, boolean clustered, String topStrategy) {}
+                         double netAvgPct, double winRatePct, boolean clustered, String topStrategy,
+                         int controlN, Double controlNetPct, Double edgeVsControlPct) {}
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
@@ -92,20 +98,22 @@ public class FeatureMiningService {
     public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
                              double maxDaySharePct, boolean includeControl) {
         String cutoff = LocalDate.now(SEOUL).minusDays(lookbackDays).format(YYYYMMDD);
-        List<TradeOutcome> loaded = new ArrayList<>();
+        List<TradeOutcome> entered = new ArrayList<>();
+        List<TradeOutcome> control = new ArrayList<>();   // 미진입 후보(반사실 비교용) — includeControl일 때만
         for (TradeOutcome o : tradeOutcomeRepository.findByAlertDateGreaterThanEqual(cutoff)) {
-            if (!includeControl && o.isControl()) continue;
             if (o.getBuyPrice() <= 0) continue;
             if (market != null && !market.isBlank() && !market.equals(o.getEntryMarket())) continue;
             if (regime != null && !regime.isBlank() && !regime.equals(o.getEntryMarketTrend())) continue;
-            loaded.add(o);
+            if (o.isControl()) { if (includeControl) control.add(o); } else entered.add(o);
         }
 
         // horizon 통일: outcomeId → net%. horizon="exit"이면 게이트와 동일하게 전략별 청산시점 가격(스윙=nextClose,
-        // 그 외=권장청산마크 OutcomeSample). 마크 미수집이면 제외(fail-closed). 그 외 horizon은 해당 종가 필드.
+        // 그 외=권장청산마크 OutcomeSample). 마크 미수집이면 제외(fail-closed). ⚠️ 대조군은 exit 마크 미수집이라
+        // exit horizon에선 자동 제외 → 진입-대조군 비교는 close horizon에서만 채워짐(대조군은 종가만 보유).
         Map<Long, Double> netByOutcome = new java.util.HashMap<>();
+        List<TradeOutcome> both = new ArrayList<>(entered); both.addAll(control);
         Map<String, List<TradeOutcome>> byStrategy = new LinkedHashMap<>();
-        for (TradeOutcome o : loaded) byStrategy.computeIfAbsent(o.getStrategy(), k -> new ArrayList<>()).add(o);
+        for (TradeOutcome o : both) byStrategy.computeIfAbsent(o.getStrategy(), k -> new ArrayList<>()).add(o);
         for (Map.Entry<String, List<TradeOutcome>> e : byStrategy.entrySet()) {
             String effHz = "exit".equals(horizon) ? exitResolver.horizonFor(e.getKey(), "exit") : horizon;
             Function<TradeOutcome, Long> px = exitResolver.priceFor(e.getKey(), effHz);
@@ -114,21 +122,23 @@ public class FeatureMiningService {
                 if (price != null && price > 0) netByOutcome.put(o.getId(), netPct(o, price));
             }
         }
-        List<TradeOutcome> rows = loaded.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
+        List<TradeOutcome> re = entered.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
+        List<TradeOutcome> rc = control.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
 
         List<FeatureMining> features = new ArrayList<>();
         for (NumDef def : numericDefs()) {
-            features.add(mineFeature(def.name(), rows, o -> {
+            features.add(mineFeature(def.name(), re, rc, o -> {
                 Double v = def.f().apply(o);
                 return v == null ? null : binLabel(v, def.edges());
             }, minSamples, maxDaySharePct, netByOutcome));
         }
         for (CatDef def : categoricalDefs()) {
-            features.add(mineFeature(def.name(), rows, o -> {
+            features.add(mineFeature(def.name(), re, rc, o -> {
                 String v = def.f().apply(o);
                 return v == null || v.isBlank() ? null : v;
             }, minSamples, maxDaySharePct, netByOutcome));
         }
+        List<TradeOutcome> rows = re;
 
         // 하이라이트: 가드 통과(비클러스터·표본충분) bucket 중 net 상위/하위
         List<Bucket> all = new ArrayList<>();
@@ -142,27 +152,33 @@ public class FeatureMiningService {
                 minSamples, maxDaySharePct, highlights, avoid, features);
     }
 
-    private FeatureMining mineFeature(String feature, List<TradeOutcome> rows, Function<TradeOutcome, String> binner,
+    private FeatureMining mineFeature(String feature, List<TradeOutcome> entered, List<TradeOutcome> control,
+                                      Function<TradeOutcome, String> binner,
                                       int minSamples, double maxDaySharePct, Map<Long, Double> netByOutcome) {
-        // bucketLabel → 순회 통계 누산
-        Map<String, List<TradeOutcome>> byBucket = new LinkedHashMap<>();
-        for (TradeOutcome o : rows) {
-            String b = binner.apply(o);
-            if (b == null) continue;
-            byBucket.computeIfAbsent(b, k -> new ArrayList<>()).add(o);
-        }
+        Map<String, List<TradeOutcome>> byBucket = binGroups(entered, binner);
+        Map<String, List<TradeOutcome>> byBucketControl = binGroups(control, binner);
         List<Bucket> buckets = new ArrayList<>();
         for (Map.Entry<String, List<TradeOutcome>> e : byBucket.entrySet()) {
             List<TradeOutcome> g = e.getValue();
             if (g.size() < minSamples) continue;
-            buckets.add(statOf(feature, e.getKey(), g, maxDaySharePct, netByOutcome));
+            buckets.add(statOf(feature, e.getKey(), g,
+                    byBucketControl.getOrDefault(e.getKey(), List.of()), maxDaySharePct, netByOutcome));
         }
         buckets.sort(Comparator.comparingDouble(Bucket::netAvgPct).reversed());
         return new FeatureMining(feature, buckets);
     }
 
-    private Bucket statOf(String feature, String range, List<TradeOutcome> g, double maxDaySharePct,
-                          Map<Long, Double> netByOutcome) {
+    private Map<String, List<TradeOutcome>> binGroups(List<TradeOutcome> rows, Function<TradeOutcome, String> binner) {
+        Map<String, List<TradeOutcome>> m = new LinkedHashMap<>();
+        for (TradeOutcome o : rows) {
+            String b = binner.apply(o);
+            if (b != null) m.computeIfAbsent(b, k -> new ArrayList<>()).add(o);
+        }
+        return m;
+    }
+
+    private Bucket statOf(String feature, String range, List<TradeOutcome> g, List<TradeOutcome> controlG,
+                          double maxDaySharePct, Map<Long, Double> netByOutcome) {
         double sum = 0; int wins = 0;
         Map<String, Integer> days = new LinkedHashMap<>();
         Map<String, Integer> strat = new LinkedHashMap<>();
@@ -174,12 +190,22 @@ public class FeatureMiningService {
             strat.merge(o.getStrategy() == null ? "?" : o.getStrategy(), 1, Integer::sum);
         }
         int n = g.size();
+        double enteredNet = round2(sum / n);
         double maxShare = maxSharePct(days, n);
         boolean clustered = maxDaySharePct > 0 && maxShare > maxDaySharePct;
         String top = strat.entrySet().stream().max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey).orElse("?");
+        // 같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나"
+        Double controlNet = null;
+        if (!controlG.isEmpty()) {
+            double cs = 0;
+            for (TradeOutcome o : controlG) cs += netByOutcome.get(o.getId());
+            controlNet = round2(cs / controlG.size());
+        }
+        Double edge = controlNet == null ? null : round2(enteredNet - controlNet);
         return new Bucket(feature, range, n, days.size(), round2(maxShare),
-                round2(sum / n), round2(100.0 * wins / n), clustered, top);
+                enteredNet, round2(100.0 * wins / n), clustered, top,
+                controlG.size(), controlNet, edge);
     }
 
     private double netPct(TradeOutcome o, long price) {

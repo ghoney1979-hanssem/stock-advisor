@@ -83,4 +83,29 @@ class FeatureMiningServiceTest {
         assertThat(r.highlights()).anyMatch(b -> b.feature().equals("거래량배수") && b.range().equals("8~15"));
         assertThat(r.highlights()).noneMatch(b -> b.range().equals("<2"));
     }
+
+    @Test
+    void 진입_대조군_비교_edge_계산() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        String[] dates = {"20260602", "20260603", "20260604", "20260605", "20260606"};
+        // 진입(8~15): net +2%
+        for (int i = 0; i < 25; i++) rows.add(vr(10, dates[i % 5], i, 2.0));
+        // 같은 8~15 pocket의 대조군(미진입): net -1%
+        for (int i = 0; i < 25; i++) {
+            TradeOutcome c = vr(10, dates[i % 5], 200 + i, -1.0);
+            c.markControl("SCORE");
+            rows.add(c);
+        }
+        when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
+
+        FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 20, 80.0, true);
+        FeatureMiningService.Bucket b = r.features().stream()
+                .filter(f -> f.feature().equals("거래량배수")).findFirst().orElseThrow()
+                .buckets().stream().filter(x -> x.range().equals("8~15")).findFirst().orElseThrow();
+
+        assertThat(b.netAvgPct()).isCloseTo(2.0, within(1e-6));      // 진입
+        assertThat(b.controlN()).isEqualTo(25);
+        assertThat(b.controlNetPct()).isCloseTo(-1.0, within(1e-6)); // 미진입
+        assertThat(b.edgeVsControlPct()).isCloseTo(3.0, within(1e-6)); // 진입이 +3%p 우위
+    }
 }
