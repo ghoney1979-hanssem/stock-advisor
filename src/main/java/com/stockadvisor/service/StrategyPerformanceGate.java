@@ -69,7 +69,9 @@ public class StrategyPerformanceGate {
                                    // 전략별 net 재검증 시작일 — 로직/임계 변경 시 구표본 제외("STRATEGY:yyyyMMdd,..."). 변경일 이후 표본만 채점.
                                    @Value("${stockadvisor.trading.perf-gate.strategy-since:}") String strategySinceCsv,
                                    // 부트스트랩 허용 전략(csv) — since 리셋 등으로 표본 미달이어도 축소사이징 실주문(재검증 중 완전정지 방지). 기본 빈값=fail-closed.
-                                   @Value("${stockadvisor.trading.perf-gate.bootstrap-strategies:}") String bootstrapStrategiesCsv) {
+                                   @Value("${stockadvisor.trading.perf-gate.bootstrap-strategies:}") String bootstrapStrategiesCsv,
+                                   // 구표본 자동 재필터 — 조이는 필터 추가 시 태깅된 feature 임계로 구표본 중 새 필터 통과분만 채점(since 리셋의 정밀판).
+                                   @Value("${stockadvisor.trading.perf-gate.refilter:}") String refilterCsv) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.props = props;
         this.marketRegimeService = marketRegimeService;
@@ -83,7 +85,11 @@ public class StrategyPerformanceGate {
         this.maxSingleDaySharePct = maxSingleDaySharePct;
         this.strategySince = parseSince(strategySinceCsv);
         this.bootstrapStrategies = PolicyGate.parseCsv(bootstrapStrategiesCsv);
+        this.refilters = GateRefilter.parse(refilterCsv);
     }
+
+    /** 전략 → 구표본 재필터 술어(조이는 필터 임계). */
+    private final java.util.Map<String, GateRefilter> refilters;
 
     private final double maxSingleDaySharePct;
     /** 전략 → net 재검증 시작일(yyyyMMdd). 로직 변경 시 구표본 제외용. */
@@ -277,8 +283,12 @@ public class StrategyPerformanceGate {
         java.util.Map<String, Integer> daysR = new java.util.HashMap<>();
         java.util.Map<String, Integer> daysAll = new java.util.HashMap<>();
         java.util.Map<String, Integer> daysF = new java.util.HashMap<>();
+        // 구표본 자동 재필터: 조이는 필터 추가 시 새 필터의 임계(태깅된 feature)를 구표본에도 적용 → 통과분만 채점.
+        GateRefilter refilter = refilters.get(strategy);
+        final String refilterTag = refilter != null ? " ·재필터" : "";
         for (TradeOutcome o : rows) {
             if (o.isControl()) continue;   // 대조군(미진입) 제외 — 게이트는 '진입 성과'만 검증(스윙 nextClose에서 대조군 오염 방지)
+            if (refilter != null && !refilter.test(o)) continue;   // 새 필터라면 걸렀을 구표본 제외(net 정밀 재검증)
             if (marketSplit && !market.equals(o.getEntryMarket())) continue;   // 2D: 다른 시장 제외(양쪽 공통)
             Long price = exitMode ? exitPriceByOutcome.get(o.getId()) : resultPrice(o, horizon);
             if (price == null || o.getBuyPrice() <= 0) continue;   // exit 마크 미수집 표본은 제외(fail-closed)
@@ -320,7 +330,7 @@ public class StrategyPerformanceGate {
             if (mutateHyst) openState.put(hystKey, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNet, nF, hystTag),
+                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNet, nF, hystTag + refilterTag),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
@@ -334,7 +344,7 @@ public class StrategyPerformanceGate {
             if (mutateHyst) openState.put(hystKey, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNet, n, hystTag),
+                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNet, n, hystTag + refilterTag),
                     n, avg, regimeName, market, false);
         }
         // ② 국면 표본 부족 + fallback 활성 → 국면무관 전국면 pool로 재평가(더 엄격한 바). regimeName==null(미산출/off)이면
