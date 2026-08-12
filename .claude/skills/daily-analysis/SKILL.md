@@ -1,13 +1,15 @@
 ---
 name: daily-analysis
-description: 주식 자동매매 시스템의 일별 성과·전략 진단 종합 분석. 모든 집계 데이터(게이트·대조군·흐름·MAE·breadth·집행품질)를 수집해 전략 옥석을 가리고, 시스템 보완 조치 + 전략별 보정방안(수집 데이터 기반 진입/청산/손절/사이징 튜닝) + 데이터 공백을 메울 추가 지표까지 제안한다.
+description: 주식 자동매매 시스템의 일별 성과·전략 진단 종합 분석. 모든 집계 데이터(게이트·대조군·흐름·MAE·breadth·집행품질·feature-mining·멀티데이)를 수집해 전략 옥석을 가리고, 시스템 보완 조치 + 전략별 보정방안(수집 데이터 기반 진입/청산/손절/사이징 튜닝) + 데이터 공백을 메울 추가 지표 + 신규 전략 발굴(수익 pocket→가설)까지 제안한다. 최근 배포된 새 엔드포인트가 있으면 자동 반영.
 user-invocable: true
 ---
 
 # daily-analysis
 
 장 마감 후(또는 요청 시점) 시스템의 **모든 집계 데이터**를 수집해 종합 분석 리포트를 만든다.
-산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ③ 시스템 보완 조치 ④ 전역 수익률 개선 ⑤ **전략별 보정방안(수집 데이터 기반 진입·청산·손절·사이징 튜닝)** ⑥ **데이터 공백 & 추가 지표 제안** 6부.
+산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ③ 시스템 보완 조치 ④ 전역 수익률 개선 ⑤ **전략별 보정방안(수집 데이터 기반 진입·청산·손절·사이징 튜닝)** ⑥ **데이터 공백 & 추가 지표 제안** ⑦ **신규 전략 발굴(수익 pocket → 가설, Phase 5)** 7부.
+
+⚠️ **매 실행 시작 시**: 최근 배포로 **새 엔드포인트/데이터가 추가됐는지 먼저 점검**(로컬 `git log --oneline -15`로 최근 커밋 확인, 또는 새 `/admin/*` GET 시도)하고, 있으면 Phase 1 수집에 포함해 분석에 활용한다 — 이 시스템은 계속 진화하므로 고정된 엔드포인트 목록에 갇히지 말 것.
 
 ## 환경 (고정 사실 — 재탐색 불필요)
 
@@ -29,6 +31,13 @@ SSH 한 번에 여러 curl을 묶어 호출(왕복 절감). 수집 대상 GET �
 | 스윙 | `swing-exit`, `swing-trail-analysis` |
 | 장중흐름 | `flow-analysis?lag=30` **및** `lag=60` (둘 다 — lag별 표본이 다름, 아래 함정 참조) |
 | 시장 폭 | `market-breadth` |
+| **전략 발굴(생성적)** | **`feature-mining?horizon=exit&includeControl=true`** (feature 조합별 net·진입-대조군 edge — 신규 전략 pocket 발굴, 아래 Phase 5) |
+| **멀티데이(2-3주)** | `multiday-exit-comparison` (C·D·J 일봉경로 보유D+N/트레일/MA/손절 시뮬), `multiday-marks` (수집현황) |
+
+⚠️ **2026-08-12 추가 배포분(반드시 활용)**:
+- **horizon 통일**: `outcome-analysis`·`feature-mining`도 이제 **`?horizon=exit`** 지원(게이트·control과 동일 청산시점). **반사실 비교는 exit로 정렬**해 뽑을 것(종가 horizon과 혼용 금지 — 아래 함정3 완화됨).
+- **게이트 교차거래일 가드**: `strategy-gate` 사유에 "단일일 클러스터(최대 X% > 80%) — 교차거래일 미충족"이 뜨면, 그 버킷 net은 **하루 이벤트가 부풀린 허수**라 게이트가 차단한 것(정상). 이 사유가 뜬 전략은 "성과 미달"과 구분해 보고.
+- **feature-mining 진입-대조군 edge**: 각 pocket에 `netAvgPct`(진입)·`controlNetPct`(미진입)·`edgeVsControlPct`(진입−대조군). **edge<0이면 그 조건에선 진입이 손해**(전략 필터가 오히려 해로움), **edge>0 & 진입net>0이면 유효 pocket**.
 
 DB 직접 조회(`sudo docker exec sa-postgres psql -U stockadvisor -d stockadvisor -c "..."`):
 
@@ -132,6 +141,34 @@ group by b.strategy, hold_min order by b.strategy, hold_min;
 - **라이브 청산 실측**(체결 시각·실체결가) vs 섀도우 마크 괴리 → 체결 로그 기반 **실보유시간·실슬리피지 분포** 수집(C⑦·집행품질 정밀화).
 - **뉴스/체결강도 feature가 측정만 되고** 승격 판단 표본 부족 → 누적 후 재검 시점(표본 목표치)을 명시.
 - ⚠️ 신규 태깅은 **forward-only(소급 불가)** → 판단 보류 중이어도 **"측정은 지금 시작"** 제안을 우선(빨리 붙일수록 검증이 빨라짐).
+
+## Phase 5. 신규 전략 발굴 (생성적 — 수익 pocket → 전략 가설, 2026-08-12 추가)
+
+기존 전략 채점(Phase 3·4)과 별개로, **쌓인 데이터에서 아직 전략화 안 된 수익 조건을 발굴**한다. 핵심 소스는 `feature-mining`.
+> ⚠️ 이건 "발견"이지 "즉시 채택"이 아니다 — 사후 데이터 마이닝은 다중검정으로 허수를 잘 낳는다. 산출물은 **가설 + 검증 계획**이지 실전 배포 지시가 아니다.
+
+**수집**(exit horizon 필수 — 게이트와 동일 기준):
+```
+feature-mining?horizon=exit&includeControl=true&minSamples=30&maxDayShare=80        # 전체
+feature-mining?horizon=exit&includeControl=true&minSamples=30&regime=BULL           # 국면 세그먼트(교란 통제)
+feature-mining?...&regime=NEUTRAL / regime=BEAR                                      # 국면별로 각각
+```
+국면을 안 나누면 국면 교란으로 섞인다(전 전략이 국면조건부) → **반드시 regime 세그먼트별로도** 뽑는다.
+
+**발굴 필터(허수 배제 — 이걸 다 통과한 pocket만 "후보")**:
+1. **비클러스터**(`clustered=false`) — 단일일 이벤트가 만든 net 제외(이미 highlights는 통과분만).
+2. **표본 충분 + 교차거래일**(`n≥30`, `distinctDays≥5`) — 며칠에 걸쳐 반복된 조건.
+3. **진입 net > 왕복비용**(`netAvgPct` 유의미하게 +).
+4. **진입-대조군 edge > 0**(`edgeVsControlPct>0`) — 그 조건에서 **진입이 미진입보다 실제로 나았음**(필터/신호가 가치 추가). edge≤0이면 "그 조건은 좋아 보여도 진입이 손해"라 후보 아님.
+5. **국면 일관성** — 한 국면만이 아니라 최소 두 국면에서 +거나, 특정 국면 전용이면 그 국면 표본이 충분.
+
+**해석·산출**:
+- **후보 pocket을 "이미 어느 전략의 영역인가"로 분류**: `topStrategy`가 그 pocket을 이미 지배하면 → 그 전략의 **파라미터 튜닝**(Phase 4-C)으로 회수. topStrategy가 잡다하거나 pocket이 여러 전략에 흩어져 있으면 → **신규 전략 가설**(그 조건만 노리는 새 룰).
+- **교차 feature 확인**: 단일 feature pocket이 뜨면, 그게 다른 feature(국면·흐름·업종)와 겹치는지 2차 확인(`?regime=`·`?market=` 조합). 진짜 엣지는 보통 2~3 조건 교집합.
+- **출력 형식**: **[발굴 pocket] 조건(feature 구간 + 국면/흐름) · 근거(n·distinctDays·진입net·edge) → 이미 전략 영역인가(topStrategy) → 가설(신규 룰 or 기존 튜닝) → 검증 계획(섀도우 변수로 forward, F 신선도필터·H 돌파확인 패턴)**.
+- ⚠️ **즉시 실전 금지**: 발굴은 forward 검증(섀도우 + 대조군)으로 넘긴다. "이 조건이 과거에 좋았다"는 **미래를 보장 안 함** — 신규 전략/필터는 `@Component + scope()` 또는 env 기본 off 섀도우 변수로 붙여 측정부터(측정-먼저 원칙).
+
+**avoid 활용(대칭)**: `avoid`(net 하위) + `edgeVsControlPct<0` pocket = **현재 전략이 진입하는데 미진입이 나은 조건** → Phase 4-C 필터 강화/국면 하드컷 후보로 넘긴다.
 
 ## 인버스 분리 표기 (2026-07-30 추가)
 

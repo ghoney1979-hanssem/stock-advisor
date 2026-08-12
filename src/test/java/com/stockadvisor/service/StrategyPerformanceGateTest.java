@@ -83,7 +83,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct);   // 스윙 없음
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, "", "");   // 스윙 없음
     }
 
     // 스윙 전략 게이트(swingHorizon=nextClose)
@@ -95,7 +95,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0);
+                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0, "", "");
     }
 
     /** trend + mom30 태깅 표본 — 국면+흐름 3차원 검증용. */
@@ -117,7 +117,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0);
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, "", "");
     }
 
     @Test
@@ -479,7 +479,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0);
+                List.of(), COST, "", "nextClose", 0.0, "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -514,7 +514,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0);
+                List.of(), COST, "", "nextClose", 0.0, "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -669,5 +669,55 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceGate.GateDecision d =
                 gate(props(true, 20, 0.0), rows, null, 0.0).evaluate("MOMENTUM_A");   // 0=비활성
         assertThat(d.allowed()).isTrue();
+    }
+
+    // ── 전략별 net 재검증 시작일(strategy-since) + 부트스트랩 다리 ──
+    /** since/bootstrap 지정 + cutoff를 실제로 존중하는 repo(since 필터 검증용). */
+    private StrategyPerformanceGate gateSince(StrategyPerformanceProperties p, List<TradeOutcome> rows,
+                                              String sinceCsv, String bootstrapCsv) {
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenAnswer(inv -> {
+            String cutoff = inv.getArgument(1);
+            return rows.stream().filter(o -> o.getAlertDate().compareTo(cutoff) >= 0).toList();
+        });
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(null);
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, sinceCsv, bootstrapCsv);
+    }
+
+    @Test
+    void since_리셋되면_이전_표본_제외되어_표본부족_차단() {
+        String today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul"))
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+        List<TradeOutcome> rows = new ArrayList<>();   // 과거(구로직) 표본 30건 — since로 전부 제외됨
+        for (int i = 0; i < 30; i++) rows.add(outcomeOn("MOMENTUM_A", "20200101", i, 2.0));
+        StrategyPerformanceGate.GateDecision d =
+                gateSince(props(true, 20, 0.0), rows, "MOMENTUM_A:" + today, "").evaluate("MOMENTUM_A");
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.samples()).isZero();
+        assertThat(d.reason()).contains("since " + today);
+    }
+
+    @Test
+    void 부트스트랩_전략은_표본미달이어도_축소사이징_허용() {
+        List<TradeOutcome> rows = new ArrayList<>();   // 5건(<minSamples 20)
+        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", "20260805", i, 2.0));
+        StrategyPerformanceGate.GateDecision d =
+                gateSince(props(true, 20, 0.0), rows, "", "MOMENTUM_A").evaluate("MOMENTUM_A");
+        assertThat(d.allowed()).isTrue();
+        assertThat(d.fallback()).isTrue();          // 축소사이징
+        assertThat(d.reason()).contains("부트스트랩");
+    }
+
+    @Test
+    void 부트스트랩_미지정_전략은_표본미달이면_차단() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", "20260805", i, 2.0));
+        StrategyPerformanceGate.GateDecision d =
+                gateSince(props(true, 20, 0.0), rows, "", "").evaluate("MOMENTUM_A");
+        assertThat(d.allowed()).isFalse();          // fail-closed 유지
     }
 }

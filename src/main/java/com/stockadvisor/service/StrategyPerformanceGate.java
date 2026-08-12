@@ -65,7 +65,11 @@ public class StrategyPerformanceGate {
                                    @Value("${stockadvisor.trading.swing-strategies:MEAN_REVERSION_C}") String swingCsv,
                                    @Value("${stockadvisor.trading.swing-horizon:nextClose}") String swingHorizon,
                                    // 교차거래일 요건 — 버킷의 한 거래일 점유율이 이 %를 넘으면 단일일 클러스터로 보고 LIVE 졸업 차단. 0=비활성.
-                                   @Value("${stockadvisor.trading.perf-gate.max-single-day-share-pct:80}") double maxSingleDaySharePct) {
+                                   @Value("${stockadvisor.trading.perf-gate.max-single-day-share-pct:80}") double maxSingleDaySharePct,
+                                   // 전략별 net 재검증 시작일 — 로직/임계 변경 시 구표본 제외("STRATEGY:yyyyMMdd,..."). 변경일 이후 표본만 채점.
+                                   @Value("${stockadvisor.trading.perf-gate.strategy-since:}") String strategySinceCsv,
+                                   // 부트스트랩 허용 전략(csv) — since 리셋 등으로 표본 미달이어도 축소사이징 실주문(재검증 중 완전정지 방지). 기본 빈값=fail-closed.
+                                   @Value("${stockadvisor.trading.perf-gate.bootstrap-strategies:}") String bootstrapStrategiesCsv) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.props = props;
         this.marketRegimeService = marketRegimeService;
@@ -77,9 +81,27 @@ public class StrategyPerformanceGate {
         this.swingStrategies = PolicyGate.parseCsv(swingCsv);
         this.swingHorizon = swingHorizon;
         this.maxSingleDaySharePct = maxSingleDaySharePct;
+        this.strategySince = parseSince(strategySinceCsv);
+        this.bootstrapStrategies = PolicyGate.parseCsv(bootstrapStrategiesCsv);
     }
 
     private final double maxSingleDaySharePct;
+    /** 전략 → net 재검증 시작일(yyyyMMdd). 로직 변경 시 구표본 제외용. */
+    private final java.util.Map<String, String> strategySince;
+    /** since 리셋 후 표본 미달이어도 축소사이징 실주문 허용할 전략(재검증 다리). */
+    private final java.util.Set<String> bootstrapStrategies;
+
+    /** "A:20260812,B:20260810" → {A:20260812, B:20260810}. */
+    private static java.util.Map<String, String> parseSince(String csv) {
+        java.util.Map<String, String> m = new java.util.HashMap<>();
+        if (csv != null) {
+            for (String pair : csv.split(",")) {
+                String[] kv = pair.split(":");
+                if (kv.length == 2 && !kv[0].isBlank() && !kv[1].isBlank()) m.put(kv[0].trim(), kv[1].trim());
+            }
+        }
+        return m;
+    }
 
     /**
      * @param allowed      LIVE 실주문 허용 여부, netAvgReturnPct 표본 없으면 null
@@ -227,6 +249,10 @@ public class StrategyPerformanceGate {
         int minSamples = "INVERSE".equals(market) ? props.inverseMinSamples() : props.minSamples();
 
         String cutoff = LocalDate.now(SEOUL).minusDays(props.lookbackDays()).format(YYYYMMDD);
+        // 전략별 net 재검증 시작일(로직/임계 변경) — 변경일이 룩백보다 최신이면 cutoff 상향 → 구로직 표본 제외(net 리셋).
+        String since = strategySince.get(strategy);
+        boolean sinceReset = since != null && since.compareTo(cutoff) > 0;
+        if (sinceReset) cutoff = since;
         List<TradeOutcome> rows =
                 tradeOutcomeRepository.findByStrategyAndAlertDateGreaterThanEqual(strategy, cutoff);
 
@@ -342,9 +368,18 @@ public class StrategyPerformanceGate {
                             regimeTag, n, minSamples, props.inverseBootstrapSizeMult()),
                     n, avg, regimeName, market, true);
         }
+        // 일반 부트스트랩(재검증 다리): since 리셋 등으로 표본 미달이어도 지정 전략은 축소사이징(fallbackSizeMult)으로 실주문 —
+        // 로직 변경 후 완전정지 없이 실표본 수집. 표본이 minSamples에 차면 위 엄격 경로로 자동 졸업(미달이면 차단, 우회 불가).
+        if (bootstrapStrategies.contains(strategy)) {
+            return new GateDecision(strategy, true,
+                    String.format("%s부트스트랩(표본 %d/%d%s) — 축소진입(재검증 중 실표본 수집)",
+                            regimeTag, n, minSamples, sinceReset ? ", since " + since : ""),
+                    n, avg, regimeName, market, true);
+        }
         // fallback 비활성 → 기존 fail-closed
         return new GateDecision(strategy, false,
-                String.format("%s표본 부족(%d/%d) — 미검증 전략 실주문 차단", regimeTag, n, minSamples), n, avg, regimeName, market, false);
+                String.format("%s표본 부족(%d/%d%s) — 미검증 전략 실주문 차단",
+                        regimeTag, n, minSamples, sinceReset ? ", since " + since : ""), n, avg, regimeName, market, false);
     }
 
     /** 전략×시장(KOSPI/KOSDAQ) 게이트 상태(가시화/관리 API용) — 시장별 국면 매칭 반영. */
