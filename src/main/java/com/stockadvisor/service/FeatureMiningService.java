@@ -35,13 +35,16 @@ public class FeatureMiningService {
 
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final ExecutionCostModel executionCostModel;
+    private final ExitHorizonPriceResolver exitResolver;   // horizon="exit"(게이트 동일 청산시점) 지원
     private final double roundTripCostPct;
 
     public FeatureMiningService(TradeOutcomeRepository tradeOutcomeRepository,
                                 ExecutionCostModel executionCostModel,
+                                ExitHorizonPriceResolver exitResolver,
                                 @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.executionCostModel = executionCostModel;
+        this.exitResolver = exitResolver;
         this.roundTripCostPct = roundTripCostPct;
     }
 
@@ -50,7 +53,7 @@ public class FeatureMiningService {
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
-    public record MiningReport(int rows, int lookbackDays, String market, String regime, int minSamples,
+    public record MiningReport(int rows, int lookbackDays, String horizon, String market, String regime, int minSamples,
                                double maxDaySharePct, List<Bucket> highlights, List<Bucket> avoid,
                                List<FeatureMining> features) {}
 
@@ -86,30 +89,45 @@ public class FeatureMiningService {
                 new CatDef("전략", TradeOutcome::getStrategy));
     }
 
-    public MiningReport mine(int lookbackDays, String market, String regime, int minSamples,
+    public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
                              double maxDaySharePct, boolean includeControl) {
         String cutoff = LocalDate.now(SEOUL).minusDays(lookbackDays).format(YYYYMMDD);
-        List<TradeOutcome> rows = new ArrayList<>();
+        List<TradeOutcome> loaded = new ArrayList<>();
         for (TradeOutcome o : tradeOutcomeRepository.findByAlertDateGreaterThanEqual(cutoff)) {
             if (!includeControl && o.isControl()) continue;
-            if (o.getPriceClose() == null || o.getBuyPrice() <= 0) continue;
+            if (o.getBuyPrice() <= 0) continue;
             if (market != null && !market.isBlank() && !market.equals(o.getEntryMarket())) continue;
             if (regime != null && !regime.isBlank() && !regime.equals(o.getEntryMarketTrend())) continue;
-            rows.add(o);
+            loaded.add(o);
         }
+
+        // horizon 통일: outcomeId → net%. horizon="exit"이면 게이트와 동일하게 전략별 청산시점 가격(스윙=nextClose,
+        // 그 외=권장청산마크 OutcomeSample). 마크 미수집이면 제외(fail-closed). 그 외 horizon은 해당 종가 필드.
+        Map<Long, Double> netByOutcome = new java.util.HashMap<>();
+        Map<String, List<TradeOutcome>> byStrategy = new LinkedHashMap<>();
+        for (TradeOutcome o : loaded) byStrategy.computeIfAbsent(o.getStrategy(), k -> new ArrayList<>()).add(o);
+        for (Map.Entry<String, List<TradeOutcome>> e : byStrategy.entrySet()) {
+            String effHz = "exit".equals(horizon) ? exitResolver.horizonFor(e.getKey(), "exit") : horizon;
+            Function<TradeOutcome, Long> px = exitResolver.priceFor(e.getKey(), effHz);
+            for (TradeOutcome o : e.getValue()) {
+                Long price = px.apply(o);
+                if (price != null && price > 0) netByOutcome.put(o.getId(), netPct(o, price));
+            }
+        }
+        List<TradeOutcome> rows = loaded.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
 
         List<FeatureMining> features = new ArrayList<>();
         for (NumDef def : numericDefs()) {
             features.add(mineFeature(def.name(), rows, o -> {
                 Double v = def.f().apply(o);
                 return v == null ? null : binLabel(v, def.edges());
-            }, minSamples, maxDaySharePct));
+            }, minSamples, maxDaySharePct, netByOutcome));
         }
         for (CatDef def : categoricalDefs()) {
             features.add(mineFeature(def.name(), rows, o -> {
                 String v = def.f().apply(o);
                 return v == null || v.isBlank() ? null : v;
-            }, minSamples, maxDaySharePct));
+            }, minSamples, maxDaySharePct, netByOutcome));
         }
 
         // 하이라이트: 가드 통과(비클러스터·표본충분) bucket 중 net 상위/하위
@@ -120,12 +138,12 @@ public class FeatureMiningService {
         List<Bucket> avoid = all.stream()
                 .sorted(Comparator.comparingDouble(Bucket::netAvgPct)).limit(10).toList();
 
-        return new MiningReport(rows.size(), lookbackDays, market, regime, minSamples, maxDaySharePct,
-                highlights, avoid, features);
+        return new MiningReport(rows.size(), lookbackDays, horizon == null ? "close" : horizon, market, regime,
+                minSamples, maxDaySharePct, highlights, avoid, features);
     }
 
-    private FeatureMining mineFeature(String feature, List<TradeOutcome> rows,
-                                      Function<TradeOutcome, String> binner, int minSamples, double maxDaySharePct) {
+    private FeatureMining mineFeature(String feature, List<TradeOutcome> rows, Function<TradeOutcome, String> binner,
+                                      int minSamples, double maxDaySharePct, Map<Long, Double> netByOutcome) {
         // bucketLabel → 순회 통계 누산
         Map<String, List<TradeOutcome>> byBucket = new LinkedHashMap<>();
         for (TradeOutcome o : rows) {
@@ -137,18 +155,19 @@ public class FeatureMiningService {
         for (Map.Entry<String, List<TradeOutcome>> e : byBucket.entrySet()) {
             List<TradeOutcome> g = e.getValue();
             if (g.size() < minSamples) continue;
-            buckets.add(statOf(feature, e.getKey(), g, maxDaySharePct));
+            buckets.add(statOf(feature, e.getKey(), g, maxDaySharePct, netByOutcome));
         }
         buckets.sort(Comparator.comparingDouble(Bucket::netAvgPct).reversed());
         return new FeatureMining(feature, buckets);
     }
 
-    private Bucket statOf(String feature, String range, List<TradeOutcome> g, double maxDaySharePct) {
+    private Bucket statOf(String feature, String range, List<TradeOutcome> g, double maxDaySharePct,
+                          Map<Long, Double> netByOutcome) {
         double sum = 0; int wins = 0;
         Map<String, Integer> days = new LinkedHashMap<>();
         Map<String, Integer> strat = new LinkedHashMap<>();
         for (TradeOutcome o : g) {
-            double net = netPct(o);
+            double net = netByOutcome.get(o.getId());
             sum += net;
             if (net > 0) wins++;
             days.merge(o.getAlertDate() == null ? "?" : o.getAlertDate(), 1, Integer::sum);
@@ -163,10 +182,10 @@ public class FeatureMiningService {
                 round2(sum / n), round2(100.0 * wins / n), clustered, top);
     }
 
-    private double netPct(TradeOutcome o) {
+    private double netPct(TradeOutcome o, long price) {
         double slip = o.getEntrySlippagePct() != null ? o.getEntrySlippagePct()
                 : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());
-        return (double) (o.getPriceClose() - o.getBuyPrice()) / o.getBuyPrice() * 100 - (roundTripCostPct + slip);
+        return (double) (price - o.getBuyPrice()) / o.getBuyPrice() * 100 - (roundTripCostPct + slip);
     }
 
     // ── 순수 코어(단위테스트 대상) ──────────────────────────────

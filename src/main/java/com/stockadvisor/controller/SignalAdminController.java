@@ -231,13 +231,14 @@ public class SignalAdminController {
     @GetMapping("/feature-mining")
     public Object featureMining(
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "40") int lookbackDays,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "close") String horizon,
             @org.springframework.web.bind.annotation.RequestParam(required = false) String market,
             @org.springframework.web.bind.annotation.RequestParam(required = false) String regime,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "20") int minSamples,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "80") double maxDayShare,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean includeControl) {
         if (featureMiningService == null) return java.util.Map.of("error", "service unavailable");
-        return featureMiningService.mine(lookbackDays, market, regime, minSamples, maxDayShare, includeControl);
+        return featureMiningService.mine(lookbackDays, horizon, market, regime, minSamples, maxDayShare, includeControl);
     }
 
     /** 장중흐름 분석 — 전략별 진입시 지수흐름(mom lag) 부호별 net·승률(exit-horizon)·국면분리·what-if. lag=30|60. */

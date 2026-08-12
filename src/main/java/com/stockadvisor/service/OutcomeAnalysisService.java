@@ -24,13 +24,16 @@ public class OutcomeAnalysisService {
 
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final ExecutionCostModel executionCostModel;
+    private final ExitHorizonPriceResolver exitResolver;   // horizon="exit"(게이트 동일 청산시점) 지원 — 반사실 비교 정합
     private final double roundTripCostPct;   // 왕복 매매비용(수수료+거래세) — 슬리피지는 ExecutionCostModel 별도 가산
 
     public OutcomeAnalysisService(TradeOutcomeRepository tradeOutcomeRepository,
                                   ExecutionCostModel executionCostModel,
+                                  ExitHorizonPriceResolver exitResolver,
                                   @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.executionCostModel = executionCostModel;
+        this.exitResolver = exitResolver;
         this.roundTripCostPct = roundTripCostPct;
     }
 
@@ -43,7 +46,7 @@ public class OutcomeAnalysisService {
                                    List<CategoryWinRate> byMarket, List<CategoryWinRate> bySector,
                                    List<RegimeStat> byMarketRegime, double roundTripCostPct) {}
 
-    /** @param horizon close(당일종가)/nextClose(익일=D+1종가)/d2(D+2종가)/d3(D+3종가)/p10(+10분)/p30(+30분) */
+    /** @param horizon exit(게이트 동일=권장청산마크·스윙 nextClose)/close(당일종가)/nextClose(D+1)/d2/d3/p10/p30 */
     public List<StrategyAnalysis> analyze(String horizon) {
         Map<String, List<TradeOutcome>> byStrategy = new TreeMap<>();
         for (TradeOutcome o : tradeOutcomeRepository.findAll()) {
@@ -52,6 +55,9 @@ public class OutcomeAnalysisService {
 
         List<StrategyAnalysis> result = new ArrayList<>();
         byStrategy.forEach((strategy, all) -> {
+            // horizon="exit"이면 게이트와 동일하게 전략별 청산시점 가격으로(스윙=nextClose). 그 외는 종가 필드.
+            String effHz = "exit".equals(horizon) ? exitResolver.horizonFor(strategy, "exit") : horizon;
+            java.util.function.Function<TradeOutcome, Long> px = exitResolver.priceFor(strategy, effHz);
             // 결과 가격이 수집됐고 진입 feature가 있는 건만 분석 대상
             List<TradeOutcome> wins = new ArrayList<>();
             List<TradeOutcome> losses = new ArrayList<>();
@@ -60,7 +66,7 @@ public class OutcomeAnalysisService {
             int analyzed = 0;
             for (TradeOutcome o : all) {
                 if (o.isControl()) continue;   // 대조군(미진입)은 진입분 분석에서 제외(control-analysis에서 별도 비교)
-                Long price = resultPrice(o, horizon);
+                Long price = px.apply(o);
                 if (price == null || o.getBuyPrice() <= 0 || o.getEntryChangeRate() == null) continue;
                 double slip = o.getEntrySlippagePct() != null ? o.getEntrySlippagePct()   // 진입시 실측 스프레드
                         : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());   // 없으면 tick 추정
@@ -111,17 +117,6 @@ public class OutcomeAnalysisService {
         Double c = o.getEntryMarketChange();
         if (c == null) return "미상";
         return c >= 0 ? "상승장" : "하락장";
-    }
-
-    private Long resultPrice(TradeOutcome o, String horizon) {
-        return switch (horizon == null ? "close" : horizon) {
-            case "nextClose" -> o.getPriceNextClose();
-            case "d2" -> o.getPriceD2();
-            case "d3" -> o.getPriceD3();
-            case "p10" -> o.getPrice10min();
-            case "p30" -> o.getPrice30min();
-            default -> o.getPriceClose();
-        };
     }
 
     private NumericFeature feature(String name, List<TradeOutcome> wins, List<TradeOutcome> losses,

@@ -22,7 +22,11 @@ class FeatureMiningServiceTest {
 
     private FeatureMiningService svc() {
         when(cost.estimateRoundTripSlippagePct(org.mockito.ArgumentMatchers.anyLong())).thenReturn(0.0);
-        return new FeatureMiningService(repo, cost, 0.0);   // 비용 0 → net=gross로 검증 단순화
+        // close horizon 검증 — resolver의 exit 경로(holdTime/sample)는 안 탐. 실 resolver + 목 deps.
+        ExitHorizonPriceResolver resolver = new ExitHorizonPriceResolver(
+                mock(StrategyHoldTimeProvider.class), mock(com.stockadvisor.repository.OutcomeSampleRepository.class),
+                "MEAN_REVERSION_C", "nextClose");
+        return new FeatureMiningService(repo, cost, resolver, 0.0);   // 비용 0 → net=gross로 검증 단순화
     }
 
     @Test
@@ -43,6 +47,7 @@ class FeatureMiningServiceTest {
     private TradeOutcome vr(double volRatio, String date, int i, double retPct) {
         long buy = 10_000;
         TradeOutcome o = new TradeOutcome("SQUEEZE_BREAKOUT_H", null, "00593" + i, date, buy);
+        org.springframework.test.util.ReflectionTestUtils.setField(o, "id", (long) i);   // netByOutcome 키(prod는 JPA id)
         o.setPriceClose(Math.round(buy * (1 + retPct / 100.0)));
         o.recordEntryFeatures(0, volRatio, 50, 10, 1, "KOSPI", 5000, "화학", null);
         return o;
@@ -58,7 +63,7 @@ class FeatureMiningServiceTest {
         for (int i = 0; i < 25; i++) rows.add(vr(1, "20260601", 100 + i, -1.0));
         when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
 
-        FeatureMiningService.MiningReport r = svc().mine(90, null, null, 20, 80.0, false);
+        FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 20, 80.0, false);
 
         // 거래량배수 feature의 두 bucket 확인
         FeatureMiningService.FeatureMining vrFeat = r.features().stream()
