@@ -89,6 +89,17 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.rebound-day-min-surge-pct:2.0}")
     private double reboundDayMinSurgePct = 2.0;
 
+    // 전일 확정 국면으로 판단·태깅할 전략(2026-08-13) — 게이트의 동일 설정과 반드시 같은 값이어야 한다
+    // (태깅 라벨 ≠ 버킷 라벨이면 게이트가 엉뚱한 표본 풀과 비교한다). 기본 K만.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.prior-day-regime-strategies:OPENING_GAP_K}")
+    private String priorDayRegimeCsv = "OPENING_GAP_K";
+    private java.util.Set<String> priorDayRegimeStrategies = java.util.Set.of("OPENING_GAP_K");
+
+    @jakarta.annotation.PostConstruct
+    void initPriorDayRegimeStrategies() {
+        priorDayRegimeStrategies = PolicyGate.parseCsv(priorDayRegimeCsv);
+    }
+
     // 과열 추격 필터(2026-07-24, HLB 계열 -75,214원 계기): 반등 계열(H/G/J)은 승자 체결강도가 패자보다
     // 일관되게 낮음(H 133vs165, G 133vs146, J 132vs196 — 7/16~20 3거래일) + 200+ 구간 전체 net 음수.
     // 진입 시 체결강도 ≥ 임계면 보류(EXEC_OVERHEAT) — "이미 과열된 반등을 추격하지 않는다". 차단분 대조군 추적.
@@ -324,11 +335,19 @@ public class StrategyEvaluator {
         }
         // 진입 시점 시장 국면(MA기반). 인버스는 국면 태그 없음(null) → 게이트 비국면분리(전체 인버스 표본 풀링).
         String entryTrend = null;
+        // 전일 확정 국면(2026-08-13) — K(개장갭)처럼 '어제까지 국면 + 오늘 시초가 갭'이 정의인 전략용.
+        // 태깅과 게이트 버킷팅이 같은 라벨을 써야 하므로 여기서도 별도로 산출한다(불일치 시 엉뚱한 표본과 비교됨).
+        String priorDayTrend = null;
         if (!inverse) {
             try {
                 var t = marketRegimeService.trendOf(market);
                 entryTrend = t == null ? null : t.name();
             } catch (Exception ignore) { /* 국면 산출 실패 시 null */ }
+            try {
+                var p = marketRegimeService.priorDayTrendOf(market);
+                priorDayTrend = p == null ? null : p.name();
+            } catch (Exception ignore) { /* 전일 국면 산출 실패 시 null → 아래에서 entryTrend로 degrade */ }
+            if (priorDayTrend == null) priorDayTrend = entryTrend;
         }
         // 진입 시점 지수 장중 흐름(프록시 분봉 최근 10/60분 모멘텀) — "지금 오르는 중/빠지는 중" 측정용 태깅.
         // 시장별 캐시(TTL)라 스캔당 시장 1콜. 인버스는 국면 태그 없음과 동일하게 제외(null).
@@ -354,6 +373,9 @@ public class StrategyEvaluator {
         // 지수 장중 흐름(mom30)도 실어 D "흐름↓ 스킵" 필터에 사용(위에서 이미 조회한 flow 재사용, 추가 KIS 0).
         Double indexMom30 = (flow != null && flow.available()) ? flow.mom30Pct() : null;
         StrategyContext ctx = new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, indexMom30);
+        // 전일 확정 국면을 쓰는 전략(K)용 컨텍스트 — entryTrend만 다르고 나머지는 동일.
+        StrategyContext ctxPrior = java.util.Objects.equals(entryTrend, priorDayTrend) ? ctx
+                : new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, priorDayTrend, indexMom30);
 
         int alerts = 0;
         // 뉴스·체결강도 feature(진입 시 태깅) — 종목당 각 1콜 lazy(첫 진입 때만 조회, 대조군은 부하상 미태깅)
@@ -366,7 +388,9 @@ public class StrategyEvaluator {
         for (TradingStrategy strategy : pending) {
             // 볼륨 필요 전략은 거래량 미급증이면 평가/기록 안 함(볼륨무관 전략만 우회 경로로 진입).
             if (strategy.requiresVolumeSpike() && !signal.volumeSpike()) continue;
-            String reject = strategy.rejectReason(ctx);   // null이면 진입
+            // K 등은 전일 확정 국면 컨텍스트로 판단·태깅 — 게이트 버킷팅과 같은 라벨을 써야 표본 비교가 정합.
+            StrategyContext sctx = priorDayRegimeStrategies.contains(strategy.name()) ? ctxPrior : ctx;
+            String reject = strategy.rejectReason(sctx);   // null이면 진입
             // 반등일 순추세 보류 — 시장별 판정(60s 캐시 재사용, 추가 KIS 0). 인버스는 시장태그 없음 → 미적용.
             if (reject == null && reboundDayGuardEnabled && !inverse && market != null
                     && TREND_FAMILY.contains(strategy.name())
@@ -450,7 +474,7 @@ public class StrategyEvaluator {
             }
             outcome.recordEntryFeatures(signal.changeRate(), signal.volumeRatio(), rec.getScore(),
                     per, pbr, market, marketCap, sector, marketChange);
-            outcome.setEntryMarketTrend(entryTrend);
+            outcome.setEntryMarketTrend(sctx.entryTrend());   // 전략별 국면 기준(K=전일 확정)으로 태깅 — 게이트 버킷과 일치
             outcome.setEntrySlippagePct(entrySlippagePct);
             if (flow != null && flow.available()) outcome.setEntryIntradayFlow(flow.mom10Pct(), flow.mom30Pct(), flow.mom60Pct());
             outcome.setEntrySetupFeatures(signal.atrPct(), signal.distFromHighPct(), signal.ret5dPct());   // 셋업(종목 상태) feature

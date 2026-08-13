@@ -50,7 +50,20 @@ public class StrategyPerformanceGate {
     private final java.util.Set<String> swingStrategies;   // 스윙 전략은 청산 horizon(swingHorizon)으로 게이트 검증
     private final String swingHorizon;                       // 스윙 전략 게이트 검증 horizon(기본 nextClose=D+1)
     private final List<String> strategyNames;                // 가시화용 전략명(등록된 TradingStrategy 빈에서 동적 — 새 전략 자동 포함)
-    // 히스테리시스 상태(2026-08-06): (strategy:market) → 현재 오픈 여부. 열 땐 min-net, 열려있으면 close-net까지 유지.
+    private final java.util.Set<String> priorDayRegimeStrategies;   // 전일 확정 국면으로 버킷팅할 전략(K 등)
+    private static final String HYST_TAG = " ·히스테리시스(닫기바 유지)";
+
+    /**
+     * 히스테리시스 키 — 판정에 실제로 쓰인 <b>표본 풀</b>(전략·시장·국면·흐름)을 그대로 식별한다(2026-08-13).
+     * 국면 라벨이 장중에 바뀌면 표본도 net도 다른 버킷이 되므로 상태를 물려받으면 안 된다.
+     * ⚠️ 키가 잘게 쪼개진 만큼 각 버킷의 상태는 더 드물게 갱신된다(진동 억제 효과 ↓, 정확도 ↑ 트레이드오프).
+     */
+    private static String hystKey(String strategy, String market, String regimeName, String flowTag) {
+        return strategy + ":" + (market == null ? "_" : market)
+                + ":" + (regimeName == null ? "_" : regimeName) + ":" + flowTag;
+    }
+
+    // 히스테리시스 상태(2026-08-06): (strategy:market:regime:flow) → 현재 오픈 여부. 열 땐 min-net, 열려있으면 close-net까지 유지.
     // 인메모리(재기동 시 리셋 → 기본 closed=fail-safe). 시뮬(forcedRegime≠null)만 갱신 제외.
     // '열림'은 엄격(흐름·국면) 버킷 판정 통과로만 획득하고, 그 판정에 도달 못 한 경로(클러스터 차단·표본부족·
     // fallback·부트스트랩)는 모두 닫힘으로 명시한다(2026-08-13). ⚠️ 이전엔 fallback/부트스트랩이 상태를 갱신하지
@@ -75,7 +88,11 @@ public class StrategyPerformanceGate {
                                    // 부트스트랩 허용 전략(csv) — since 리셋 등으로 표본 미달이어도 축소사이징 실주문(재검증 중 완전정지 방지). 기본 빈값=fail-closed.
                                    @Value("${stockadvisor.trading.perf-gate.bootstrap-strategies:}") String bootstrapStrategiesCsv,
                                    // 구표본 자동 재필터 — 조이는 필터 추가 시 태깅된 feature 임계로 구표본 중 새 필터 통과분만 채점(since 리셋의 정밀판).
-                                   @Value("${stockadvisor.trading.perf-gate.refilter:}") String refilterCsv) {
+                                   @Value("${stockadvisor.trading.perf-gate.refilter:}") String refilterCsv,
+                                   // 전일 확정 국면으로 버킷팅할 전략(csv) — 정의상 '어제까지 국면'을 보는 K(개장갭) 등.
+                                   // 장중에 흔들리는 라벨로 버킷을 잡으면 하루에도 여러 번 다른 표본 풀로 판정된다(2026-08-13 K 실측).
+                                   @Value("${stockadvisor.trading.prior-day-regime-strategies:OPENING_GAP_K}")
+                                   String priorDayRegimeCsv) {
         this.tradeOutcomeRepository = tradeOutcomeRepository;
         this.props = props;
         this.marketRegimeService = marketRegimeService;
@@ -90,6 +107,7 @@ public class StrategyPerformanceGate {
         this.strategySince = parseSince(strategySinceCsv);
         this.bootstrapStrategies = PolicyGate.parseCsv(bootstrapStrategiesCsv);
         this.refilters = GateRefilter.parse(refilterCsv);
+        this.priorDayRegimeStrategies = PolicyGate.parseCsv(priorDayRegimeCsv);
     }
 
     /** 전략 → 구표본 재필터 술어(조이는 필터 임계). */
@@ -220,14 +238,16 @@ public class StrategyPerformanceGate {
         // 인버스 버킷("INVERSE")은 방향 베팅 자체라 진입 시 국면태그가 null → 국면조건부 건너뜀(전체 인버스 표본 집계).
         // 히스테리시스: 밴드 = [closeNet, minNet). 열려있으면 closeNet까지 유지(닫힘 지연) → 문턱 근처 여닫이 진동 억제.
         // 활성 조건 closeNet<minNet. 시뮬(forcedRegime!=null)은 상태 미변경(가시화·실판정 = null만 갱신).
+        // ⚠️ 키는 아래에서 '판정에 실제로 쓰인 버킷'(국면·흐름 포함)이 정해진 뒤 만든다 — 여기서 만들 수 없다.
         final boolean hystActive = props.closeNetAvgPct() < props.minNetAvgPct();
-        final String hystKey = strategy + ":" + (market == null ? "_" : market);
-        final boolean wasOpen = hystActive && Boolean.TRUE.equals(openState.get(hystKey));
-        final double effMinNet = wasOpen ? props.closeNetAvgPct() : props.minNetAvgPct();
         final boolean mutateHyst = hystActive && forcedRegime == null;
-        final String hystTag = wasOpen ? " ·히스테리시스(닫기바 유지)" : "";
+        // K(개장갭)처럼 정의상 '어제까지의 국면'을 보는 전략은 전일 확정 라벨로 버킷팅한다(2026-08-13).
+        // 장중에 흔들리는 라벨로 버킷을 잡으면 같은 전략이 하루에도 여러 번 다른 표본 풀로 판정된다(K 실측).
+        boolean priorDayRegime = priorDayRegimeStrategies.contains(strategy);
         MarketTrend regime = (props.regimeConditional() && !"INVERSE".equals(market))
-                ? (forcedRegime != null ? forcedRegime : marketRegimeService.trendOf(market)) : null;
+                ? (forcedRegime != null ? forcedRegime
+                    : (priorDayRegime ? marketRegimeService.priorDayTrendOf(market)
+                                      : marketRegimeService.trendOf(market))) : null;
         String regimeName = regime == null ? null : regime.name();
         // (market,trend) 2차원: 국면조건부 + 시장 지정 + 토글 on 일 때 같은 시장 진입분만
         boolean marketSplit = props.regimeConditional() && props.regimeMarketSplit()
@@ -325,37 +345,47 @@ public class StrategyPerformanceGate {
             Double avgF = round2(sumF / nF);
             String flowTag = regimeTag.isEmpty() ? "" : regimeTag.substring(0, regimeTag.length() - 2)
                     + "·흐름" + (flowUp ? "↑" : "↓") + "] ";
+            String keyF = hystKey(strategy, market, regimeName, flowUp ? "up" : "down");
+            boolean wasOpenF = hystActive && Boolean.TRUE.equals(openState.get(keyF));
+            double effMinNetF = wasOpenF ? props.closeNetAvgPct() : props.minNetAvgPct();
             double shareF = singleDaySharePct(daysF, nF);
             if (clustered(shareF)) {   // 교차거래일 미충족 — 단일일 클러스터는 net이 좋아도 LIVE 졸업 차단(fail-closed)
-                if (mutateHyst) openState.put(hystKey, false);
+                if (mutateHyst) openState.put(keyF, false);
                 return clusterBlock(strategy, flowTag, shareF, nF, daysF.size(), avgF, regimeName, market);
             }
-            boolean allow = avgF >= effMinNet;
-            if (mutateHyst) openState.put(hystKey, allow);
+            boolean allow = avgF >= effMinNetF;
+            if (mutateHyst) openState.put(keyF, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNet, nF, hystTag + refilterTag),
+                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNetF, nF,
+                            (wasOpenF ? HYST_TAG : "") + refilterTag),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
         if (n >= minSamples) {
+            String keyR = hystKey(strategy, market, regimeName, "_");
+            boolean wasOpenR = hystActive && Boolean.TRUE.equals(openState.get(keyR));
+            double effMinNetR = wasOpenR ? props.closeNetAvgPct() : props.minNetAvgPct();
             double shareR = singleDaySharePct(daysR, n);
             if (clustered(shareR)) {   // 교차거래일 미충족 — 단일일 클러스터는 net이 좋아도 LIVE 졸업 차단(fail-closed)
-                if (mutateHyst) openState.put(hystKey, false);
+                if (mutateHyst) openState.put(keyR, false);
                 return clusterBlock(strategy, regimeTag, shareR, n, daysR.size(), avg, regimeName, market);
             }
-            boolean allow = avg >= effMinNet;
-            if (mutateHyst) openState.put(hystKey, allow);
+            boolean allow = avg >= effMinNetR;
+            if (mutateHyst) openState.put(keyR, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNet, n, hystTag + refilterTag),
+                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNetR, n,
+                            (wasOpenR ? HYST_TAG : "") + refilterTag),
                     n, avg, regimeName, market, false);
         }
         // 여기 도달 = 엄격(흐름·국면) 버킷 판정에 실패(표본부족) → 아래는 전부 비엄격 경로(fallback·부트스트랩·fail-closed).
-        // '열림'을 정당화하던 엄격 판정이 더는 없으므로 히스테리시스를 닫힘으로 명시한다(fail-safe). 이 정리가 없으면
-        // 국면 라벨이 장중에 바뀌어 버킷이 교체될 때 옛 열림이 stale하게 남아, 복귀 시 완화된 닫기바가 잘못 적용된다.
-        // (엄격 분기는 위에서 모두 return하므로 이 한 줄이 아래 모든 반환점을 커버한다.)
-        if (mutateHyst) openState.put(hystKey, false);
+        // 이 '버킷'의 열림을 정당화하던 엄격 판정이 더는 없으므로 닫힘으로 명시한다(fail-safe, 클러스터 차단과 동일 사상).
+        // 키가 버킷 단위라 정리 범위도 현재 컨텍스트로 한정된다 — 다른 국면·흐름 버킷의 상태는 보존된다(그게 #2의 요점).
+        if (mutateHyst) {
+            openState.put(hystKey(strategy, market, regimeName, "_"), false);
+            if (flowUp != null) openState.put(hystKey(strategy, market, regimeName, flowUp ? "up" : "down"), false);
+        }
         // ② 국면 표본 부족 + fallback 활성 → 국면무관 전국면 pool로 재평가(더 엄격한 바). regimeName==null(미산출/off)이면
         // primary가 이미 전국면이라 fallback 무의미 → 건너뜀.
         if (props.fallbackEnabled() && regimeName != null) {

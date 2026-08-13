@@ -43,6 +43,12 @@ public class MarketRegimeService {
     private final Map<String, Instant> flowAt = new ConcurrentHashMap<>();
     private static final long FLOW_TTL_SECONDS = 90;
     private volatile Map<String, MarketRegime> cache = Map.of();
+    // 전일 확정 라벨(오늘 부분봉 제외) — refresh 때 함께 산출. intraday 보정·승격 디바운스 미적용(정의상 불변값).
+    private final Map<String, MarketTrend> priorTrend = new ConcurrentHashMap<>();
+
+    private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
+    private static final java.time.format.DateTimeFormatter YYYYMMDD =
+            java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd");
 
     public MarketRegimeService(KisApiClient kisApiClient, MarketRegimeProperties props) {
         this.kisApiClient = kisApiClient;
@@ -76,6 +82,51 @@ public class MarketRegimeService {
     void setBreadthService(MarketBreadthService s) { this.breadthService = s; }   // 테스트용
 
     private static final java.util.Map<String, String> INDEX_OF = java.util.Map.of("KOSPI", "0001", "KOSDAQ", "1001");
+
+    // ── 라벨 승격 디바운스(2026-08-13) ── MA3 기저 라벨은 오늘 '부분봉'(=현재가)이 시계열 끝에 들어가므로 장중
+    // 가격이 움직이면 중립↔강세가 수시로 뒤집힌다. 라벨이 바뀌면 게이트 버킷(표본·net)이 통째로 교체돼
+    // 진입 가부가 하루에도 여러 번 갈린다(실측 2026-08-13 K: 09:10 KOSDAQ 중립 n=10 차단 → 마감 강세 n=77 통과).
+    // 대응: 기존 intraday 보정과 같은 비대칭 원칙 — 강등(리스크 축소)은 즉시, 승격(리스크 확대)은 같은 후보가
+    // upgradeMinHoldMinutes 동안 지속돼야 확정. 라벨을 소비하는 전 경로(게이트 버킷·노출상한·진입 태깅)에 일괄 적용.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.market-regime.upgrade-min-hold-minutes:30}")
+    private int upgradeMinHoldMinutes = 30;   // 0=디바운스 비활성(종전 동작)
+
+    /** 승격 디바운스 상태 — stable=현재 확정 라벨, pending=승격 후보, pendingSince=후보가 처음 관측된 시각. */
+    record TrendHold(MarketTrend stable, MarketTrend pending, Instant pendingSince) {}
+
+    private final Map<String, TrendHold> holdState = new ConcurrentHashMap<>();
+
+    /** 강세도 순위 — 승격/강등 방향 판정용. */
+    private static int trendRank(MarketTrend t) {
+        return switch (t) { case BEAR -> 0; case NEUTRAL -> 1; case BULL -> 2; };
+    }
+
+    /**
+     * 승격 디바운스(순수 상태전이, 테스트용 정적). 강등·동일은 즉시 반영하고, 승격만 같은 후보가
+     * minHoldMinutes 이상 지속됐을 때 확정한다. minHoldMinutes≤0 또는 최초 관측이면 그대로 통과.
+     */
+    static TrendHold stabilizeTrend(TrendHold prev, MarketTrend raw, Instant now, int minHoldMinutes) {
+        if (raw == null) return prev;
+        if (minHoldMinutes <= 0 || prev == null || prev.stable() == null) return new TrendHold(raw, null, null);
+        MarketTrend stable = prev.stable();
+        if (raw == stable) return new TrendHold(stable, null, null);              // 후보 소멸 → 대기 해제
+        if (trendRank(raw) < trendRank(stable)) return new TrendHold(raw, null, null);   // 강등 = 즉시(리스크 축소)
+        if (prev.pending() != raw || prev.pendingSince() == null) {
+            return new TrendHold(stable, raw, now);                               // 새 승격 후보 — 관측 시작
+        }
+        if (Duration.between(prev.pendingSince(), now).toMinutes() >= minHoldMinutes) {
+            return new TrendHold(raw, null, null);                                // 지속 확인 → 승격 확정
+        }
+        return new TrendHold(stable, raw, prev.pendingSince());                   // 아직 확정 전 → 기존 라벨 유지
+    }
+
+    /** 승격 디바운스 적용값. 시장별 상태를 원자적으로 전이시킨다. */
+    private MarketTrend stabilized(String market, MarketTrend raw) {
+        if (upgradeMinHoldMinutes <= 0 || raw == null) return raw;
+        Instant now = Instant.now();
+        TrendHold next = holdState.compute(market, (k, prev) -> stabilizeTrend(prev, raw, now, upgradeMinHoldMinutes));
+        return next.stable();
+    }
 
     /** 순수 보정 판정(테스트용 정적) — base 라벨을 당일 지수 등락·breadth 합의로 강등/승격. */
     static MarketTrend adjustTrend(MarketTrend base, Double dayChgPct, Double breadthAdvPct, boolean breadthFresh,
@@ -133,7 +184,7 @@ public class MarketRegimeService {
     private final Map<String, double[]> dayHighChg = new ConcurrentHashMap<>();   // market -> {epochDay, highPct}
     private Double dayHighChangeOf(String market) {
         Double chg = dayChangeOf(market);
-        long today = LocalDate.now(ZoneId.of("Asia/Seoul")).toEpochDay();
+        long today = LocalDate.now(SEOUL).toEpochDay();
         double[] cur = dayHighChg.get(market);
         if (cur == null || (long) cur[0] != today) cur = new double[]{today, Double.NEGATIVE_INFINITY};
         if (chg != null && chg > cur[1]) cur[1] = chg;
@@ -156,7 +207,11 @@ public class MarketRegimeService {
             adv = breadthService.breadthPct(market);
             fresh = breadthService.isFresh(BREADTH_FRESH_MIN);
         }
-        return adjustTrend(base.trend(), dayChangeOf(market), adv, fresh, intradayDemotePct, intradayPromotePct);
+        MarketTrend adjusted = adjustTrend(base.trend(), dayChangeOf(market), adv, fresh,
+                intradayDemotePct, intradayPromotePct);
+        // 승격 디바운스 — 기저(MA3) 라벨 변화와 intraday 보정을 모두 통과한 최종값에 적용해, 소비처가 보는
+        // 라벨이 장중에 잘게 흔들리지 않게 한다(강등은 즉시라 리스크 대응 속도는 그대로).
+        return stabilized(market, adjusted);
     }
 
     /** 특정 시장(KOSPI/KOSDAQ) 국면 — trend 는 intraday 보정 적용값. 데이터 없으면 NEUTRAL/MID 의 unavailable 스냅샷. */
@@ -192,6 +247,18 @@ public class MarketRegimeService {
             if (r.available()) return r.trend();
         }
         return overallTrend();
+    }
+
+    /**
+     * 전일 확정 추세 — 오늘 부분봉을 뺀 시계열의 MA 라벨(intraday 보정·승격 디바운스 미적용).
+     * 장중에 값이 변하지 않으므로 "어제까지 국면 + 오늘 시초가"를 전제로 하는 K(개장갭)의 기준이 된다.
+     * 미산출(조회 실패·부트 직후)이면 현행 라벨로 degrade.
+     */
+    public MarketTrend priorDayTrendOf(String market) {
+        if (market == null || market.isBlank()) return overallTrend();
+        refreshIfStale();
+        MarketTrend t = priorTrend.get(market);
+        return t != null ? t : trendOf(market);
     }
 
     /** 두 시장 추세를 종합(+1/0/-1 합산 부호). 한쪽 null이면 다른쪽, 둘 다 null이면 null. */
@@ -257,7 +324,18 @@ public class MarketRegimeService {
                 if (c != null && c > 0) chrono.add(c);
             }
             String asOf = rows.get(0).businessDate();
-            out.put(market, computeRegime(market, proxyCode, chrono, asOf, props));
+            MarketRegime cur = computeRegime(market, proxyCode, chrono, asOf, props);
+            out.put(market, cur);
+            // 전일 확정 라벨(2026-08-13): 시계열 끝의 '오늘 부분봉'(=현재가)을 빼고 계산 → 장중에 움직이지 않는
+            // "어제까지의 국면". K(개장갭)처럼 정의상 전일 국면을 봐야 하는 전략이 소비한다.
+            // asOf가 오늘이 아니면(장전·휴장) 이미 전일까지의 시계열이라 현재 라벨을 그대로 쓴다.
+            String today = LocalDate.now(SEOUL).format(YYYYMMDD);
+            MarketTrend prior = cur.trend();
+            if (today.equals(asOf) && chrono.size() > 1) {
+                MarketRegime p = computeRegime(market, proxyCode, chrono.subList(0, chrono.size() - 1), asOf, props);
+                if (p.available()) prior = p.trend();
+            }
+            priorTrend.put(market, prior);
         } catch (Exception ex) {
             log.warn("시장 국면 계산 실패 [{}] proxy={}: {}", market, proxyCode, ex.getMessage());
             out.put(market, unavailable(market, proxyCode));

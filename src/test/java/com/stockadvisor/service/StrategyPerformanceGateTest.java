@@ -83,7 +83,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, "", "", "");   // 스윙 없음
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, "", "", "", "");   // 스윙 없음(전일국면 전략도 없음)
     }
 
     // 스윙 전략 게이트(swingHorizon=nextClose)
@@ -95,7 +95,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0, "", "", "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0, "", "", "", "");
     }
 
     /** trend + mom30 태깅 표본 — 국면+흐름 3차원 검증용. */
@@ -117,7 +117,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, "", "", "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, "", "", "", "");
     }
 
     @Test
@@ -479,7 +479,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, "", "", "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -514,7 +514,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, "", "", "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -632,10 +632,10 @@ class StrategyPerformanceGateTest {
     }
 
     @Test
-    void 표본부족_fallback_경로는_히스테리시스_열림을_닫힘으로_정리한다() {
-        // 실측 계기(2026-08-13 K): 오전에 KOSDAQ 강세 버킷으로 통과(열림) → 장중 라벨이 중립으로 바뀌자 강세 표본이
-        // 안 잡혀 표본부족(fallback) 경로로 빠짐. 예전엔 이 경로가 상태를 갱신하지 않아 '열림'이 stale하게 남았고,
-        // 라벨이 강세로 복귀하면 net이 열기바 미달이어도 완화된 닫기바(−0.2)가 적용돼 통과했다.
+    void 히스테리시스_상태는_국면버킷별로_분리된다() {
+        // 실측 계기(2026-08-13 K): 장중에 라벨이 중립↔강세로 뒤집히면 표본도 net도 다른 버킷이 된다.
+        // 키가 (전략:시장)뿐이던 시절엔 버킷이 바뀌어도 같은 상태를 물려받아, 옛 버킷의 '열림'이 새 버킷에
+        // 완화된 닫기바를 잘못 적용했다. 이제 키가 (전략:시장:국면:흐름)이라 버킷끼리 간섭하지 않는다.
         // props: min=0.3, close=−0.2, regimeConditional=true, minSamples=5, fallback on(50/0.5).
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.3, "close",
                 true, false, true, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, -0.2);
@@ -647,26 +647,83 @@ class StrategyPerformanceGateTest {
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
                 mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
-                COST, "", "nextClose", 0.0, "", "", "");
+                COST, "", "nextClose", 0.0, "", "", "", "");
 
-        // ① 강세 버킷 net 0.4 → 열기바(0.3) 통과 → 오픈
+        // ① 강세 버킷 net 0.4 → 열기바(0.3) 통과 → 강세 버킷만 오픈
         when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);
         rows.addAll(samples("MOMENTUM_A", 5, 0.4 + COST, "BULL"));
         assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isTrue();
 
-        // ② 장중 라벨 중립 전환 → 강세 표본 미매칭으로 표본부족 → fallback도 미달(5<50) → 차단 + 오픈상태 정리
+        // ② 장중 라벨 중립 전환 → 강세 표본 미매칭으로 표본부족 → fallback도 미달(5<50) → 차단.
+        //    이때 정리되는 건 '중립' 버킷 키뿐 — 강세 버킷의 열림은 보존된다.
         when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.NEUTRAL);
         StrategyPerformanceGate.GateDecision mid = g.evaluate("MOMENTUM_A", "KOSPI");
         assertThat(mid.allowed()).isFalse();
         assertThat(mid.reason()).contains("국면표본부족");
 
-        // ③ 라벨 복귀 + net이 밴드(0.1)로 하락 → 정리됐으므로 닫기바가 아닌 열기바(0.3) 적용 → 차단
+        // ③ 라벨 복귀 + net이 밴드(0.1)로 하락 → 같은 강세 버킷이므로 닫기바(−0.2) 유지 → 통과(진동 억제)
         when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);
         rows.clear();
         rows.addAll(samples("MOMENTUM_A", 5, 0.1 + COST, "BULL"));
         StrategyPerformanceGate.GateDecision back = g.evaluate("MOMENTUM_A", "KOSPI");
-        assertThat(back.allowed()).isFalse();
+        assertThat(back.allowed()).isTrue();
+        assertThat(back.reason()).contains("히스테리시스");
+    }
+
+    @Test
+    void 같은_버킷이_표본부족이면_그_버킷의_히스테리시스는_닫힘으로_정리된다() {
+        // 버킷 교체가 아니라 '그 버킷 자체'가 표본을 잃은 경우 — 열림을 정당화하던 엄격 판정이 없으므로
+        // 닫힘으로 정리(fail-closed). 복귀 시 다시 열기바(0.3)를 넘어야 한다.
+        // regimeConditional=false → 키의 국면·흐름 자리는 "_"로 고정 = 처음부터 끝까지 같은 버킷.
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.3, "close",
+                false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, -0.2);
+        List<TradeOutcome> rows = new ArrayList<>();
+        StrategyPerformanceGate g = gate(p, rows, null);
+
+        rows.addAll(samples("MOMENTUM_A", 5, 0.4 + COST, null));      // net 0.4 → 오픈
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isTrue();
+
+        rows.clear(); rows.addAll(samples("MOMENTUM_A", 3, 0.4 + COST, null));   // 표본 3<5 → fail-closed + 정리
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isFalse();
+
+        rows.clear(); rows.addAll(samples("MOMENTUM_A", 5, 0.1 + COST, null));   // 표본 복귀, net은 밴드(0.1)
+        StrategyPerformanceGate.GateDecision back = g.evaluate("MOMENTUM_A", "KOSPI");
+        assertThat(back.allowed()).isFalse();                          // 정리됐으므로 열기바 0.3 적용
         assertThat(back.reason()).doesNotContain("히스테리시스");
+    }
+
+    @Test
+    void 전일국면_전략은_장중라벨이_아니라_전일확정라벨로_버킷팅된다() {
+        // K(개장갭)는 정의가 "어제까지 국면 + 오늘 시초가 갭"인데, 유효 창(09:00~09:30)이 장중 라벨이 가장
+        // 불안정한 구간이라 장중 라벨로 버킷을 잡으면 표본 풀이 계속 바뀐다(2026-08-13 실측).
+        // → prior-day-regime-strategies 에 지정된 전략은 priorDayTrendOf 로 버킷팅한다.
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.0, "close",
+                true, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        List<TradeOutcome> rows = new ArrayList<>(samples("OPENING_GAP_K", 5, 1.0 + COST, "NEUTRAL"));
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);            // 장중(흔들리는) 라벨
+        when(regimeSvc.priorDayTrendOf(any())).thenReturn(MarketTrend.NEUTRAL); // 전일 확정 라벨
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
+                mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
+                COST, "", "nextClose", 0.0, "", "", "", "OPENING_GAP_K");
+
+        // 표본은 전부 NEUTRAL 태그 — 전일 라벨(NEUTRAL) 버킷으로 잡혀야 5건이 매칭돼 통과
+        StrategyPerformanceGate.GateDecision d = g.evaluate("OPENING_GAP_K", "KOSPI");
+        assertThat(d.regimeTrend()).isEqualTo("NEUTRAL");
+        assertThat(d.samples()).isEqualTo(5);
+        assertThat(d.allowed()).isTrue();
+
+        // 미지정 전략은 종전대로 장중 라벨(BULL) 사용 → NEUTRAL 표본이 안 잡혀 표본부족
+        StrategyPerformanceGate g2 = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
+                mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
+                COST, "", "nextClose", 0.0, "", "", "", "");
+        StrategyPerformanceGate.GateDecision d2 = g2.evaluate("OPENING_GAP_K", "KOSPI");
+        assertThat(d2.regimeTrend()).isEqualTo("BULL");
+        assertThat(d2.allowed()).isFalse();
     }
 
     // ── 교차 거래일 요건(단일일 클러스터 방지) ──
@@ -728,7 +785,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, sinceCsv, bootstrapCsv, refilterCsv);
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, sinceCsv, bootstrapCsv, refilterCsv, "");
     }
 
     @Test

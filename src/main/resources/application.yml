@@ -202,6 +202,10 @@ stockadvisor:
     manual-confirm: ${TRADING_MANUAL_CONFIRM:true}          # 초기 단계 수동 승인 게이트
     swing-strategies: ${TRADING_SWING_STRATEGIES:MEAN_REVERSION_C}  # 오버나잇 스윙 전략(csv) — 장마감 강제청산 대신 익일 종가 청산, 진입 시 장마감초과 규칙 면제. ⚠️오버나잇 갭 리스크
     swing-horizon: ${TRADING_SWING_HORIZON:nextClose}       # 스윙 전략 성과게이트 검증 horizon(청산 시점=익일종가) — 스윙은 당일종가 아닌 이 horizon으로 게이팅
+    # 전일 확정 국면으로 판단·태깅·버킷팅할 전략(csv, 2026-08-13). K(개장갭)는 정의가 "어제까지 국면 + 오늘 시초가 갭"인데
+    # 유효 창(09:00~09:30)이 하필 장중 라벨이 가장 불안정한 구간이라, 장중 라벨로 버킷을 잡으면 표본 풀이 계속 바뀐다.
+    # ⚠️ StrategyEvaluator(태깅)와 StrategyPerformanceGate(버킷)가 같은 값을 봐야 한다 — 한쪽만 바꾸면 표본 비교가 어긋난다.
+    prior-day-regime-strategies: ${TRADING_PRIOR_DAY_REGIME_STRATEGIES:OPENING_GAP_K}
     # 멀티데이(2-3주) 일봉 종가 경로 수집(2026-08-07, Phase 1 — 측정 전용, 실청산 동작 무변경).
     # 이 전략들의 섀도우 진입분에 대해 D0..D+multiday-max-hold-days 일봉 종가를 forward 수집(하루 1회, 마감 후).
     # 백테스트 불가라 forward-only → 표본 쌓이면 Phase 2에서 멀티데이 청산 트리거를 데이터로 선택.
@@ -318,6 +322,10 @@ stockadvisor:
     # ≥+promote% AND breadth 상승비율 ≥60%(신선)면 1단계 승격(비대칭 — 축소 빠르게/확대 보수적). 0=비활성.
     intraday-demote-pct: ${MARKET_REGIME_INTRADAY_DEMOTE_PCT:2.0}
     intraday-promote-pct: ${MARKET_REGIME_INTRADAY_PROMOTE_PCT:2.0}
+    # 승격 디바운스(2026-08-13) — 기저(MA3) 라벨은 오늘 부분봉(=현재가)이 시계열 끝에 들어가 장중에 중립↔강세가
+    # 수시로 뒤집히고, 그때마다 게이트 버킷(표본·net)이 통째로 교체돼 진입 가부가 하루에 여러 번 갈린다(K 실측).
+    # 승격은 같은 후보가 이 시간(분) 지속돼야 확정, 강등은 즉시(intraday 보정과 같은 비대칭 원칙). 0=비활성.
+    upgrade-min-hold-minutes: ${MARKET_REGIME_UPGRADE_MIN_HOLD_MINUTES:30}
     vol-period: ${MARKET_REGIME_VOL_PERIOD:20}           # 실현변동성 측정 기간(일간수익률 개수)
     vol-high-pct: ${MARKET_REGIME_VOL_HIGH_PCT:2.0}      # 일간수익률 표준편차(%) ≥ → 고변동
     vol-low-pct: ${MARKET_REGIME_VOL_LOW_PCT:1.0}        # 일간수익률 표준편차(%) < → 저변동

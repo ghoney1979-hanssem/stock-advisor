@@ -166,4 +166,63 @@ class MarketRegimeServiceTest {
         assertThat(MarketRegimeService.isReboundDay(MarketTrend.NEUTRAL, null, 2.0)).isFalse();
         assertThat(MarketRegimeService.isReboundDay(MarketTrend.NEUTRAL, 5.0, 0)).isFalse();   // 0=비활성
     }
+
+    // ── 라벨 승격 디바운스(2026-08-13) — 강등 즉시 / 승격은 지속 확인 ──
+    private static final java.time.Instant T0 = java.time.Instant.parse("2026-08-13T00:10:00Z");
+
+    private MarketRegimeService.TrendHold stable(MarketTrend t) {
+        return new MarketRegimeService.TrendHold(t, null, null);
+    }
+
+    @Test
+    void 승격은_지속되어야_확정되고_그전에는_기존라벨_유지() {
+        // 중립 확정 상태에서 강세가 관측되기 시작 → 30분 지속돼야 강세로 확정(그 전엔 중립 유지)
+        MarketRegimeService.TrendHold s = stable(MarketTrend.NEUTRAL);
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0, 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.NEUTRAL);          // 후보 관측 시작 — 아직 중립
+        assertThat(s.pending()).isEqualTo(MarketTrend.BULL);
+
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0.plusSeconds(29 * 60), 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.NEUTRAL);          // 29분 — 아직 미확정
+
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0.plusSeconds(30 * 60), 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.BULL);             // 30분 지속 → 승격 확정
+        assertThat(s.pending()).isNull();
+    }
+
+    @Test
+    void 승격_대기중_후보가_사라지면_대기해제() {
+        // 잠깐 강세로 튀었다가 중립으로 돌아오면 대기 리셋 — 다시 튀어도 처음부터 30분 세야 한다.
+        MarketRegimeService.TrendHold s = stable(MarketTrend.NEUTRAL);
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0, 30);
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.NEUTRAL, T0.plusSeconds(60), 30);
+        assertThat(s.pending()).isNull();
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0.plusSeconds(120), 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.NEUTRAL);          // 재관측 — 다시 대기 시작
+        // 최초 관측(T0)이 아니라 재관측(+120s) 기준이라 T0+30분에도 아직 미확정
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BULL, T0.plusSeconds(30 * 60), 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.NEUTRAL);
+    }
+
+    @Test
+    void 강등은_디바운스_없이_즉시_반영() {
+        // 비대칭 원칙: 리스크 축소는 지연시키지 않는다(intraday 보정과 동일 사상).
+        assertThat(MarketRegimeService.stabilizeTrend(stable(MarketTrend.BULL), MarketTrend.NEUTRAL, T0, 30).stable())
+                .isEqualTo(MarketTrend.NEUTRAL);
+        assertThat(MarketRegimeService.stabilizeTrend(stable(MarketTrend.BULL), MarketTrend.BEAR, T0, 30).stable())
+                .isEqualTo(MarketTrend.BEAR);
+        // 승격 대기 중에 강등이 오면 대기도 함께 해제
+        MarketRegimeService.TrendHold s = MarketRegimeService.stabilizeTrend(stable(MarketTrend.NEUTRAL), MarketTrend.BULL, T0, 30);
+        s = MarketRegimeService.stabilizeTrend(s, MarketTrend.BEAR, T0.plusSeconds(60), 30);
+        assertThat(s.stable()).isEqualTo(MarketTrend.BEAR);
+        assertThat(s.pending()).isNull();
+    }
+
+    @Test
+    void 디바운스_비활성이거나_최초관측이면_그대로_통과() {
+        assertThat(MarketRegimeService.stabilizeTrend(stable(MarketTrend.NEUTRAL), MarketTrend.BULL, T0, 0).stable())
+                .isEqualTo(MarketTrend.BULL);      // 0=비활성(종전 동작)
+        assertThat(MarketRegimeService.stabilizeTrend(null, MarketTrend.BULL, T0, 30).stable())
+                .isEqualTo(MarketTrend.BULL);      // 최초 관측 — 기준 라벨이 없으므로 즉시 채택
+    }
 }
