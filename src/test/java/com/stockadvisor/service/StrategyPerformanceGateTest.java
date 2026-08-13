@@ -631,6 +631,44 @@ class StrategyPerformanceGateTest {
         assertThat(d.reason()).doesNotContain("히스테리시스");
     }
 
+    @Test
+    void 표본부족_fallback_경로는_히스테리시스_열림을_닫힘으로_정리한다() {
+        // 실측 계기(2026-08-13 K): 오전에 KOSDAQ 강세 버킷으로 통과(열림) → 장중 라벨이 중립으로 바뀌자 강세 표본이
+        // 안 잡혀 표본부족(fallback) 경로로 빠짐. 예전엔 이 경로가 상태를 갱신하지 않아 '열림'이 stale하게 남았고,
+        // 라벨이 강세로 복귀하면 net이 열기바 미달이어도 완화된 닫기바(−0.2)가 적용돼 통과했다.
+        // props: min=0.3, close=−0.2, regimeConditional=true, minSamples=5, fallback on(50/0.5).
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 5, 0.3, "close",
+                true, false, true, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, -0.2);
+        List<TradeOutcome> rows = new ArrayList<>();
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);   // 국면을 장중에 바꿔가며 버킷 교체를 재현
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
+                mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
+                COST, "", "nextClose", 0.0, "", "", "");
+
+        // ① 강세 버킷 net 0.4 → 열기바(0.3) 통과 → 오픈
+        when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);
+        rows.addAll(samples("MOMENTUM_A", 5, 0.4 + COST, "BULL"));
+        assertThat(g.evaluate("MOMENTUM_A", "KOSPI").allowed()).isTrue();
+
+        // ② 장중 라벨 중립 전환 → 강세 표본 미매칭으로 표본부족 → fallback도 미달(5<50) → 차단 + 오픈상태 정리
+        when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.NEUTRAL);
+        StrategyPerformanceGate.GateDecision mid = g.evaluate("MOMENTUM_A", "KOSPI");
+        assertThat(mid.allowed()).isFalse();
+        assertThat(mid.reason()).contains("국면표본부족");
+
+        // ③ 라벨 복귀 + net이 밴드(0.1)로 하락 → 정리됐으므로 닫기바가 아닌 열기바(0.3) 적용 → 차단
+        when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);
+        rows.clear();
+        rows.addAll(samples("MOMENTUM_A", 5, 0.1 + COST, "BULL"));
+        StrategyPerformanceGate.GateDecision back = g.evaluate("MOMENTUM_A", "KOSPI");
+        assertThat(back.allowed()).isFalse();
+        assertThat(back.reason()).doesNotContain("히스테리시스");
+    }
+
     // ── 교차 거래일 요건(단일일 클러스터 방지) ──
     private TradeOutcome outcomeOn(String strategy, String date, int i, double closeReturnPct) {
         long buy = 10_000;

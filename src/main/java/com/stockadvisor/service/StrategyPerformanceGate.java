@@ -51,7 +51,11 @@ public class StrategyPerformanceGate {
     private final String swingHorizon;                       // 스윙 전략 게이트 검증 horizon(기본 nextClose=D+1)
     private final List<String> strategyNames;                // 가시화용 전략명(등록된 TradingStrategy 빈에서 동적 — 새 전략 자동 포함)
     // 히스테리시스 상태(2026-08-06): (strategy:market) → 현재 오픈 여부. 열 땐 min-net, 열려있으면 close-net까지 유지.
-    // 인메모리(재기동 시 리셋 → 기본 closed=fail-safe). 흐름·국면 버킷 판정에서만 갱신(fallback/부트스트랩/시뮬 제외).
+    // 인메모리(재기동 시 리셋 → 기본 closed=fail-safe). 시뮬(forcedRegime≠null)만 갱신 제외.
+    // '열림'은 엄격(흐름·국면) 버킷 판정 통과로만 획득하고, 그 판정에 도달 못 한 경로(클러스터 차단·표본부족·
+    // fallback·부트스트랩)는 모두 닫힘으로 명시한다(2026-08-13). ⚠️ 이전엔 fallback/부트스트랩이 상태를 갱신하지
+    // 않아 stale 유지 — 국면 라벨이 장중에 바뀌어 버킷이 교체되면 옛 버킷에서 얻은 '열림'이 남아, 표본도 net도
+    // 다른 새 버킷에 완화된 닫기바(close-net)를 잘못 적용했다(K 실측: 오전 KOSDAQ 중립 표본부족 → 강세 복귀).
     private final java.util.Map<String, Boolean> openState = new java.util.concurrent.ConcurrentHashMap<>();
 
     public StrategyPerformanceGate(TradeOutcomeRepository tradeOutcomeRepository,
@@ -347,6 +351,11 @@ public class StrategyPerformanceGate {
                             regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNet, n, hystTag + refilterTag),
                     n, avg, regimeName, market, false);
         }
+        // 여기 도달 = 엄격(흐름·국면) 버킷 판정에 실패(표본부족) → 아래는 전부 비엄격 경로(fallback·부트스트랩·fail-closed).
+        // '열림'을 정당화하던 엄격 판정이 더는 없으므로 히스테리시스를 닫힘으로 명시한다(fail-safe). 이 정리가 없으면
+        // 국면 라벨이 장중에 바뀌어 버킷이 교체될 때 옛 열림이 stale하게 남아, 복귀 시 완화된 닫기바가 잘못 적용된다.
+        // (엄격 분기는 위에서 모두 return하므로 이 한 줄이 아래 모든 반환점을 커버한다.)
+        if (mutateHyst) openState.put(hystKey, false);
         // ② 국면 표본 부족 + fallback 활성 → 국면무관 전국면 pool로 재평가(더 엄격한 바). regimeName==null(미산출/off)이면
         // primary가 이미 전국면이라 fallback 무의미 → 건너뜀.
         if (props.fallbackEnabled() && regimeName != null) {
