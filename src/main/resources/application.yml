@@ -277,7 +277,8 @@ stockadvisor:
       catastrophic-stop-pct: ${TRADING_RISK_CATASTROPHIC_STOP_PCT:7.0}  # 개별 손절 하한(%) — 매수가 -이값% 이하 즉시 청산(재난방지 바닥, 튜닝SL 아님). 0=비활성
       breadth-riskoff-adv-pct: ${TRADING_RISK_BREADTH_ADV_PCT:15.0}      # 시장폭 리스크오프 — 해당 시장 상승비율 <이값% AND 아래 중앙 조건이면 신규진입 차단(강제청산 없음). 0=비활성
       breadth-riskoff-median-pct: ${TRADING_RISK_BREADTH_MEDIAN_PCT:3.0} # 시장폭 리스크오프 — 중앙 등락률 ≤ -이값% 조건(상승비율과 AND, 오발동 방지)
-      # 개장 창 노출 상한 — 리스크 예산 "선착순" 배분 완화(2026-08-14: 예산이 09:07 전량 소진, LIVE 15건이 갭업 고점 27분에 집중 → 계좌 -1.78%).
+      # 개장 창 노출 상한 — 갭 구간 상관 노출 축소(2026-08-14: LIVE 15건이 전부 09:01~09:24에 진입, 09:07에 순자산 47% 도달, 갭업 고점이라 계좌 -1.78%).
+      # ⚠️ "예산 소진이 오후까지 이어졌다"는 초기 서술은 오류 — 노출은 청산 시 회복되며 그날도 10:42엔 0원이었다.
       # 국면 상한과 min 결합. 0=비활성(기본, 기존 동작 무변경) → forward 검증 후 켤 것(예: 25 = 개장 30분 동안 순자산 25%까지만).
       opening-exposure-cap-pct: ${TRADING_RISK_OPENING_EXPOSURE_CAP_PCT:0}
       opening-window-minutes: ${TRADING_RISK_OPENING_WINDOW_MINUTES:30}   # 09:00부터 이 분까지 위 상한 적용
