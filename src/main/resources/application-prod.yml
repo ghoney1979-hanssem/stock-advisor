@@ -11,3 +11,13 @@ logging:
   level:
     com.stockadvisor: INFO
     org.hibernate.SQL: WARN
+  # 로그 파일 영속화 — ⚠️ docker json-file 로그는 컨테이너와 함께 삭제돼 `compose up -d` 재생성 시 소실된다.
+  # 2026-08-14 배포 2회로 그날 장중 로그가 전부 사라져 "진입이 왜 거부됐나"(거부는 DB 행을 안 남김)를
+  # 추적할 수 없었다 → 호스트 볼륨(compose의 ./logs:/app/logs)에 파일로 남긴다. 값은 compose env가 주입.
+  file:
+    name: ${LOGGING_FILE_NAME:}          # 빈 값이면 콘솔만(로컬 무영향). prod compose가 /app/logs/app.log 주입
+  logback:
+    rollingpolicy:
+      max-file-size: ${LOG_MAX_FILE_SIZE:50MB}
+      max-history: ${LOG_MAX_HISTORY:30}       # 30일 — 일별 분석의 사후 검증 창
+      total-size-cap: ${LOG_TOTAL_SIZE_CAP:2GB}

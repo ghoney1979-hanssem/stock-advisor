@@ -181,6 +181,24 @@ services:
       HOT_SCAN_CRON: ${HOT_SCAN_CRON:-0 */2 9-15 * * MON-FRI}
       TIERED_SCAN_ENABLED: ${TIERED_SCAN_ENABLED:-true}
       SCHEDULER_POOL_SIZE: ${SCHEDULER_POOL_SIZE:-4}
+      # ── 로그 영속화(2026-08-14) ─────────────────────────────────────────────
+      # ⚠️ docker의 json-file 로그는 컨테이너 디렉터리에 있어 `compose up -d` 재생성 시 함께 삭제된다.
+      #    실제로 2026-08-14 배포 2회로 그날 장중 로그가 전부 소실돼 사후 검증(진입 거부 사유 추적)이 막혔다.
+      #    거부된 주문은 DB에 행을 남기지 않으므로 로그가 유일한 단서 → 호스트 볼륨에 파일로 남긴다.
+      # LOGGING_* 는 Spring Boot relaxed binding(logging.file.name 등)으로 바로 먹는다.
+      LOGGING_FILE_NAME: ${LOGGING_FILE_NAME:-/app/logs/app.log}
+      LOGGING_LOGBACK_ROLLINGPOLICY_MAX_FILE_SIZE: ${LOG_MAX_FILE_SIZE:-50MB}
+      LOGGING_LOGBACK_ROLLINGPOLICY_MAX_HISTORY: ${LOG_MAX_HISTORY:-30}
+      LOGGING_LOGBACK_ROLLINGPOLICY_TOTAL_SIZE_CAP: ${LOG_TOTAL_SIZE_CAP:-2GB}
+    volumes:
+      # 호스트에 로그 영속 — 컨테이너 재생성·재배포에도 보존(사후 검증의 유일한 소스)
+      - ./logs:/app/logs
+    # docker 자체 로그(=`docker logs`)도 무제한 증가를 막는다. 단 재생성 시 사라지므로 위 파일이 정본.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
     restart: unless-stopped
     # actuator/관리 엔드포인트는 로컬에서만 (SSH 터널). 외부 노출 금지.
     ports:
