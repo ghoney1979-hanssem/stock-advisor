@@ -96,6 +96,9 @@ public class SignalAdminController {
     private final StrategyHoldTimeProvider strategyHoldTimeProvider;
     private final StrategyStopProvider strategyStopProvider;
     private final MarketBreadthService marketBreadthService;
+    // 유니버스 스냅샷 수집 현황 조회 — 필드주입(생성자 무churn).
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.UniverseSnapshotService universeSnapshotService;
     private final SwingTrailAnalysisService swingTrailAnalysisService;
     private final SwingExitProvider swingExitProvider;
     private final MarketRegimeService marketRegimeService;
@@ -470,6 +473,16 @@ public class SignalAdminController {
     @GetMapping("/market-breadth")
     public List<MarketBreadthService.Breadth> marketBreadth() {
         return marketBreadthService.describe();
+    }
+
+    /**
+     * 유니버스 스냅샷 수집 현황(Phase 1) — 일자·버킷별 행 수 + 사후 타깃 충족률.
+     * 분석(lift 테이블)은 표본 누적 후 Phase 2에서 별도 엔드포인트로.
+     */
+    @GetMapping("/universe-snapshot-status")
+    public Map<String, Object> universeSnapshotStatus() {
+        return Map.of("config", universeSnapshotService.config(),
+                "collected", universeSnapshotService.describe());
     }
 
     /** 전략별 적응형 손절선 — 승자 MAE 기반 채택값 vs 고정 −7%(fail-closed). */

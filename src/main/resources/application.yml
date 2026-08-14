@@ -155,6 +155,14 @@ stockadvisor:
     # 시장폭 스냅샷 확정 최소 커버리지(기록 종목/워치리스트). 미달이면 기존 스냅샷 유지 — 세션가드에 잘린 부분 스캔이
     # 최종 스냅샷을 덮어쓰는 것 방지(2026-08-14: 15:20 publish n=718이 정상 n=1,334를 덮고 KOSDAQ 행 소실). 0=비활성.
     breadth-min-coverage-ratio: ${SIGNAL_BREADTH_MIN_COVERAGE_RATIO:0.8}
+    # 유니버스 스냅샷(전 종목 feature 수집, 2026-08-14) — P(승자|feature) 계산의 '분모'.
+    # 기존 표본은 전부 거래량 급증 모집단 안에서만 뽑혀(볼륨 게이트 이전 훅이 breadth뿐) 구조적으로 편향돼 있음.
+    # 수집 지점이 breadth 훅과 같아 추가 KIS 호출 0. 4회/일 × 1500종목 ≈ 6,000행/일.
+    # ⚠️ forward-only(소급 불가) — 덜 모으는 것만 되돌릴 수 없다. 분석 단계 다운샘플링은 snap_time으로 언제든 가능.
+    universe-snapshot-enabled: ${SIGNAL_UNIVERSE_SNAPSHOT_ENABLED:true}
+    universe-snapshot-times: ${SIGNAL_UNIVERSE_SNAPSHOT_TIMES:09:30,11:00,13:00,14:30}  # 버킷 시각(csv). 1회만 원하면 09:30
+    universe-snapshot-window-minutes: ${SIGNAL_UNIVERSE_SNAPSHOT_WINDOW_MINUTES:20}     # 버킷 시각 이후 이 분 내 스캔이 수집(12분 주기 커버)
+    universe-snapshot-target-minutes: ${SIGNAL_UNIVERSE_SNAPSHOT_TARGET_MINUTES:90}     # 사후 타깃 horizon(우리 실제 보유시간대)
 
   # 매매비용 — 분석 순수익(net) 계산용. 왕복(매수+매도) 합산 %.
   # 기본 0.18 ≈ 위탁수수료(매수·매도 각 ~0.015%) + 증권거래세(매도 0.15%, 2025~ 코스피·코스닥 동일).

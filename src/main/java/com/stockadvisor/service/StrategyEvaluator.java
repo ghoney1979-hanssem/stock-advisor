@@ -53,6 +53,9 @@ public class StrategyEvaluator {
     private final SectorValuationService sectorValuationService;
     private final StrategyPerformanceGate performanceGate;
     private final MarketBreadthService breadthService;   // 시장폭 집계(스캔 중) + 진입 태깅
+    // 유니버스 스냅샷(전 종목 feature 수집, 연구용) — 필드주입(생성자 무churn). 미주입(테스트)이면 수집 생략.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private UniverseSnapshotService universeSnapshotService;
     private final HotWatchService hotWatchService;        // 티어드 스캔 핫셋 도출(전수 스캔 중 volumeRatio 수집)
 
     // 대조군 집중: 검증된 승자는 대조군 수집 중단(부하↓), 손실·미검증은 수집(진단). 성과 저하 시 자동 재개.
@@ -276,6 +279,12 @@ public class StrategyEvaluator {
         // 티어드 스캔 핫셋 — 전수 스캔 중 거래량배수 + 볼륨무관 이벤트(MA돌파/RSI반등/수축돌파) 수집(볼륨게이트 전, active일 때만).
         boolean eventTriggered = signal.maCrossUp() || signal.rsiCrossUp() || signal.squeezeBreakout();
         hotWatchService.record(stockCode, signal.volumeRatio(), eventTriggered);
+        // 유니버스 스냅샷 — 전 종목 feature + 사후 타깃 수집(볼륨 게이트 전이어야 '분모'가 성립).
+        // ⚠️ 여긴 quote 조회 전이라 PER/PBR/시총/업종은 못 담는다(전 종목 quote는 스냅샷당 ~1,500콜) → 일봉 기반만.
+        // 실패는 격리 — 연구용 수집이 매매 경로를 절대 안 깨뜨린다.
+        if (universeSnapshotService != null) {
+            try { universeSnapshotService.record(stockCode, signal); } catch (Exception ignore) { /* 수집 실패 무시 */ }
+        }
         // 공통 전제: 거래량 급증. 단 '볼륨 무관' 전략이 자기 preScreen(값싼 1차필터)로 이 종목을 원하면 미급증이어도 진행.
         // preScreen이 대상을 좁히므로(인버스=인버스코드만, MA=상향돌파만) 전 종목 비싼-평가 폭증이 안 남.
         boolean noVolumeBypass = pending.stream()

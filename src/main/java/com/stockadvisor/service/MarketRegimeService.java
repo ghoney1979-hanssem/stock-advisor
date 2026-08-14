@@ -156,7 +156,7 @@ public class MarketRegimeService {
     }
 
     /** 시장의 당일 지수 등락률(서킷과 동일 소스, 60s 캐시). 미상이면 null(보정 생략). */
-    private Double dayChangeOf(String market) {
+    public Double dayChangeOf(String market) {
         String idx = INDEX_OF.get(market);
         if (idx == null) return null;
         try {

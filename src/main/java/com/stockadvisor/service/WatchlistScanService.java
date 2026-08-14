@@ -25,6 +25,9 @@ public class WatchlistScanService {
     private final StrategyEvaluator evaluator;
     private final MarketBreadthService breadthService;
     private final HotWatchService hotWatchService;
+    // 유니버스 스냅샷(전 종목 feature 수집) — 필드주입(생성자 무churn, 기존 단위테스트 영향 없음). 미주입이면 no-op.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private UniverseSnapshotService universeSnapshotService;
 
     public WatchlistScanService(CompanyRepository companyRepository, StrategyEvaluator evaluator,
                                 MarketBreadthService breadthService, HotWatchService hotWatchService) {
@@ -68,7 +71,10 @@ public class WatchlistScanService {
         log.info("워치리스트 스캔 시작: {}종목 (MARKET_SCAN 전략)", codes.size());
         // 시장폭 집계는 전체 스캔일 때만(부분 스캔은 편향 스냅샷을 만들지 않도록).
         boolean fullScan = limit == null;
-        if (fullScan) { breadthService.beginScan(); hotWatchService.beginScan(); }
+        if (fullScan) {
+            breadthService.beginScan(); hotWatchService.beginScan();
+            if (universeSnapshotService != null) universeSnapshotService.beginScan();
+        }
         int alerts = 0, scanned = 0;
         try {
             for (String code : codes) {
@@ -84,7 +90,10 @@ public class WatchlistScanService {
                 }
             }
         } finally {
-            if (fullScan) { breadthService.publish(); hotWatchService.publish(); }   // 중간 예외에도 스냅샷 확정
+            if (fullScan) {   // 중간 예외에도 스냅샷 확정
+                breadthService.publish(); hotWatchService.publish();
+                if (universeSnapshotService != null) universeSnapshotService.flush();
+            }
         }
         log.info("워치리스트 스캔 완료: {}종목, 알림 {}건", codes.size(), alerts);
         return alerts;
