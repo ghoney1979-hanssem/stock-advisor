@@ -36,6 +36,10 @@ public class StrategyHoldTimeProvider {
     private volatile Instant lastRefresh;
     private volatile Map<String, HoldInfo> cache = Map.of();
 
+    // 가시화(describe)용 전략 목록 — 필드주입(생성자 무churn, 기존 단위테스트 영향 없음). 미주입이면 STRATEGIES만.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private List<com.stockadvisor.strategy.TradingStrategy> strategies;
+
     public StrategyHoldTimeProvider(ExitTimingService exitTimingService,
                                     TradingPolicyProperties policy,
                                     AdaptiveExitProperties props) {
@@ -55,16 +59,30 @@ public class StrategyHoldTimeProvider {
         return info != null ? info.holdMinutes() : policy.timeExitHoldMinutes();
     }
 
-    /** A/B/C 현재 적용 보유시간(가시화/관리 API용). */
+    /**
+     * <b>전 전략</b> 현재 적용 보유시간(가시화/관리 API용).
+     *
+     * <p>🐞 2026-08-14 수정: 하드코딩된 A/B/C만 반환해, 실제로는 D 90분·K 90분·F 70분·G/H 35분·E 5분으로
+     * 청산·게이팅되고 있는데도 <b>조회로는 확인할 방법이 없었다</b>(게이트 사유 문자열에서 역추론해야 했음).
+     * → 등록된 전략 빈 전체 ∪ 캐시 키를 노출한다. 데이터 부족 전략은 고정 fallback값이 그대로 보여 진단이 된다.</p>
+     */
     public List<HoldInfo> describe() {
         if (props.enabled()) refreshIfStale();
         List<HoldInfo> out = new ArrayList<>();
-        for (String s : STRATEGIES) {
+        for (String s : knownStrategies()) {
             HoldInfo info = props.enabled() ? cache.get(s) : null;
             out.add(info != null ? info
                     : new HoldInfo(s, policy.timeExitHoldMinutes(), false, 0, null));
         }
         return out;
+    }
+
+    /** 가시화 대상 전략명 — 등록된 전략 빈 ∪ 분석 캐시 키(둘 중 하나에만 있어도 노출). */
+    private List<String> knownStrategies() {
+        java.util.SortedSet<String> names = new java.util.TreeSet<>(STRATEGIES);
+        if (strategies != null) for (com.stockadvisor.strategy.TradingStrategy s : strategies) names.add(s.name());
+        names.addAll(cache.keySet());
+        return new ArrayList<>(names);
     }
 
     private synchronized void refreshIfStale() {

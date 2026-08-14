@@ -372,10 +372,15 @@ public class StrategyEvaluator {
         // 전략 판단 컨텍스트 (지수 등락률 포함 — 전략D 지수상대 잔차 계산용)
         // 지수 장중 흐름(mom30)도 실어 D "흐름↓ 스킵" 필터에 사용(위에서 이미 조회한 flow 재사용, 추가 KIS 0).
         Double indexMom30 = (flow != null && flow.available()) ? flow.mom30Pct() : null;
-        StrategyContext ctx = new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, indexMom30);
+        // 지수 당일 갭%(K "지수 통째 갭업일 제외"용) — 시장별 당일 1회 캐시라 스캔 부하 무시할 수준(1콜/시장/일).
+        Double indexGapPct = null;
+        if (!inverse && market != null) {
+            try { indexGapPct = marketRegimeService.indexGapPct(market); } catch (Exception ignore) { /* 실패 시 null */ }
+        }
+        StrategyContext ctx = new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, indexMom30, indexGapPct);
         // 전일 확정 국면을 쓰는 전략(K)용 컨텍스트 — entryTrend만 다르고 나머지는 동일.
         StrategyContext ctxPrior = java.util.Objects.equals(entryTrend, priorDayTrend) ? ctx
-                : new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, priorDayTrend, indexMom30);
+                : new StrategyContext(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, priorDayTrend, indexMom30, indexGapPct);
 
         int alerts = 0;
         // 뉴스·체결강도 feature(진입 시 태깅) — 종목당 각 1콜 lazy(첫 진입 때만 조회, 대조군은 부하상 미태깅)
@@ -445,12 +450,14 @@ public class StrategyEvaluator {
             // 반등일 하루 × TREND_FAMILY 한정이라 추적 부담 제한적. 가드 유지/완화 판단의 유일한 데이터 소스.
             // NOT_FRESH/WEAK_BREAKOUT(F 보완 필터)·NOT_CONFIRMED(H 돌파확인 필터)도 tracksControl 무관 강제 기록 —
             // F/H는 control-off라 흔적이 없으면 "필터가 막은 게 옳았나"(ENTERED vs 필터탈락 net)를 forward 검증할 수 없다(REBOUND_DAY와 동일 취지).
+            // INDEX_GAP_DAY(K 지수갭업일 제외, 2026-08-14)도 동일 — K는 control-off인데다 지수 갭업일 자체가 드물어
+            // 강제 기록하지 않으면 "차단이 옳았나"를 판정할 표본이 영영 안 쌓인다(지수갭일 × K 한정이라 부담 작음).
             boolean trackControl = properties.controlTracking()
                     && ((strategy.tracksControl() && needsControl(strategy.name()))
                         || "REBOUND_DAY".equals(reject) || "EXEC_OVERHEAT".equals(reject)
                         || "RET5D_OVERHEAT".equals(reject)
                         || "NOT_FRESH".equals(reject) || "WEAK_BREAKOUT".equals(reject)
-                        || "NOT_CONFIRMED".equals(reject));
+                        || "NOT_CONFIRMED".equals(reject) || "INDEX_GAP_DAY".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }
@@ -478,6 +485,7 @@ public class StrategyEvaluator {
             outcome.setEntrySlippagePct(entrySlippagePct);
             if (flow != null && flow.available()) outcome.setEntryIntradayFlow(flow.mom10Pct(), flow.mom30Pct(), flow.mom60Pct());
             outcome.setEntrySetupFeatures(signal.atrPct(), signal.distFromHighPct(), signal.ret5dPct());   // 셋업(종목 상태) feature
+            outcome.setEntryGapFeatures(signal.gapPct(), indexGapPct);   // 개장 갭 축(K 갭 상한 튜닝의 전제) — 추가 KIS 0
             outcome.setEntryBreadth(breadthService.overallBreadthPct(), breadthService.breadthPct(market));   // 진입 시점 시장폭(직전 스캔)
 
             if (reject != null) {

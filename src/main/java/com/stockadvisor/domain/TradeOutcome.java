@@ -105,6 +105,10 @@ public class TradeOutcome {
     @Column(name = "entry_atr_pct")      private Double entryAtrPct;             // ATR%(변동성)
     @Column(name = "entry_dist_high_pct") private Double entryDistHighPct;       // 직전 고가 대비 거리%(보통 ≤0)
     @Column(name = "entry_ret5d_pct")    private Double entryRet5dPct;           // 최근 5거래일 수익률%
+    // 개장 갭 축(2026-08-14) — K는 정체성이 갭 전략인데 갭 크기가 저장되지 않아 "갭 3%와 갭 9% 중 뭐가 이기나"를
+    // 사후에 물을 수 없었다(갭 상한 튜닝의 전제). SignalResult.gapPct는 이미 계산돼 있어 태깅 비용 0. forward-only.
+    @Column(name = "entry_gap_pct")       private Double entryGapPct;            // 종목 당일 갭%((시가−전일종가)/전일종가)
+    @Column(name = "entry_index_gap_pct") private Double entryIndexGapPct;       // 해당 시장 지수 당일 갭% — "지수 통째 갭업일"이었나
     // 시장 폭(breadth) — 진입 시점(직전 스캔) 상승종목 비율%. 지수(수준)·mom(흐름)과 다른 "참여 넓이" 축.
     @Column(name = "entry_breadth_pct")        private Double entryBreadthPct;
 
@@ -190,6 +194,15 @@ public class TradeOutcome {
         if (mom30Pct != null) this.entryIndexMom30 = mom30Pct;
         if (mom60Pct != null) this.entryIndexMom60 = mom60Pct;
     }
+    /**
+     * 개장 갭 feature 기록 — 종목 갭%와 (해당 시장) 지수 갭%.
+     * 0/null은 데이터 없음으로 보고 null 저장(K 외 전략은 대부분 갭이 0이라 분석에서 자동 제외).
+     */
+    public void setEntryGapFeatures(double gapPct, Double indexGapPct) {
+        this.entryGapPct = gapPct == 0 ? null : gapPct;
+        this.entryIndexGapPct = indexGapPct;
+    }
+
     /** 셋업 feature(진입 종목 상태) 기록 — 0은 데이터 없음(null로 저장). */
     public void setEntrySetupFeatures(double atrPct, double distFromHighPct, double ret5dPct) {
         this.entryAtrPct = atrPct == 0 ? null : atrPct;

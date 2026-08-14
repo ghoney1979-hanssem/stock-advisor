@@ -35,7 +35,8 @@ SSH 한 번에 여러 curl을 묶어 호출(왕복 절감). 수집 대상 GET �
 | **멀티데이(2-3주)** | `multiday-exit-comparison` (C·D·J 일봉경로 보유D+N/트레일/MA/손절 시뮬), `multiday-marks` (수집현황) |
 
 ⚠️ **2026-08-12 추가 배포분(반드시 활용)**:
-- **horizon 통일**: `outcome-analysis`·`feature-mining`도 이제 **`?horizon=exit`** 지원(게이트·control과 동일 청산시점). **반사실 비교는 exit로 정렬**해 뽑을 것(종가 horizon과 혼용 금지 — 아래 함정3 완화됨).
+- **horizon 통일**: `outcome-analysis`·`feature-mining`도 **`?horizon=exit`** 지원(게이트와 동일 청산시점) — **진입군 pocket 랭킹은 exit로** 뽑을 것.
+- ⚠️ **단, 대조군(반사실) 비교는 `horizon=close`로**(2026-08-14 실측 버그 수정): 대조군은 경량 추적이라 **exit 마크를 거의 수집하지 않는다**. exit horizon에서 대조군 커버리지가 ~15%로 떨어지면 남은 편향 부분집합이 **edge 부호까지 뒤집는다**(ret5d%<−5: exit −2.51%p ↔ close **+0.13%p** / 지수mom30≥0: −1.56 ↔ −0.30). 현재는 커버리지 70% 미만이면 `controlNetPct`/`edgeVsControlPct`가 **null**로 비워지고 `controlCoveragePct`가 응답에 실린다 — **null이면 "edge 없음"이 아니라 "측정 불가"**로 읽고 close horizon으로 다시 뽑을 것. `control-analysis?horizon=exit`도 같은 이유로 reject 버킷이 공집합이 되므로 **대조군 분석은 close 고정**.
 - **게이트 교차거래일 가드**: `strategy-gate` 사유에 "단일일 클러스터(최대 X% > 80%) — 교차거래일 미충족"이 뜨면, 그 버킷 net은 **하루 이벤트가 부풀린 허수**라 게이트가 차단한 것(정상). 이 사유가 뜬 전략은 "성과 미달"과 구분해 보고.
 - **feature-mining 진입-대조군 edge**: 각 pocket에 `netAvgPct`(진입)·`controlNetPct`(미진입)·`edgeVsControlPct`(진입−대조군). **edge<0이면 그 조건에선 진입이 손해**(전략 필터가 오히려 해로움), **edge>0 & 진입net>0이면 유효 pocket**.
 
@@ -149,8 +150,9 @@ group by b.strategy, hold_min order by b.strategy, hold_min;
 
 **수집**(exit horizon 필수 — 게이트와 동일 기준):
 ```
-feature-mining?horizon=exit&includeControl=true&minSamples=30&maxDayShare=80        # 전체
-feature-mining?horizon=exit&includeControl=true&minSamples=30&regime=BULL           # 국면 세그먼트(교란 통제)
+feature-mining?horizon=exit&includeControl=true&minSamples=30&maxDayShare=80        # 진입군 pocket 랭킹(게이트 정렬)
+feature-mining?horizon=close&includeControl=true&minSamples=30&maxDayShare=80       # ⚠️ 진입-대조군 edge는 반드시 close로(위 함정 참조)
+feature-mining?horizon=close&includeControl=true&minSamples=30&regime=BULL          # 국면 세그먼트(교란 통제)
 feature-mining?...&regime=NEUTRAL / regime=BEAR                                      # 국면별로 각각
 ```
 국면을 안 나누면 국면 교란으로 섞인다(전 전략이 국면조건부) → **반드시 regime 세그먼트별로도** 뽑는다.
@@ -159,7 +161,7 @@ feature-mining?...&regime=NEUTRAL / regime=BEAR                                 
 1. **비클러스터**(`clustered=false`) — 단일일 이벤트가 만든 net 제외(이미 highlights는 통과분만).
 2. **표본 충분 + 교차거래일**(`n≥30`, `distinctDays≥5`) — 며칠에 걸쳐 반복된 조건.
 3. **진입 net > 왕복비용**(`netAvgPct` 유의미하게 +).
-4. **진입-대조군 edge > 0**(`edgeVsControlPct>0`) — 그 조건에서 **진입이 미진입보다 실제로 나았음**(필터/신호가 가치 추가). edge≤0이면 "그 조건은 좋아 보여도 진입이 손해"라 후보 아님.
+4. **진입-대조군 edge > 0**(`edgeVsControlPct>0`, **close horizon에서 확인**) — 그 조건에서 **진입이 미진입보다 실제로 나았음**(필터/신호가 가치 추가). edge≤0이면 "그 조건은 좋아 보여도 진입이 손해"라 후보 아님. **edge가 null이면 대조군 커버리지 미달(측정 불가)**이니 close horizon으로 다시 확인할 것 — null을 0이나 음수로 취급 금지.
 5. **국면 일관성** — 한 국면만이 아니라 최소 두 국면에서 +거나, 특정 국면 전용이면 그 국면 표본이 충분.
 
 **해석·산출**:

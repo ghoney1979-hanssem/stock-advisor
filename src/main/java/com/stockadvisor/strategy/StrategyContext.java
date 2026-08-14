@@ -17,6 +17,9 @@ import com.stockadvisor.service.SignalResult;
  * @param entryTrend   진입 시점 "어제까지의 시장 국면"(BULL/NEUTRAL/BEAR, MA기반). 전략K(개장갭)가 갭업 추종 방향 필터에 사용. 미상이면 null.
  * @param indexMom30   진입 시점 해당 시장 지수 장중 흐름(최근 30분 모멘텀 %, MarketRegimeService.intradayFlow). ≥0=흐름↑/미만=흐름↓.
  *                     전략D(지수상대)가 "흐름↓ 스킵" 필터에 사용. 흐름 미산출(개장 ~30분·조회실패)·인버스면 null(필터 미적용, degrade open).
+ * @param indexGapPct  진입 시점 해당 시장 지수의 <b>당일 갭%</b>((오늘시가−전일종가)/전일종가, MarketRegimeService.indexGapPct).
+ *                     전략K(개장갭)가 "지수 통째 갭업일 제외" 필터에 사용 — 지수 갭업일의 종목 갭업은 종목 촉매가 아니라
+ *                     시장 갭의 반영이라 되돌림에 동반 하락. 미산출(장전·휴장·조회실패)·인버스면 null(필터 미적용, degrade open).
  */
 public record StrategyContext(
         String stockCode,
@@ -27,17 +30,25 @@ public record StrategyContext(
         boolean inverse,
         boolean undervalued,
         String entryTrend,
-        Double indexMom30
+        Double indexMom30,
+        Double indexGapPct
 ) {
-    /** 8-인자 호환 — indexMom30 null 기본. 기존 호출·테스트 무변경 유지용. */
+    /** 9-인자 호환 — indexGapPct null 기본. 기존 호출·테스트 무변경 유지용. */
     public StrategyContext(String stockCode, SignalResult signal, double recScore, RecommendationType recType,
-                           Double marketChange, boolean inverse, boolean undervalued, String entryTrend) {
-        this(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, null);
+                           Double marketChange, boolean inverse, boolean undervalued, String entryTrend,
+                           Double indexMom30) {
+        this(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, indexMom30, null);
     }
 
-    /** 기존 7-인자 호환 — entryTrend·indexMom30 null 기본. 테스트·구 호출 무변경 유지용. */
+    /** 8-인자 호환 — indexMom30·indexGapPct null 기본. 기존 호출·테스트 무변경 유지용. */
+    public StrategyContext(String stockCode, SignalResult signal, double recScore, RecommendationType recType,
+                           Double marketChange, boolean inverse, boolean undervalued, String entryTrend) {
+        this(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, entryTrend, null, null);
+    }
+
+    /** 기존 7-인자 호환 — entryTrend·indexMom30·indexGapPct null 기본. 테스트·구 호출 무변경 유지용. */
     public StrategyContext(String stockCode, SignalResult signal, double recScore, RecommendationType recType,
                            Double marketChange, boolean inverse, boolean undervalued) {
-        this(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, null, null);
+        this(stockCode, signal, recScore, recType, marketChange, inverse, undervalued, null, null, null);
     }
 }

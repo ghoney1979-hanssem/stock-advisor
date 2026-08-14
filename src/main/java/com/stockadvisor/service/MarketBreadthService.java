@@ -30,6 +30,8 @@ public class MarketBreadthService {
     private static final String OVERALL = "OVERALL";
 
     private final CompanyRepository companyRepository;
+    /** 스냅샷 확정에 필요한 최소 커버리지 비율(기록 종목 / 워치리스트 유니버스). 0=비활성(항상 확정). */
+    private final double minCoverageRatio;
 
     private volatile Map<String, String> codeToMarket = Map.of();
     private boolean active;
@@ -38,8 +40,11 @@ public class MarketBreadthService {
     private volatile Map<String, Breadth> published = Map.of();
     private volatile java.time.Instant publishedAt;   // 스냅샷 확정 시각 — 신선도 판정(리스크오프가 전일 스냅샷에 오발동 방지)
 
-    public MarketBreadthService(CompanyRepository companyRepository) {
+    public MarketBreadthService(CompanyRepository companyRepository,
+                                @org.springframework.beans.factory.annotation.Value(
+                                        "${stockadvisor.signal.breadth-min-coverage-ratio:0.8}") double minCoverageRatio) {
         this.companyRepository = companyRepository;
+        this.minCoverageRatio = minCoverageRatio;
     }
 
     /** @param advPct 상승 종목 비율(%), medianChangePct 등락률 중앙값. */
@@ -65,11 +70,26 @@ public class MarketBreadthService {
         if (mkt != null) building.computeIfAbsent(mkt, k -> new ArrayList<>()).add(changeRate);
     }
 
-    /** 스캔 종료 — 누산기로 시장별 breadth 스냅샷 확정. 기록 0건(마감 후 빈 스캔)이면 기존 스냅샷 유지. */
+    /**
+     * 스캔 종료 — 누산기로 시장별 breadth 스냅샷 확정. 기록 0건(마감 후 빈 스캔)이면 기존 스냅샷 유지.
+     *
+     * <p>🐞 2026-08-14 실측: 15:20 세션가드가 전수 스캔을 중간에 끊어 <b>n=718(직전 정상 n=1,334)의 부분 스캔이
+     * 최종 스냅샷을 덮어썼다</b> — 게다가 순회 순서상 KOSDAQ 구간에 도달하지 못해 <b>KOSDAQ 행 자체가 소실</b>돼
+     * {@code breadthRiskOff("KOSDAQ")}의 판정 소스가 사라졌다(현재는 isFresh 40분 가드 덕에 실주문 영향은 없었음).
+     * → 커버리지(기록 종목 수 / 워치리스트 유니버스)가 {@link #minCoverageRatio} 미만이면 <b>기존 스냅샷을 유지</b>한다.
+     * 부분 데이터로 갱신하느니 조금 오래된 완전 데이터가 낫다(신선도는 isFresh가 별도로 판정).</p>
+     */
     public synchronized void publish() {
         active = false;
         if (building.isEmpty()) {
             log.debug("시장폭 기록 0건(세션 밖 스캔) — 기존 스냅샷 유지");
+            return;
+        }
+        int recorded = building.getOrDefault(OVERALL, List.of()).size();
+        int universe = codeToMarket.size();
+        if (!hasEnoughCoverage(recorded, universe, minCoverageRatio)) {
+            log.info("시장폭 부분 스캔(n{}/유니버스 {}, 최소 {}%) — 기존 스냅샷 유지",
+                    recorded, universe, Math.round(minCoverageRatio * 100));
             return;
         }
         Map<String, Breadth> pub = new LinkedHashMap<>();
@@ -108,6 +128,15 @@ public class MarketBreadthService {
     /** 현재 스냅샷(가시화 API용). */
     public List<Breadth> describe() {
         return new ArrayList<>(published.values());
+    }
+
+    /**
+     * 스냅샷 확정 자격 판정(순수) — 기록 종목 수가 유니버스의 {@code ratio} 이상인가.
+     * 유니버스 미상(0)이면 판정 불가로 통과(degrade open — 데이터 실패로 breadth를 끄지 않음).
+     */
+    static boolean hasEnoughCoverage(int recorded, int universe, double ratio) {
+        if (ratio <= 0 || universe <= 0) return true;
+        return recorded >= universe * ratio;
     }
 
     private Breadth compute(String market, List<Double> changes) {

@@ -127,8 +127,19 @@ public class MarketRiskGuard {
         return currentPrice <= buyPrice * (1.0 - pct / 100.0);
     }
 
-    /** 현재 국면 기준 총노출 상한(순자산 대비 %). 국면 미산출이면 제약 없음(100). */
+    /** 현재 국면 기준 총노출 상한(순자산 대비 %). 국면 미산출이면 제약 없음(100). 개장 창이면 개장 상한과 min 결합. */
     public double exposureCapPct() {
+        return exposureCapPct(ZonedDateTime.now(SEOUL).toLocalTime());
+    }
+
+    /**
+     * 총노출 상한(%) — 국면 상한과 <b>개장 창 상한</b>의 min.
+     *
+     * <p>개장 창 상한은 "리스크 예산 선착순 배분" 완화용이다(2026-08-14 실측: 예산이 09:07에 전량 소진돼
+     * LIVE 15건이 갭업 고점 27분 창에 몰림 → 계좌 −1.78%). {@code openingExposureCapPct}=0이면 <b>비활성</b>이라
+     * 기존 동작과 완전히 동일하다.</p>
+     */
+    public double exposureCapPct(java.time.LocalTime now) {
         if (!props.enabled()) return 100;
         MarketTrend trend = marketRegimeService.overallTrend();
         if (trend == null) return 100;   // 데이터 부족 → 제약 없음
@@ -138,7 +149,22 @@ public class MarketRiskGuard {
             case BEAR -> props.bearExposurePct();
         };
         if (anyHighVolatility()) base *= props.highVolExposureMult();
+        base = openingCapped(base, now, props.openingExposureCapPct(), props.openingWindowMinutes());
         return Math.min(100, Math.max(0, base));
+    }
+
+    /** KRX 정규장 개시(09:00) — 개장 창 기준점. */
+    static final java.time.LocalTime MARKET_OPEN = java.time.LocalTime.of(9, 0);
+
+    /**
+     * 개장 창 노출 상한 결합(순수) — [09:00, 09:00+windowMinutes) 구간이면 {@code min(base, openingCapPct)}.
+     * {@code openingCapPct<=0}(비활성)이거나 창 밖이면 base 그대로.
+     */
+    static double openingCapped(double base, java.time.LocalTime now, double openingCapPct, int windowMinutes) {
+        if (openingCapPct <= 0 || now == null) return base;
+        java.time.LocalTime end = MARKET_OPEN.plusMinutes(windowMinutes);
+        if (now.isBefore(MARKET_OPEN) || !now.isBefore(end)) return base;
+        return Math.min(base, openingCapPct);
     }
 
     /** 미청산 매수 포지션 총액(원) — 주문 요청금액 합산. */
@@ -269,7 +295,14 @@ public class MarketRiskGuard {
 
     private String regimeLabel() {
         MarketTrend t = marketRegimeService.overallTrend();
-        return t == null ? "국면미상" : t.korean() + (anyHighVolatility() ? "·고변동" : "");
+        String base = t == null ? "국면미상" : t.korean() + (anyHighVolatility() ? "·고변동" : "");
+        // 개장 창 상한이 실제로 물린 경우에만 표기 — "왜 아침에만 막혔나"가 로그로 바로 보이게
+        java.time.LocalTime now = ZonedDateTime.now(SEOUL).toLocalTime();
+        if (props.openingExposureCapPct() > 0
+                && openingCapped(100, now, props.openingExposureCapPct(), props.openingWindowMinutes()) < 100) {
+            base += "·개장창" + props.openingWindowMinutes() + "분";
+        }
+        return base;
     }
 
     private Double safeIndexChange(String indexCode) {

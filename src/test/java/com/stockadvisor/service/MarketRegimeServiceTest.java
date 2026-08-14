@@ -225,4 +225,15 @@ class MarketRegimeServiceTest {
         assertThat(MarketRegimeService.stabilizeTrend(null, MarketTrend.BULL, T0, 30).stable())
                 .isEqualTo(MarketTrend.BULL);      // 최초 관측 — 기준 라벨이 없으므로 즉시 채택
     }
+
+    /** 지수 갭%(K "지수 통째 갭업일 제외"의 입력) — 시가/전일종가에서 계산. */
+    @Test
+    void 지수_갭_계산() {
+        // 2026-08-14 KOSPI 재현: 전일 종가 107,000 → 시가 109,800 ≈ +2.6%
+        assertThat(MarketRegimeService.gapPct(109_800.0, 107_000.0)).isCloseTo(2.617, within(0.01));
+        assertThat(MarketRegimeService.gapPct(99_000.0, 100_000.0)).isCloseTo(-1.0, within(1e-9));  // 갭다운
+        assertThat(MarketRegimeService.gapPct(null, 100_000.0)).isNull();     // 시가 미상
+        assertThat(MarketRegimeService.gapPct(100_000.0, null)).isNull();     // 전일종가 미상
+        assertThat(MarketRegimeService.gapPct(100_000.0, 0.0)).isNull();      // 0 방어
+    }
 }

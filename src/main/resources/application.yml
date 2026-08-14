@@ -127,6 +127,10 @@ stockadvisor:
     opening-gap-max-gap: ${SIGNAL_OPENING_GAP_MAX_GAP:10.0}      # 최대 갭%(상한가 추격 회피)
     opening-gap-min-score: ${SIGNAL_OPENING_GAP_MIN_SCORE:40.0}  # 추천 점수 게이트
     opening-gap-window-end: ${SIGNAL_OPENING_GAP_WINDOW_END:09:30}  # 개장 창 종료(09:00~이 시각만 발동)
+    # [K] 지수 통째 갭업일 제외 — 해당 시장 지수 갭 ≥ 이값%면 진입 보류(INDEX_GAP_DAY, 대조군 강제 기록).
+    # 지수가 갭업하면 개별 갭업은 종목 촉매가 아니라 시장 갭의 반영 → 되돌림 시 종목선택 무관 동반 하락
+    # (2026-08-14 실측: KOSPI +2.6%/KOSDAQ +1.6% 갭업일 K 7건 → 4건 손절선 직행, -120,050원). 0=비활성.
+    opening-gap-max-index-gap: ${SIGNAL_OPENING_GAP_MAX_INDEX_GAP:1.5}
     # 대조군 집중: 검증된 승자(perf-gate 통과) 전략은 대조군 수집 중단(부하↓), 손실·미검증만 수집(진단 집중). 성과저하 시 자동 재개.
     control-focus-enabled: ${SIGNAL_CONTROL_FOCUS_ENABLED:true}
     mean-reversion-min-drop: ${SIGNAL_C_MIN_DROP:3.0}      # [C] 역추세: 당일 -3% 이상 하락
@@ -148,6 +152,9 @@ stockadvisor:
     session-start: ${SIGNAL_SESSION_START:09:00}           # 연속매매 시작
     session-end: ${SIGNAL_SESSION_END:15:20}               # 연속매매 종료(이후 마감동시호가 제외)
     control-tracking: ${SIGNAL_CONTROL_TRACKING:true}      # 대조군 추적(거래량급증했지만 전략조건/점수 탈락 종목도 수익률 기록 — 필터 검증/개선)
+    # 시장폭 스냅샷 확정 최소 커버리지(기록 종목/워치리스트). 미달이면 기존 스냅샷 유지 — 세션가드에 잘린 부분 스캔이
+    # 최종 스냅샷을 덮어쓰는 것 방지(2026-08-14: 15:20 publish n=718이 정상 n=1,334를 덮고 KOSDAQ 행 소실). 0=비활성.
+    breadth-min-coverage-ratio: ${SIGNAL_BREADTH_MIN_COVERAGE_RATIO:0.8}
 
   # 매매비용 — 분석 순수익(net) 계산용. 왕복(매수+매도) 합산 %.
   # 기본 0.18 ≈ 위탁수수료(매수·매도 각 ~0.015%) + 증권거래세(매도 0.15%, 2025~ 코스피·코스닥 동일).
@@ -262,6 +269,10 @@ stockadvisor:
       catastrophic-stop-pct: ${TRADING_RISK_CATASTROPHIC_STOP_PCT:7.0}  # 개별 손절 하한(%) — 매수가 -이값% 이하 즉시 청산(재난방지 바닥, 튜닝SL 아님). 0=비활성
       breadth-riskoff-adv-pct: ${TRADING_RISK_BREADTH_ADV_PCT:15.0}      # 시장폭 리스크오프 — 해당 시장 상승비율 <이값% AND 아래 중앙 조건이면 신규진입 차단(강제청산 없음). 0=비활성
       breadth-riskoff-median-pct: ${TRADING_RISK_BREADTH_MEDIAN_PCT:3.0} # 시장폭 리스크오프 — 중앙 등락률 ≤ -이값% 조건(상승비율과 AND, 오발동 방지)
+      # 개장 창 노출 상한 — 리스크 예산 "선착순" 배분 완화(2026-08-14: 예산이 09:07 전량 소진, LIVE 15건이 갭업 고점 27분에 집중 → 계좌 -1.78%).
+      # 국면 상한과 min 결합. 0=비활성(기본, 기존 동작 무변경) → forward 검증 후 켤 것(예: 25 = 개장 30분 동안 순자산 25%까지만).
+      opening-exposure-cap-pct: ${TRADING_RISK_OPENING_EXPOSURE_CAP_PCT:0}
+      opening-window-minutes: ${TRADING_RISK_OPENING_WINDOW_MINUTES:30}   # 09:00부터 이 분까지 위 상한 적용
 
     # 인버스 전용 청산 — 진입(지수 약세)과 대칭: 하락 지속 동안 보유, 약세 소멸(레벨 회복/모멘텀 반등) 시 청산. 시간청산·적응형 미적용(개별종목 학습값이라 부적합).
     inverse-exit:

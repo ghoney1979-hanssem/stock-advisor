@@ -32,6 +32,10 @@ public class ExitMethodProvider {
     private volatile Instant lastRefresh;
     private volatile Map<String, ExitStrategyService.BestExit> cache = Map.of();
 
+    // 가시화(describe)용 전략 목록 — 필드주입(생성자 무churn). 미주입(테스트)이면 STRATEGIES만.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private List<com.stockadvisor.strategy.TradingStrategy> strategies;
+
     public ExitMethodProvider(ExitStrategyService exitStrategyService, ExitMethodProperties props) {
         this.exitStrategyService = exitStrategyService;
         this.props = props;
@@ -54,14 +58,26 @@ public class ExitMethodProvider {
         return b;
     }
 
-    /** A/B/C 현재 채택 청산방식(가시화/관리 API용). */
+    /**
+     * <b>전 전략</b> 현재 채택 청산방식(가시화/관리 API용).
+     * 🐞 2026-08-14 수정: A/B/C 하드코딩이라 D·K·F·G·H 등 실제 운용 중인 전략의 청산방식을 조회할 수 없었음
+     * ({@link StrategyHoldTimeProvider#describe()}와 동일 결손).
+     */
     public List<ExitStrategyService.BestExit> describe() {
         List<ExitStrategyService.BestExit> out = new ArrayList<>();
-        for (String s : STRATEGIES) {
+        for (String s : knownStrategies()) {
             ExitStrategyService.BestExit m = methodFor(s);
             out.add(new ExitStrategyService.BestExit(s, m.type(), m.param(), m.avgReturnPct(), m.samples()));
         }
         return out;
+    }
+
+    /** 가시화 대상 전략명 — 등록된 전략 빈 ∪ 분석 캐시 키. */
+    private List<String> knownStrategies() {
+        java.util.SortedSet<String> names = new java.util.TreeSet<>(STRATEGIES);
+        if (strategies != null) for (com.stockadvisor.strategy.TradingStrategy s : strategies) names.add(s.name());
+        names.addAll(cache.keySet());
+        return new ArrayList<>(names);
     }
 
     private synchronized void refreshIfStale() {

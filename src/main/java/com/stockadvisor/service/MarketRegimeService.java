@@ -198,6 +198,52 @@ public class MarketRegimeService {
         return dayChgPct != null && minSurgePct > 0 && dayChgPct >= minSurgePct;
     }
 
+    // ── 지수 갭(당일 시가 vs 전일 종가) ─────────────────────────────
+    // 시장별 당일 1회만 계산해 캐시(값이 하루 동안 불변). 프록시 일봉 1콜/시장/일 — 국면 캐시(60분 TTL)를 재사용하면
+    // 08:40 배치 시점에 갱신된 캐시엔 '오늘 행'이 없어 K의 개장 창(09:00~09:30)에 미상이 되므로 별도 캐시를 둔다.
+    private final Map<String, double[]> indexGapCache = new ConcurrentHashMap<>();   // market -> {epochDay, gapPct}
+
+    /**
+     * 해당 시장 지수(프록시 ETF)의 <b>당일 갭%</b> = (오늘 시가 − 전일 종가) / 전일 종가 × 100.
+     *
+     * <p>전략 K(개장갭)가 "지수가 통째로 갭업한 날인가"를 판정하는 데 쓴다 — 지수 갭업일의 종목 갭업은
+     * 종목 고유 촉매가 아니라 <b>시장 갭의 반영</b>이라, 지수 갭이 되돌려지면 전 종목이 동반 하락한다
+     * (2026-08-14 실측: KOSPI +2.6%/KOSDAQ +1.6% 갭업 개장 → K 7건이 09:01~09:06에 진입 → 4건이 손절선 직행, −120,050원).</p>
+     *
+     * <p>오늘 거래일 행이 없으면(장전·휴장) null → 필터 미적용(degrade open).</p>
+     */
+    public Double indexGapPct(String market) {
+        if (market == null) return null;
+        String proxy = "KOSDAQ".equals(market) ? props.kosdaqProxyCode()
+                : "KOSPI".equals(market) ? props.kospiProxyCode() : null;
+        if (proxy == null) return null;   // INVERSE 등 — 대상 아님
+        long today = LocalDate.now(SEOUL).toEpochDay();
+        double[] cached = indexGapCache.get(market);
+        if (cached != null && (long) cached[0] == today) {
+            return Double.isNaN(cached[1]) ? null : cached[1];
+        }
+        Double gap = null;
+        try {
+            KisDailyPriceResponse resp = kisApiClient.fetchDailyPrices(proxy);
+            List<KisDailyPriceResponse.DailyPrice> rows = resp.output();
+            if (rows != null && rows.size() >= 2
+                    && LocalDate.now(SEOUL).format(YYYYMMDD).equals(rows.get(0).businessDate())) {
+                gap = gapPct(parse(rows.get(0).openPrice()), parse(rows.get(1).closePrice()));
+            }
+        } catch (Exception ex) {
+            log.warn("지수 갭 계산 실패 [{}] proxy={}: {}", market, proxy, ex.getMessage());
+            return null;   // 실패는 캐시하지 않음(다음 호출에서 재시도)
+        }
+        indexGapCache.put(market, new double[]{today, gap == null ? Double.NaN : gap});
+        return gap;
+    }
+
+    /** 갭% 계산(순수) — 시가/전일종가 중 하나라도 유효하지 않으면 null. */
+    static Double gapPct(Double openPrice, Double prevClose) {
+        if (openPrice == null || prevClose == null || openPrice <= 0 || prevClose <= 0) return null;
+        return (openPrice - prevClose) / prevClose * 100.0;
+    }
+
     /** intraday 보정 적용된 추세. base 미가용이면 그대로. */
     private MarketTrend adjustedTrendOf(String market, MarketRegime base) {
         if (base == null || !base.available()) return base == null ? null : base.trend();

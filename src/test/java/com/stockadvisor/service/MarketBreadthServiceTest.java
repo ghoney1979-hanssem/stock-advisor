@@ -18,12 +18,17 @@ class MarketBreadthServiceTest {
 
     private final CompanyRepository companyRepo = mock(CompanyRepository.class);
 
+    /** 커버리지 가드 0(비활성) — 기존 케이스들은 부분 기록으로 집계 로직 자체를 검증하는 게 목적. */
     private MarketBreadthService svc() {
+        return svc(0);
+    }
+
+    private MarketBreadthService svc(double minCoverageRatio) {
         when(companyRepo.findAll()).thenReturn(List.of(
                 new Company("A", "a", null, "KOSPI"),
                 new Company("B", "b", null, "KOSPI"),
                 new Company("C", "c", null, "KOSDAQ")));
-        return new MarketBreadthService(companyRepo);
+        return new MarketBreadthService(companyRepo, minCoverageRatio);
     }
 
     @Test
@@ -73,6 +78,31 @@ class MarketBreadthServiceTest {
         s.publish();
         assertThat(s.overallBreadthPct()).isCloseTo(100.0, within(0.1));   // A만 집계(1중 1 상승)
         assertThat(s.breadthPct("KOSDAQ")).isNull();
+    }
+
+    @Test
+    void 커버리지_미달_부분스캔은_기존_스냅샷을_덮지_않는다() {
+        // 2026-08-14 실측: 15:20 세션가드가 전수 스캔을 끊어 n=718 부분 스냅샷이 정상 n=1,334를 덮고 KOSDAQ 행이 소실됨
+        MarketBreadthService s = svc(0.8);
+        s.beginScan();
+        s.record("A", 1.0); s.record("B", 1.0); s.record("C", 1.0);   // 3/3 = 100% → 확정
+        s.publish();
+        assertThat(s.overallBreadthPct()).isCloseTo(100.0, within(0.1));
+        assertThat(s.breadthPct("KOSDAQ")).isCloseTo(100.0, within(0.1));
+
+        s.beginScan();
+        s.record("A", -5.0);   // 1/3 = 33% < 80% → 부분 스캔이라 유지돼야 함
+        s.publish();
+        assertThat(s.overallBreadthPct()).isCloseTo(100.0, within(0.1));   // 덮이지 않음
+        assertThat(s.breadthPct("KOSDAQ")).isCloseTo(100.0, within(0.1));  // KOSDAQ 행도 살아있음
+    }
+
+    @Test
+    void 커버리지_판정_경계() {
+        assertThat(MarketBreadthService.hasEnoughCoverage(1334, 1500, 0.8)).isTrue();    // 88.9%
+        assertThat(MarketBreadthService.hasEnoughCoverage(718, 1500, 0.8)).isFalse();    // 47.9% — 실측 부분 스캔
+        assertThat(MarketBreadthService.hasEnoughCoverage(718, 1500, 0)).isTrue();       // 0=비활성
+        assertThat(MarketBreadthService.hasEnoughCoverage(10, 0, 0.8)).isTrue();         // 유니버스 미상 → degrade open
     }
 
     @Test

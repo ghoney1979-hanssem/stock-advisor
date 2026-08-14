@@ -105,7 +105,40 @@ class FeatureMiningServiceTest {
 
         assertThat(b.netAvgPct()).isCloseTo(2.0, within(1e-6));      // 진입
         assertThat(b.controlN()).isEqualTo(25);
+        assertThat(b.controlTotalN()).isEqualTo(25);
+        assertThat(b.controlCoveragePct()).isCloseTo(100.0, within(1e-6));
         assertThat(b.controlNetPct()).isCloseTo(-1.0, within(1e-6)); // 미진입
         assertThat(b.edgeVsControlPct()).isCloseTo(3.0, within(1e-6)); // 진입이 +3%p 우위
+    }
+
+    /**
+     * 🐞 2026-08-14 실측 버그 회귀: 대조군 커버리지가 낮으면(exit horizon에서 대조군 exit 마크가 거의 없음)
+     * 그 편향 부분집합으로 계산한 edge가 부호까지 뒤집힌다(ret5d%&lt;-5: exit −2.51%p ↔ close +0.13%p).
+     * → 커버리지 미달이면 controlNet·edge는 null이고, 커버리지 자체가 응답에 실려야 한다.
+     */
+    @Test
+    void 대조군_커버리지_미달이면_edge를_내지_않고_커버리지를_노출한다() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        String[] dates = {"20260602", "20260603", "20260604", "20260605", "20260606"};
+        for (int i = 0; i < 25; i++) rows.add(vr(10, dates[i % 5], i, 2.0));            // 진입 25건
+        for (int i = 0; i < 25; i++) {                                                   // 대조군 25건 중
+            TradeOutcome c = vr(10, dates[i % 5], 200 + i, -1.0);
+            c.markControl("SCORE");
+            // 20건은 해당 horizon 가격 미수집 → 커버리지 5/25 = 20% (대조군 exit 마크 부재 상황 재현)
+            if (i >= 5) org.springframework.test.util.ReflectionTestUtils.setField(c, "priceClose", null);
+            rows.add(c);
+        }
+        when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
+
+        FeatureMiningService.Bucket b = svc().mine(90, "close", null, null, 20, 80.0, true)
+                .features().stream().filter(f -> f.feature().equals("거래량배수")).findFirst().orElseThrow()
+                .buckets().stream().filter(x -> x.range().equals("8~15")).findFirst().orElseThrow();
+
+        assertThat(b.netAvgPct()).isCloseTo(2.0, within(1e-6));   // 진입 통계는 그대로
+        assertThat(b.controlN()).isEqualTo(5);                    // 가격 있는 대조군만
+        assertThat(b.controlTotalN()).isEqualTo(25);
+        assertThat(b.controlCoveragePct()).isCloseTo(20.0, within(1e-6));
+        assertThat(b.controlNetPct()).isNull();                   // 편향 부분집합 → 계산 안 함
+        assertThat(b.edgeVsControlPct()).isNull();
     }
 }

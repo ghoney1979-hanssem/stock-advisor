@@ -34,17 +34,20 @@ public class OpeningGapStrategy implements TradingStrategy {
     private final double maxGap;       // 최대 갭%(상한가 추격 회피)
     private final double minScore;     // 추천 점수 게이트
     private final LocalTime windowEnd; // 개장 창 종료(09:00~이 시각)
+    private final double maxIndexGap;  // 지수 갭 상한%(이 이상 갭업한 날은 진입 보류). 0=비활성
 
     public OpeningGapStrategy(@Value("${stockadvisor.signal.opening-gap-enabled:true}") boolean enabled,
                               @Value("${stockadvisor.signal.opening-gap-min-gap:2.0}") double minGap,
                               @Value("${stockadvisor.signal.opening-gap-max-gap:10.0}") double maxGap,
                               @Value("${stockadvisor.signal.opening-gap-min-score:40.0}") double minScore,
-                              @Value("${stockadvisor.signal.opening-gap-window-end:09:30}") String windowEnd) {
+                              @Value("${stockadvisor.signal.opening-gap-window-end:09:30}") String windowEnd,
+                              @Value("${stockadvisor.signal.opening-gap-max-index-gap:0}") double maxIndexGap) {
         this.enabled = enabled;
         this.minGap = minGap;
         this.maxGap = maxGap;
         this.minScore = minScore;
         this.windowEnd = LocalTime.parse(windowEnd);
+        this.maxIndexGap = maxIndexGap;
     }
 
     private boolean inWindow() {
@@ -83,10 +86,27 @@ public class OpeningGapStrategy implements TradingStrategy {
         double gap = s.gapPct();
         if (gap < minGap) return "NO_GAP";                    // 갭업 부족
         if (gap > maxGap) return "GAP_TOO_BIG";               // 과대갭(상한가 추격) 회피
+        if (indexGapDay(ctx.indexGapPct(), maxIndexGap)) return "INDEX_GAP_DAY";  // 지수 통째 갭업일 제외
         if ("BEAR".equals(ctx.entryTrend())) return "REGIME_BEAR";  // 약세장 갭업 제외
         if (s.changeRate() < gap) return "FADING";            // 현재가<시가(갭 못 지킴)
         if (ctx.recScore() < minScore) return "SCORE";
         return null;                                          // 갭업 유지 + 비약세 → 개장 롱
+    }
+
+    /**
+     * 지수 통째 갭업일 판정(순수) — 지수 갭 ≥ maxIndexGap이면 true(진입 보류).
+     *
+     * <p>근거(2026-08-14 실측): KOSPI가 +2.6%, KOSDAQ이 +1.6~2.0% <b>갭업 개장</b>한 날 K가 09:01~09:06에 7건 진입 →
+     * 오전 되돌림(코스닥은 +1.6%→−1.3%로 3%p 반전)에 4건이 손절선(−5.3%) 직행, <b>−120,050원(계좌 −1.13%)</b>.
+     * 지수가 통째로 갭업하면 개별 종목 갭업은 "종목 고유 촉매"가 아니라 시장 갭의 반영이라, 갭이 되돌려질 때
+     * 종목 선택과 무관하게 전부 같이 무너진다 — K의 전제("어제까지 국면 + <b>오늘 종목</b> 시초가 갭")가 성립하지 않는 날.</p>
+     *
+     * <p>지수 갭 미상(장전·휴장·조회실패)이면 false = 필터 미적용(degrade open — 데이터 실패로 매매를 막지 않음).
+     * maxIndexGap ≤ 0이면 비활성.</p>
+     */
+    static boolean indexGapDay(Double indexGapPct, double maxIndexGap) {
+        if (maxIndexGap <= 0 || indexGapPct == null) return false;
+        return indexGapPct >= maxIndexGap;
     }
 
     @Override

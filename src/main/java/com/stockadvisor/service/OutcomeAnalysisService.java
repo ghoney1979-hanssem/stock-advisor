@@ -89,6 +89,8 @@ public class OutcomeAnalysisService {
             numeric.add(feature("뉴스경과분", wins, losses,
                     o -> o.getEntryNewsAgeMin() == null ? null : o.getEntryNewsAgeMin().doubleValue()));
             numeric.add(feature("체결강도%", wins, losses, TradeOutcome::getEntryExecStrength));
+            numeric.add(feature("종목갭%", wins, losses, TradeOutcome::getEntryGapPct));         // K 갭 상한 튜닝 근거
+            numeric.add(feature("지수갭%", wins, losses, TradeOutcome::getEntryIndexGapPct));    // "지수 통째 갭업일"이 승패를 가르나
             numeric.add(feature("거래량배수", wins, losses, TradeOutcome::getEntryVolumeRatio));
             numeric.add(feature("추천점수", wins, losses, TradeOutcome::getEntryRecScore));
             numeric.add(feature("PER", wins, losses, TradeOutcome::getEntryPer));

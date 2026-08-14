@@ -20,7 +20,7 @@ class MarketRiskGuardTest {
 
     // crashHaltPct=0 → 서킷 비활성(지수조회 안 함). 손절 0=비활성. exposure: bull 100%.
     private RiskProperties props(int maxPerSector, double bearPct) {
-        return new RiskProperties(true, 100, 60, bearPct, 0.5, 0, maxPerSector, 0, 2.0, 15.0, 3.0);
+        return new RiskProperties(true, 100, 60, bearPct, 0.5, 0, maxPerSector, 0, 2.0, 15.0, 3.0, 0, 30);
     }
 
     private MarketRiskGuard guard(RiskProperties p, OrderRepository repo, MarketTrend trend) {
@@ -34,6 +34,44 @@ class MarketRiskGuardTest {
         Order o = mock(Order.class);
         when(o.getRequestedKrw()).thenReturn(krw);
         return o;
+    }
+
+    // ── 개장 창 노출 상한(A-2, 2026-08-14) ─────────────────────────
+    // 실측 계기: 총노출 예산(순자산×50%)이 09:07:44에 전량 소진 → LIVE 15건이 갭업 고점 27분 창에 집중(계좌 -1.78%).
+    // 기본은 0=비활성이라 기존 동작 무변경이고, 켰을 때만 개장 구간 상한이 min으로 결합돼야 한다.
+    @Test
+    void 개장창_상한은_켰을때만_국면상한과_min결합() {
+        java.time.LocalTime nineTen = java.time.LocalTime.of(9, 10);
+        // 비활성(0) — 국면 상한 그대로
+        assertThat(MarketRiskGuard.openingCapped(50, nineTen, 0, 30)).isEqualTo(50);
+        // 활성 + 창 안 — min(50, 25)
+        assertThat(MarketRiskGuard.openingCapped(50, nineTen, 25, 30)).isEqualTo(25);
+        // 개장 상한이 국면 상한보다 크면 국면 상한이 이김(완화 금지)
+        assertThat(MarketRiskGuard.openingCapped(30, nineTen, 80, 30)).isEqualTo(30);
+    }
+
+    @Test
+    void 개장창_밖에서는_상한_미적용() {
+        assertThat(MarketRiskGuard.openingCapped(50, java.time.LocalTime.of(9, 30), 25, 30)).isEqualTo(50);  // 경계(창 끝, 배타)
+        assertThat(MarketRiskGuard.openingCapped(50, java.time.LocalTime.of(13, 0), 25, 30)).isEqualTo(50);  // 오후
+        assertThat(MarketRiskGuard.openingCapped(50, java.time.LocalTime.of(8, 50), 25, 30)).isEqualTo(50);  // 장전
+        assertThat(MarketRiskGuard.openingCapped(50, java.time.LocalTime.of(9, 0), 25, 30)).isEqualTo(25);   // 경계(창 시작, 포함)
+    }
+
+    @Test
+    void 개장창_상한이_걸리면_진입_차단되고_창_밖이면_허용() {
+        Order held = openOrder(3_000_000);   // ⚠️ when(...) 인자 안에서 목을 스텁하면 UnfinishedStubbing — 먼저 만든다
+        OrderRepository repo = mock(OrderRepository.class);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(held));   // 이미 300만 보유
+        // bull 100%, 고변동 없음 → 국면 상한 100%(=1,000만). 개장 창 상한 30%(=300만)
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 0, 0, 0, 2.0, 15.0, 3.0, 30, 30);
+        MarketRiskGuard g = guard(p, repo, MarketTrend.BULL);
+
+        assertThat(g.exposureCapPct(java.time.LocalTime.of(9, 10))).isEqualTo(30);   // 창 안 → 개장 상한
+        assertThat(g.exposureCapPct(java.time.LocalTime.of(11, 0))).isEqualTo(100);  // 창 밖 → 국면 상한 복귀
+
+        // 창 밖 시각의 실제 판정: 보유 300만 + 주문 50만 ≤ 1,000만 → 허용(개장 상한이 없으면 통과하는 주문)
+        assertThat(g.allowEntry(500_000, 10_000_000, null).allowed()).isTrue();
     }
 
     @Test
@@ -135,7 +173,7 @@ class MarketRiskGuardTest {
     @Test
     void 비활성이면_항상_허용() {
         OrderRepository repo = mock(OrderRepository.class);
-        RiskProperties disabled = new RiskProperties(false, 100, 60, 30, 0.5, 3.0, 3, 7.0, 2.0, 15.0, 3.0);
+        RiskProperties disabled = new RiskProperties(false, 100, 60, 30, 0.5, 3.0, 3, 7.0, 2.0, 15.0, 3.0, 0, 30);
         MarketRiskGuard g = guard(disabled, repo, MarketTrend.BEAR);
 
         assertThat(g.allowEntry(999_999_999, 1, "전기·전자").allowed()).isTrue();
@@ -144,7 +182,7 @@ class MarketRiskGuardTest {
     @Test
     void 손절_하한이하면_hit() {
         // 손절 7% → 매수가 10000 대비 9300(-7%) 이하면 hit
-        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 0, 0, 7.0, 2.0, 15.0, 3.0);
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 0, 0, 7.0, 2.0, 15.0, 3.0, 0, 30);
         MarketRiskGuard g = guard(p, mock(OrderRepository.class), MarketTrend.BULL);
 
         assertThat(g.catastrophicStopPct()).isEqualTo(7.0);
@@ -155,7 +193,7 @@ class MarketRiskGuardTest {
 
     @Test
     void 손절_비활성이면_hit안함() {
-        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 0, 0, 0, 2.0, 15.0, 3.0);   // 손절 0=비활성
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 0, 0, 0, 2.0, 15.0, 3.0, 0, 30);   // 손절 0=비활성
         MarketRiskGuard g = guard(p, mock(OrderRepository.class), MarketTrend.BULL);
 
         assertThat(g.catastrophicStopPct()).isEqualTo(0.0);
@@ -171,7 +209,7 @@ class MarketRiskGuardTest {
         // KOSPI: -6 → -6 → -4(저점대비 +2%p 반등) → -4(재무장 유지) → -8(새 급락)
         when(kis.fetchIndexChangeRate("0001")).thenReturn(-6.0, -6.0, -4.0, -4.0, -8.0);
         when(kis.fetchIndexChangeRate("1001")).thenReturn(0.0);   // 코스닥 평온
-        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0);   // crashHalt 3, rebound 2
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0, 0, 30);   // crashHalt 3, rebound 2
         MarketRiskGuard g = new MarketRiskGuard(regime, kis, mock(OrderRepository.class), p);
 
         assertThat(g.isRiskOff().off()).isTrue();    // -6% 급락 → 발동
@@ -190,7 +228,7 @@ class MarketRiskGuardTest {
         // KOSDAQ: -3.16(발동) → -2.71(저점대비 +0.45%p 반등<2 이지만 -3% 위로 회복 → 레벨 재개)
         when(kis.fetchIndexChangeRate("0001")).thenReturn(0.0);
         when(kis.fetchIndexChangeRate("1001")).thenReturn(-3.16, -2.71);
-        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0);
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0, 0, 30);
         MarketRiskGuard g = new MarketRiskGuard(regime, kis, mock(OrderRepository.class), p);
 
         assertThat(g.isRiskOff().off()).isTrue();    // -3.16% 발동
@@ -205,7 +243,7 @@ class MarketRiskGuardTest {
         KisApiClient kis = mock(KisApiClient.class);
         when(kis.fetchIndexChangeRate("0001")).thenReturn(-6.0, -5.0);   // 저점대비 +1%p < 2 → 유지
         when(kis.fetchIndexChangeRate("1001")).thenReturn(0.0);
-        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0);
+        RiskProperties p = new RiskProperties(true, 100, 60, 30, 0.5, 3.0, 0, 0, 2.0, 15.0, 3.0, 0, 30);
         MarketRiskGuard g = new MarketRiskGuard(regime, kis, mock(OrderRepository.class), p);
 
         assertThat(g.isRiskOff().off()).isTrue();    // -6% 발동

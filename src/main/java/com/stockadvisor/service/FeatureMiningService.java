@@ -26,12 +26,29 @@ import java.util.function.Function;
  * pocket(예: 반등일 하루가 만든 가짜 +net)을 highlights에서 제외한다({@link StrategyPerformanceGate}와 동일 사상).
  * net = (종가−매수)/매수×100 − 왕복비용 − 슬리피지(close horizon). ⚠️ 전략 교차 pool이라 같은 종목·일자가
  * 여러 전략 행으로 중복 가능(v1 수용, includeControl=true면 미진입 후보까지 포함해 반사실 확대).</p>
+ *
+ * <p><b>⚠️ 진입-대조군 비교의 horizon 유의</b>(2026-08-14 수정): 대조군은 경량 추적이라 <b>exit 마크가 거의 없다</b>.
+ * 따라서 {@code horizon=exit}에서는 대조군 커버리지가 낮아 {@code controlNetPct}/{@code edgeVsControlPct}가
+ * <b>null로 비워진다</b>({@link #MIN_CONTROL_COVERAGE_PCT}) — 편향 부분집합으로 잘못된 결론을 내는 것보다 낫다.
+ * <b>진입-대조군 반사실 비교는 {@code horizon=close}에서 수행</b>하고, exit horizon은 진입군 pocket 랭킹에만 쓸 것.</p>
  */
 @Service
 public class FeatureMiningService {
 
     private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
     private static final DateTimeFormatter YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
+
+    /**
+     * 대조군 net·edge를 신뢰하려면 필요한 최소 커버리지(%).
+     *
+     * <p>🐞 2026-08-14 실측 버그: horizon="exit"이면 진입군은 권장청산마크로 평가되는데 <b>대조군은 exit 마크를
+     * 거의 수집하지 않아</b>(경량 추적 — 가격 horizon만) 커버리지가 ~15%로 떨어진다. 그런데도 그 15%의
+     * <b>편향된 부분집합</b>으로 controlNet을 계산해 {@code edgeVsControlPct}가 부호까지 뒤집혔다
+     * (ret5d%&lt;-5 pocket: exit −2.51%p ↔ close <b>+0.13%p</b> / 지수mom30≥0: −1.56 ↔ −0.30).
+     * → 커버리지 미달이면 <b>controlNet·edge를 null 처리</b>하고 커버리지 자체를 응답에 실어 소비자가 판정하게 한다.
+     * 대조군 exit 마크 전량 수집은 추적 부하상 비현실적이라 "수집 확대"가 아니라 "신뢰도 노출"이 해법.</p>
+     */
+    static final double MIN_CONTROL_COVERAGE_PCT = 70.0;
 
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final ExecutionCostModel executionCostModel;
@@ -50,12 +67,17 @@ public class FeatureMiningService {
 
     /**
      * @param n/netAvgPct/winRatePct/clustered/topStrategy  진입(entered) 기준 pocket 통계
-     * @param controlN/controlNetPct                        같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나" 비교
-     * @param edgeVsControlPct                              진입net − 대조군net(양수면 진입이 이 조건에서 가치 추가). 둘 중 하나 없으면 null
+     * @param controlN/controlNetPct                        같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나" 비교.
+     *                                                      controlN은 <b>해당 horizon 가격이 실제로 있는</b> 대조군 수
+     * @param controlTotalN                                 pocket의 전체 대조군 수(가격 유무 무관) — 커버리지 분모
+     * @param controlCoveragePct                            controlN/controlTotalN×100. 이 값이 낮으면 대조군이 <b>편향된 부분집합</b>
+     * @param edgeVsControlPct                              진입net − 대조군net(양수면 진입이 이 조건에서 가치 추가).
+     *                                                      ⚠️ <b>커버리지 미달이면 null</b>(아래 MIN_CONTROL_COVERAGE_PCT 참조)
      */
     public record Bucket(String feature, String range, int n, int distinctDays, double maxDaySharePct,
                          double netAvgPct, double winRatePct, boolean clustered, String topStrategy,
-                         int controlN, Double controlNetPct, Double edgeVsControlPct) {}
+                         int controlN, Double controlNetPct, Double edgeVsControlPct,
+                         int controlTotalN, double controlCoveragePct) {}
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
@@ -80,6 +102,8 @@ public class FeatureMiningService {
         d.add(new NumDef("ret5d%", TradeOutcome::getEntryRet5dPct, new double[]{-5, 0, 5, 10}));
         d.add(new NumDef("체결강도%", TradeOutcome::getEntryExecStrength, new double[]{100, 150, 200}));
         d.add(new NumDef("지수mom30", TradeOutcome::getEntryIndexMom30, new double[]{0}));
+        d.add(new NumDef("종목갭%", TradeOutcome::getEntryGapPct, new double[]{2, 4, 7}));        // K 갭 구간별 성과
+        d.add(new NumDef("지수갭%", TradeOutcome::getEntryIndexGapPct, new double[]{0, 1, 2}));   // 지수 통째 갭업일 여부
         d.add(new NumDef("뉴스1h건수", o -> o.getEntryNewsCnt1h() == null ? null : o.getEntryNewsCnt1h().doubleValue(),
                 new double[]{1, 3}));
         return d;
@@ -123,7 +147,9 @@ public class FeatureMiningService {
             }
         }
         List<TradeOutcome> re = entered.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
-        List<TradeOutcome> rc = control.stream().filter(o -> netByOutcome.containsKey(o.getId())).toList();
+        // ⚠️ 대조군은 <b>필터하지 않고 전량</b> 넘긴다 — bucket마다 (해당 horizon 가격 보유분 / 전체)로
+        //    커버리지를 계산해야 편향 부분집합 여부를 판정할 수 있기 때문(MIN_CONTROL_COVERAGE_PCT).
+        List<TradeOutcome> rc = control;
 
         List<FeatureMining> features = new ArrayList<>();
         for (NumDef def : numericDefs()) {
@@ -195,17 +221,21 @@ public class FeatureMiningService {
         boolean clustered = maxDaySharePct > 0 && maxShare > maxDaySharePct;
         String top = strat.entrySet().stream().max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey).orElse("?");
-        // 같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나"
-        Double controlNet = null;
-        if (!controlG.isEmpty()) {
-            double cs = 0;
-            for (TradeOutcome o : controlG) cs += netByOutcome.get(o.getId());
-            controlNet = round2(cs / controlG.size());
+        // 같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나".
+        // 커버리지(=해당 horizon 가격 보유 대조군 / 전체 대조군)가 낮으면 편향 부분집합이라 net·edge를 내지 않는다.
+        double cs = 0; int resolved = 0;
+        for (TradeOutcome o : controlG) {
+            Double net = netByOutcome.get(o.getId());
+            if (net == null) continue;
+            cs += net; resolved++;
         }
+        double coverage = controlG.isEmpty() ? 0 : 100.0 * resolved / controlG.size();
+        boolean trustworthy = resolved > 0 && coverage >= MIN_CONTROL_COVERAGE_PCT;
+        Double controlNet = trustworthy ? round2(cs / resolved) : null;
         Double edge = controlNet == null ? null : round2(enteredNet - controlNet);
         return new Bucket(feature, range, n, days.size(), round2(maxShare),
                 enteredNet, round2(100.0 * wins / n), clustered, top,
-                controlG.size(), controlNet, edge);
+                resolved, controlNet, edge, controlG.size(), round2(coverage));
     }
 
     private double netPct(TradeOutcome o, long price) {

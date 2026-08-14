@@ -13,15 +13,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class OpeningGapStrategyTest {
 
-    // enabled, minGap 2, maxGap 10, minScore 40, window 09:00~09:30
-    private final OpeningGapStrategy s = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30");
+    // enabled, minGap 2, maxGap 10, minScore 40, window 09:00~09:30, 지수갭 필터 0=비활성(기존 케이스 무영향)
+    private final OpeningGapStrategy s = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0);
     private static final LocalTime IN = LocalTime.of(9, 10);   // 개장 창 내
 
     /** changeRate·gapPct·recScore·trend 로 ctx 구성. */
     private StrategyContext ctx(double changeRate, double gapPct, double score, String trend) {
+        return ctx(changeRate, gapPct, score, trend, null);
+    }
+
+    /** 지수 갭%까지 지정. */
+    private StrategyContext ctx(double changeRate, double gapPct, double score, String trend, Double indexGapPct) {
         SignalResult sig = new SignalResult(0, changeRate, 1000, 0, false, false, false, 0,
                 false, false, false, 0, 0, 0, gapPct);
-        return new StrategyContext("005930", sig, score, RecommendationType.BUY, null, false, false, trend);
+        return new StrategyContext("005930", sig, score, RecommendationType.BUY, null, false, false,
+                trend, null, indexGapPct);
     }
 
     @Test
@@ -34,6 +40,35 @@ class OpeningGapStrategyTest {
     void 갭_부족_과대_제외() {
         assertThat(s.reject(ctx(1.5, 1.0, 50, "BULL"), IN)).isEqualTo("NO_GAP");       // 갭 1<2
         assertThat(s.reject(ctx(12.0, 12.0, 50, "BULL"), IN)).isEqualTo("GAP_TOO_BIG"); // 갭 12>10
+    }
+
+    // ── 지수 통째 갭업일 제외(2026-08-14, K 7건 -120,050원 계기) ──────────
+    @Test
+    void 지수_통째_갭업일이면_INDEX_GAP_DAY로_보류() {
+        // 지수갭 상한 1.5% 활성
+        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5);
+        // 8/14 재현: 지수가 +2.6% 갭업한 날의 종목 갭업 → 보류
+        assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", 2.6), IN)).isEqualTo("INDEX_GAP_DAY");
+        // 지수가 조용히 열린 날(+0.4%)의 종목 갭업은 종목 고유 촉매 → 정상 진입
+        assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", 0.4), IN)).isNull();
+        // 경계(정확히 상한) — 포함해서 보류
+        assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", 1.5), IN)).isEqualTo("INDEX_GAP_DAY");
+    }
+
+    @Test
+    void 지수갭_미상이거나_비활성이면_필터_미적용() {
+        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5);
+        assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", null), IN)).isNull();   // 장전·휴장·조회실패 → degrade open
+        assertThat(s.reject(ctx(3.5, 3.0, 50, "BULL", 2.6), IN)).isNull();    // s는 상한 0=비활성
+    }
+
+    @Test
+    void 지수갭업일_판정_순수함수() {
+        assertThat(OpeningGapStrategy.indexGapDay(2.6, 1.5)).isTrue();
+        assertThat(OpeningGapStrategy.indexGapDay(0.4, 1.5)).isFalse();
+        assertThat(OpeningGapStrategy.indexGapDay(-1.0, 1.5)).isFalse();   // 갭다운일은 무관
+        assertThat(OpeningGapStrategy.indexGapDay(null, 1.5)).isFalse();   // 미상 → degrade open
+        assertThat(OpeningGapStrategy.indexGapDay(9.9, 0)).isFalse();      // 비활성
     }
 
     @Test
