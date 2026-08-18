@@ -855,6 +855,13 @@ class StrategyPerformanceGateTest {
 
     private StrategyPerformanceGate gateSince(StrategyPerformanceProperties p, List<TradeOutcome> rows,
                                               String sinceCsv, String bootstrapCsv, String refilterCsv) {
+        return gateSince(p, rows, sinceCsv, bootstrapCsv, refilterCsv, 0.0);
+    }
+
+    /** 교차거래일 요건(maxSingleDaySharePct)까지 지정 — 클러스터 차단 경로 검증용. */
+    private StrategyPerformanceGate gateSince(StrategyPerformanceProperties p, List<TradeOutcome> rows,
+                                              String sinceCsv, String bootstrapCsv, String refilterCsv,
+                                              double maxSingleDaySharePct) {
         TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
         when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenAnswer(inv -> {
             String cutoff = inv.getArgument(1);
@@ -865,7 +872,8 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, sinceCsv, bootstrapCsv, refilterCsv, "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct,
+                sinceCsv, bootstrapCsv, refilterCsv, "");
     }
 
     @Test
@@ -925,5 +933,47 @@ class StrategyPerformanceGateTest {
         assertThat(rf.samples()).isEqualTo(30);      // 고볼륨 30건만 채점
         assertThat(rf.allowed()).isTrue();           // net +2(−비용) ≥ 0
         assertThat(rf.reason()).contains("재필터");
+    }
+
+    @Test
+    void 재필터_태그는_표본부족_경로에서도_붙는다() {
+        // 🐞 2026-08-18: 태그를 반환점마다 이어 붙이다 보니 엄격 경로 2곳에만 있었다 — 클러스터 차단·fallback·
+        // 표본부족 경로는 표본이 재필터로 줄어든 채 판정됐는데도 사유만 보면 알 수 없었다(D-KOSPI 실측 n 92→87).
+        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        List<TradeOutcome> rows = new ArrayList<>();
+        for (int i = 0; i < 30; i++) rows.add(outcomeVr(dates[i % 5], i, -2.0, 3));    // 전부 재필터 탈락(vol<6)
+        for (int i = 0; i < 5; i++) rows.add(outcomeVr(dates[i % 5], 100 + i, 2.0, 10)); // 통과 5건 → minSamples 미달
+
+        var d = gateSince(props(true, 20, 0.0), rows, "", "", "MOMENTUM_A:volume_ratio>=6")
+                .evaluate("MOMENTUM_A");
+
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.samples()).isEqualTo(5);          // 재필터로 5건만 남아 표본부족
+        assertThat(d.reason()).contains("표본 부족").contains("재필터");
+    }
+
+    @Test
+    void 재필터_태그는_단일일_클러스터_차단_경로에서도_붙는다() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        // 통과분(vol 10) 25건이 전부 같은 날 → 클러스터 차단 경로로 진입
+        for (int i = 0; i < 25; i++) rows.add(outcomeVr("20260801", i, 2.0, 10));
+        for (int i = 0; i < 10; i++) rows.add(outcomeVr("20260802", 100 + i, -2.0, 3));   // 재필터 탈락
+
+        var d = gateSince(props(true, 20, 0.0), rows, "", "", "MOMENTUM_A:volume_ratio>=6", 80.0)
+                .evaluate("MOMENTUM_A");
+
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).contains("단일일 클러스터").contains("재필터");
+    }
+
+    @Test
+    void 재필터가_없으면_태그도_없다() {
+        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        List<TradeOutcome> rows = new ArrayList<>();
+        for (int i = 0; i < 30; i++) rows.add(outcomeVr(dates[i % 5], i, 2.0, 10));
+
+        var d = gateSince(props(true, 20, 0.0), rows, "", "").evaluate("MOMENTUM_A");
+
+        assertThat(d.reason()).doesNotContain("재필터");
     }
 }

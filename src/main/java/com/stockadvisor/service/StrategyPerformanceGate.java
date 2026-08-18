@@ -52,6 +52,7 @@ public class StrategyPerformanceGate {
     private final List<String> strategyNames;                // 가시화용 전략명(등록된 TradingStrategy 빈에서 동적 — 새 전략 자동 포함)
     private final java.util.Set<String> priorDayRegimeStrategies;   // 전일 확정 국면으로 버킷팅할 전략(K 등)
     private static final String HYST_TAG = " ·히스테리시스(닫기바 유지)";
+    private static final String REFILTER_TAG = " ·재필터";
 
     /**
      * 히스테리시스 키 — 판정에 실제로 쓰인 <b>표본 풀</b>(전략·시장·국면·흐름)을 그대로 식별한다(2026-08-13).
@@ -237,9 +238,22 @@ public class StrategyPerformanceGate {
      */
     public GateDecision evaluate(String strategy, String market, MarketTrend forcedRegime) {
         // INVERSE 버킷은 실현손익 채점(위 주석) — 미주입(테스트)이면 기존 마크 채점으로 fallback.
+        // 재필터는 섀도우 표본(TradeOutcome) 대상이라 INVERSE(실현손익 채점)엔 적용되지 않으므로 태그도 붙이지 않는다.
         if ("INVERSE".equals(market) && orderRepository != null) {
             return evaluateInverseRealized(strategy);
         }
+        GateDecision d = evaluateSamples(strategy, market, forcedRegime);
+        // 🐞 2026-08-18: 재필터 태그를 각 반환점에서 문자열로 이어 붙이다 보니 반환점 9곳 중 2곳(흐름·국면 엄격
+        // 경로)에만 붙어 있었다 — 클러스터 차단·fallback·부트스트랩·표본부족 경로는 표본이 재필터로 줄어든 채
+        // 판정됐는데도 사유만 보면 알 수 없었다(D-KOSPI 실측: n이 92→87로 줄었는데 태그 없음).
+        // → 반환점마다 붙이는 대신 여기 한 곳에서 붙인다. 새 반환점이 생겨도 자동으로 커버된다.
+        if (!props.enabled() || GateRefilter.forStrategy(refilters, strategy) == null) return d;
+        return new GateDecision(d.strategy(), d.allowed(), d.reason() + REFILTER_TAG,
+                d.samples(), d.netAvgReturnPct(), d.regimeTrend(), d.market(), d.fallback());
+    }
+
+    /** 표본(TradeOutcome) 기반 게이트 판정 본체 — 재필터 태그는 호출측({@link #evaluate})이 일괄 부착. */
+    private GateDecision evaluateSamples(String strategy, String market, MarketTrend forcedRegime) {
         // 국면조건부: 종목 시장의 현재(또는 가정) 국면과 같은 국면 진입분만 집계. 미산출이면 국면 무관(null).
         // 인버스 버킷("INVERSE")은 방향 베팅 자체라 진입 시 국면태그가 null → 국면조건부 건너뜀(전체 인버스 표본 집계).
         // 히스테리시스: 밴드 = [closeNet, minNet). 열려있으면 closeNet까지 유지(닫힘 지연) → 문턱 근처 여닫이 진동 억제.
@@ -334,7 +348,6 @@ public class StrategyPerformanceGate {
         // 구표본 자동 재필터: 조이는 필터 추가 시 새 필터의 임계(태깅된 feature)를 구표본에도 적용 → 통과분만 채점.
         // 전역(*) 규칙 + 전략별 규칙을 AND로 — 전략 무관 진입 필터를 since 리셋 없이 구표본에 재적용하기 위함.
         GateRefilter refilter = GateRefilter.forStrategy(refilters, strategy);
-        final String refilterTag = refilter != null ? " ·재필터" : "";
         for (TradeOutcome o : rows) {
             if (o.isControl()) continue;   // 대조군(미진입) 제외 — 게이트는 '진입 성과'만 검증(스윙 nextClose에서 대조군 오염 방지)
             if (refilter != null && !refilter.test(o)) continue;   // 새 필터라면 걸렀을 구표본 제외(net 정밀 재검증)
@@ -383,7 +396,7 @@ public class StrategyPerformanceGate {
             return new GateDecision(strategy, allow,
                     String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
                             flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNetF, nF,
-                            (wasOpenF ? HYST_TAG : "") + refilterTag),
+                            wasOpenF ? HYST_TAG : ""),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
@@ -401,7 +414,7 @@ public class StrategyPerformanceGate {
             return new GateDecision(strategy, allow,
                     String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
                             regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNetR, n,
-                            (wasOpenR ? HYST_TAG : "") + refilterTag),
+                            wasOpenR ? HYST_TAG : ""),
                     n, avg, regimeName, market, false);
         }
         // 여기 도달 = 엄격(흐름·국면) 버킷 판정에 실패(표본부족) → 아래는 전부 비엄격 경로(fallback·부트스트랩·fail-closed).
