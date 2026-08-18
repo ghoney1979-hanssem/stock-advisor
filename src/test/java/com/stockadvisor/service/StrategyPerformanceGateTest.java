@@ -490,6 +490,86 @@ class StrategyPerformanceGateTest {
     }
 
     @Test
+    void 비TIME_청산방식이면_exit이_아니라_종가로_채점() {
+        // 🐞 2026-08-18: exit horizon은 '보유시간 마크'라 채택 청산방식이 TIME일 때만 실제 청산과 일치한다.
+        // D 실측 — 게이트는 65분 마크로 채점하는데 라이브 보유는 1~10분(트레일 조기 트리거)과 350~374분(장마감)
+        // 양봉 분포였고 65분 부근은 비어 있었다(= 검증한 적 없는 청산으로 실주문 허용).
+        // 채택 방식이 TRAILING이면 종가로 채점해야 한다: 60분 마크(+1%)가 아니라 종가(−1%)가 net에 반영.
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        List<TradeOutcome> rows = new ArrayList<>();
+        List<OutcomeSample> samples = new ArrayList<>();
+        for (long i = 1; i <= 25; i++) {
+            TradeOutcome o = mock(TradeOutcome.class);
+            when(o.getId()).thenReturn(i);
+            when(o.getBuyPrice()).thenReturn(10_000L);
+            when(o.getPriceClose()).thenReturn(9_900L);      // 종가 −1%
+            rows.add(o);
+            samples.add(new OutcomeSample(i, "INDEX_RELATIVE_D", 10_000, 60, 10_100));   // 60분 마크 +1%
+        }
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(null);
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        StrategyHoldTimeProvider hold = mock(StrategyHoldTimeProvider.class);
+        when(hold.holdMinutes("INDEX_RELATIVE_D")).thenReturn(60);
+        OutcomeSampleRepository sampleRepo = mock(OutcomeSampleRepository.class);
+        when(sampleRepo.findByStrategyAndMarkMinutesBetween("INDEX_RELATIVE_D", 30, 90)).thenReturn(samples);
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
+                List.of(), COST, "", "nextClose", 0.0, "", "", "", "");
+        ExitMethodProvider methods = mock(ExitMethodProvider.class);
+        when(methods.methodFor("INDEX_RELATIVE_D")).thenReturn(
+                new ExitStrategyService.BestExit("INDEX_RELATIVE_D", com.stockadvisor.domain.ExitMethodType.TRAILING, 3, 0, 800));
+        g.setExitMethodProvider(methods);
+
+        StrategyPerformanceGate.GateDecision d = g.evaluate("INDEX_RELATIVE_D");
+
+        assertThat(d.samples()).isEqualTo(25);
+        assertThat(d.netAvgReturnPct()).isEqualTo(-1.18);   // 종가 −1% − 0.18 비용(마크 +1%가 아님)
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).contains("close").contains("트레일");
+    }
+
+    @Test
+    void TIME_청산방식이면_종전대로_권장마크로_채점() {
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        List<TradeOutcome> rows = new ArrayList<>();
+        List<OutcomeSample> samples = new ArrayList<>();
+        for (long i = 1; i <= 25; i++) {
+            TradeOutcome o = mock(TradeOutcome.class);
+            when(o.getId()).thenReturn(i);
+            when(o.getBuyPrice()).thenReturn(10_000L);
+            when(o.getPriceClose()).thenReturn(9_900L);
+            rows.add(o);
+            samples.add(new OutcomeSample(i, "MA_TREND_F", 10_000, 60, 10_100));
+        }
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(null);
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        StrategyHoldTimeProvider hold = mock(StrategyHoldTimeProvider.class);
+        when(hold.holdMinutes("MA_TREND_F")).thenReturn(60);
+        OutcomeSampleRepository sampleRepo = mock(OutcomeSampleRepository.class);
+        when(sampleRepo.findByStrategyAndMarkMinutesBetween("MA_TREND_F", 30, 90)).thenReturn(samples);
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
+                false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
+                List.of(), COST, "", "nextClose", 0.0, "", "", "", "");
+        ExitMethodProvider methods = mock(ExitMethodProvider.class);
+        when(methods.methodFor("MA_TREND_F")).thenReturn(
+                new ExitStrategyService.BestExit("MA_TREND_F", com.stockadvisor.domain.ExitMethodType.TIME, 60, 0, 800));
+        g.setExitMethodProvider(methods);
+
+        StrategyPerformanceGate.GateDecision d = g.evaluate("MA_TREND_F");
+
+        assertThat(d.netAvgReturnPct()).isEqualTo(0.82);   // 60분 마크 +1% − 0.18
+        assertThat(d.reason()).contains("60분");
+    }
+
+    @Test
     void exit_정확마크_없어도_근접마크로_대체집계() {
         // 표본 기근 보정: 권장 60분인데 표본이 90분 마크(코스마크)만 가진 경우, ±30 근접 대체로 집계돼야 함.
         TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);

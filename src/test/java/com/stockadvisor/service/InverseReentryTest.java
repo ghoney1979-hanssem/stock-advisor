@@ -59,6 +59,25 @@ class InverseReentryTest {
     }
 
     @Test
+    void 하루_사이클_상한에_도달하면_쿨다운_경과여도_차단() {
+        // 2026-08-18 실측: 251340이 10차까지 재진입해 7왕복 −4,521원(왕복비용 0.22%×n이 방향을 이긴다).
+        List<TradeOutcome> prior = List.of(entryRow(), entryRow(), entryRow());   // 이미 3사이클
+        Instant later = Instant.now().plus(Duration.ofMinutes(60));
+
+        assertThat(StrategyEvaluator.inverseReentryEligible(prior, 20, later, false, 3)).isFalse();
+        assertThat(StrategyEvaluator.inverseReentryEligible(prior, 20, later, false, 0)).isTrue();   // 0=무제한(종전)
+    }
+
+    @Test
+    void 사이클_상한_계산에_대조군_행은_세지_않는다() {
+        // control 행은 '진입'이 아니므로 상한 소진에 포함되면 안 된다(승격 경로가 막히는 부작용 방지).
+        List<TradeOutcome> prior = List.of(entryRow(), controlRow(), controlRow());
+        Instant later = Instant.now().plus(Duration.ofMinutes(60));
+
+        assertThat(StrategyEvaluator.inverseReentryEligible(prior, 20, later, false, 3)).isTrue();
+    }
+
+    @Test
     void 진입행이_없고_control만이면_쿨다운_무관_허용() {
         // 이 경로는 pending 필터의 승격 분기가 먼저 잡지만, 방어적으로도 통과여야 함
         List<TradeOutcome> prior = List.of(controlRow());

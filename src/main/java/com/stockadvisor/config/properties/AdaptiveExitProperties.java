@@ -15,17 +15,21 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param minSamples     보유시간 마크 채택 최소 표본(미만이면 그 마크 제외). 기본 20.
  * @param refreshMinutes 권장 보유시간 재계산 캐시 주기(분). 기본 30.
  * @param maxHoldMinutes 보유시간 상한(분) — 종가(EOD) 권장이거나 과대 마크일 때 캡. 기본 300.
+ * @param smoothWindow   권장 마크 선택 전 곡선 평활 창(마크 개수, 홀수). 기본 3. 1이면 평활 없음(종전 max-pick).
  */
 @ConfigurationProperties(prefix = "stockadvisor.trading.adaptive-exit")
 public record AdaptiveExitProperties(
         boolean enabled,
         int minSamples,
         int refreshMinutes,
-        int maxHoldMinutes
+        int maxHoldMinutes,
+        int smoothWindow
 ) {
     public AdaptiveExitProperties {
         if (minSamples < 0) minSamples = 20;
         if (refreshMinutes <= 0) refreshMinutes = 30;
         if (maxHoldMinutes <= 0) maxHoldMinutes = 300;
+        if (smoothWindow <= 0) smoothWindow = 3;
     }
+    // ⚠️ 보조 생성자 금지 — Spring이 JavaBean 바인딩으로 폴백해 기동 실패(NoSuchMethodException: <init>()). canonical 하나만.
 }

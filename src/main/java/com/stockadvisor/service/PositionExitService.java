@@ -81,6 +81,8 @@ public class PositionExitService {
     private double inverseExitReboundMomPct = 0.3;  // 지수 최근 모멘텀(mom30) ≥ +이값% → 반등 시작(기저 임계)
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.inverse-exit.rebound-day-scale:0.15}")
     private double inverseExitReboundDayScale = 0.15;  // 반등 임계 낙폭 비례 상향: thr=max(기저, |당일등락|×이값). 0=비활성(기저 고정)
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.inverse-exit.rebound-from-low-pct:1.0}")
+    private double inverseExitReboundFromLowPct = 1.0;  // 반등 청산에 요구하는 '장중 저점 대비 지수 회복폭'(%p). 0=비활성(모멘텀만)
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.inverse-exit.stop-pct:2.0}")
     private double inverseExitStopPct = 2.0;        // 인버스 가격 손절(지수 +2% 역행=명제 오류) — 적응형 -5~7%는 지수 ETF에 도달 불가
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.inverse-exit.max-hold-minutes:300}")
@@ -315,11 +317,32 @@ public class PositionExitService {
             if (chg != null && inverseExitReboundDayScale > 0) {
                 thr = Math.max(thr, Math.abs(chg) * inverseExitReboundDayScale);
             }
-            if (mom != null && mom >= thr) {
-                return String.format("지수반등(mom30 %+.2f%% ≥ %.2f%%)", mom, thr);
+            // 저점 대비 레벨 회복 요건(2026-08-18 실측 대응): mom30 블립만으로 팔면 하락이 계속되는 날에 왕복만 반복한다.
+            // 8/18 KOSDAQ −3.52%(장중저점 −4.23%)일에 청산 6건의 사유가 전부 mom30 +0.31~+0.48%였고, 251340이
+            // 2,335→2,400으로 오르는 내내 7왕복 −4,521원(비용만 지불). 임계의 낙폭 비례 상향(rebound-day-scale)은
+            // '지금 등락률'(청산 시점 −2%대)을 기준으로 삼아 그 시점엔 기저 0.30%에 머물러 작동하지 않았다.
+            // → 모멘텀 반전과 함께 '지수가 장중 저점에서 실제로 올라왔는지'를 요구한다. 서킷 재개 판정(저점 대비
+            //    rebound-pct%p 반등)과 같은 사상이며, 하락 지속 구간에서 승자 보유를 보존한다.
+            Double dayLow = marketRegimeService.dayLowChangeOf(market);
+            if (inverseReboundExit(mom, thr, chg, dayLow, inverseExitReboundFromLowPct)) {
+                return String.format("지수반등(mom30 %+.2f%% ≥ %.2f%%, 저점대비 %s)", mom, thr,
+                        (chg != null && dayLow != null) ? String.format("%+.2f%%p", chg - dayLow) : "미상");
             }
         }
         return null;   // 지수 약세 지속 — 시간 무관 보유
+    }
+
+    /**
+     * 인버스 반등 청산 판정(순수) — <b>모멘텀 반전 AND 저점 대비 레벨 회복</b>을 함께 요구.
+     *
+     * @param minRecoveryPct 요구 회복폭(%p). 0 이하면 종전대로 모멘텀만으로 판정.
+     *                       지수 등락률/장중저점이 미상이거나 {@code dayLow > chg}(저점이 현재보다 높은 데이터 부정합,
+     *                       실데이터에선 불가능 — 저점 추적이 현재값을 먼저 반영한다)면 판정 불가 → 모멘텀만(degrade open).
+     */
+    static boolean inverseReboundExit(Double mom, double thr, Double chg, Double dayLow, double minRecoveryPct) {
+        if (mom == null || mom < thr) return false;
+        if (minRecoveryPct <= 0 || chg == null || dayLow == null || dayLow > chg) return true;
+        return (chg - dayLow) >= minRecoveryPct;
     }
 
     private volatile java.util.Map<String, String> inverseIndexMapCache;

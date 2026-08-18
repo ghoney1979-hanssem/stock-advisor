@@ -192,6 +192,21 @@ public class MarketRegimeService {
         return cur[1] == Double.NEGATIVE_INFINITY ? chg : cur[1];
     }
 
+    // 시장별 당일 지수 등락률 저점 추적(위 고점 추적의 대칭). 인버스 청산의 '저점 대비 레벨 회복' 판정이 소비 —
+    // 하락 지속일엔 mom30 블립만으로 팔면 안 되고, 지수가 실제로 저점에서 올라왔는지를 함께 봐야 한다(2026-08-18).
+    private final Map<String, double[]> dayLowChg = new ConcurrentHashMap<>();   // market -> {epochDay, lowPct}
+
+    /** 당일 지수 등락률의 <b>장중 저점</b>(%). 관측 시점 기반(1분 주기 호출로 충분), 날짜 바뀌면 리셋. 미상이면 null. */
+    public Double dayLowChangeOf(String market) {
+        Double chg = dayChangeOf(market);
+        long today = LocalDate.now(SEOUL).toEpochDay();
+        double[] cur = dayLowChg.get(market);
+        if (cur == null || (long) cur[0] != today) cur = new double[]{today, Double.POSITIVE_INFINITY};
+        if (chg != null && chg < cur[1]) cur[1] = chg;
+        dayLowChg.put(market, cur);
+        return cur[1] == Double.POSITIVE_INFINITY ? chg : cur[1];
+    }
+
     /** 반등일 판정(순수) — 기저 비강세 + 당일 ≥ minSurgePct 급등. */
     static boolean isReboundDay(MarketTrend baseTrend, Double dayChgPct, double minSurgePct) {
         if (baseTrend == MarketTrend.BULL) return false;

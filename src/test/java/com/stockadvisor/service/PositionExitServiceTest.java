@@ -166,6 +166,7 @@ class PositionExitServiceTest {
     void 인버스_지수_모멘텀반등시_청산() {
         // 레벨은 아직 약세(-2.0%)지만 mom30 +0.5% ≥ thr max(0.3, 2.0×0.15)=0.3 → 반등 시작 청산.
         // mom10은 0.0으로 둬 판정이 mom30 기준임을 함께 검증(mom10 단독 발사 제거 — 2026-07-16 과민 청산 대응).
+        // 장중저점 -3.5% → 저점 대비 1.5%p 회복이라 레벨 요건(1.0%p)도 충족(2026-08-18 추가 요건).
         OrderRepository repo = mock(OrderRepository.class);
         OrderService orderService = mock(OrderService.class);
         KisApiClient kis = mock(KisApiClient.class);
@@ -175,6 +176,7 @@ class PositionExitServiceTest {
         when(kis.fetchIndexChangeRate("0001")).thenReturn(-2.0);
         MarketRegimeService regime = mock(MarketRegimeService.class);
         when(regime.intradayFlow("KOSPI")).thenReturn(new MarketRegimeService.IntradayFlow(0.0, 0.5, null, true));
+        when(regime.dayLowChangeOf("KOSPI")).thenReturn(-3.5);
         when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(11L));
         PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60), holdProvider(60), riskGuard(false), timeMethod(), "", stopProvider());
         svc.setMarketRegimeService(regime);
@@ -195,6 +197,28 @@ class PositionExitServiceTest {
         when(kis.fetchIndexChangeRate("0001")).thenReturn(-6.7);
         MarketRegimeService regime = mock(MarketRegimeService.class);
         when(regime.intradayFlow("KOSPI")).thenReturn(new MarketRegimeService.IntradayFlow(0.6, 0.5, null, true));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60), holdProvider(60), riskGuard(false), timeMethod(), "", stopProvider());
+        svc.setMarketRegimeService(regime);
+
+        assertThat(svc.closeDuePositions()).isEqualTo(0);
+        verify(orderService, never()).submit(any());
+    }
+
+    @Test
+    void 인버스_모멘텀_반등이어도_저점대비_미회복이면_보유() {
+        // 2026-08-18 실측 재현: KOSDAQ 하락 지속일에 mom30 +0.48%(임계 0.3 초과)로 청산했지만, 지수는 저점
+        // -2.50% 대비 -2.20%로 0.30%p밖에 안 올라와 있었다 → 실제로는 하락이 계속돼 재매수만 더 비싸졌다.
+        // 레벨 회복(1.0%p) 요건을 못 채우면 보유해야 한다.
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = inversePosition(30);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("114800")).thenReturn(1_120L);
+        when(kis.fetchIndexChangeRate("0001")).thenReturn(-2.20);
+        MarketRegimeService regime = mock(MarketRegimeService.class);
+        when(regime.intradayFlow("KOSPI")).thenReturn(new MarketRegimeService.IntradayFlow(0.0, 0.48, null, true));
+        when(regime.dayLowChangeOf("KOSPI")).thenReturn(-2.50);   // 저점 대비 0.30%p만 회복
         PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60), holdProvider(60), riskGuard(false), timeMethod(), "", stopProvider());
         svc.setMarketRegimeService(regime);
 

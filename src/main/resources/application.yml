@@ -100,6 +100,7 @@ stockadvisor:
     inverse-index-map: ${SIGNAL_INVERSE_INDEX_MAP:114800:0001,251340:1001}  # 인버스코드:지수코드(0001 코스피/1001 코스닥)
     inverse-index-require-falling: ${SIGNAL_INVERSE_INDEX_REQUIRE_FALLING:true}  # 지수 흐름 확인 — 최근 모멘텀(mom10/30)>0(회복 중)이면 진입 보류(인버스 고점매수 회피). 흐름 미가용 시 생략
     inverse-reentry-minutes: ${SIGNAL_INVERSE_REENTRY_MINUTES:20}  # 인버스 재진입 쿨다운(분) — 청산 후 재붕괴 재포착(활성 포지션 0 + 마지막 진입 후 이 시간 경과 시 같은 날 재평가). 0=비활성(하루 1회)
+    inverse-max-reentries-per-day: ${SIGNAL_INVERSE_MAX_REENTRIES_PER_DAY:3}  # 인버스 하루 진입 사이클 상한 — 왕복비용 누적 방어 안전망(2026-08-18 251340 10차 재진입). 0=무제한
     # 신선 악재뉴스 가드(반등 계열 C/D/J) — 하락 중 최근 N분 내 악재 키워드 뉴스면 진입 보류(FRESH_BAD_NEWS). 호재/중립은 통과.
     bad-news-keywords: ${SIGNAL_BAD_NEWS_KEYWORDS:유상증자,감자,구조조정,관리종목,상장폐지,거래정지,소송,압수수색,횡령,배임,어닝쇼크,적자전환,리콜,화재}
     fresh-news-window-minutes: ${SIGNAL_FRESH_NEWS_WINDOW_MINUTES:60}
@@ -110,6 +111,9 @@ stockadvisor:
     # 반등일 순추세 보류 가드 — 당일 지수 ≥ surge% 급등 AND 기저(MA3) 라벨 비강세면 H/F/E/K 신규진입 보류(REBOUND_DAY). 2사이클 실측(7/15·7/22) 근거.
     rebound-day-guard-enabled: ${SIGNAL_REBOUND_DAY_GUARD_ENABLED:true}
     rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}
+    # 가드 적용 전략(csv) — K 제외(2026-08-18): 대조군 forward 검증에서 K는 차단분 +3.04%(n=89) > 진입분 −0.61%로 역효과.
+    # (같은 전략의 INDEX_GAP_DAY는 차단분 −2.93%로 정반대 = 유지.) 원복하려면 OPENING_GAP_K 추가.
+    rebound-day-strategies: ${SIGNAL_REBOUND_DAY_STRATEGIES:SQUEEZE_BREAKOUT_H,MA_TREND_F,BREAKOUT_E}
     # [전략 F] 이동평균 추세추종 (거래량 무관, 섀도우). MA20 상향 돌파(이벤트)일 때만 진입 — 대조군 미추적(부하 억제).
     ma-trend-enabled: ${SIGNAL_MA_TREND_ENABLED:true}
     ma-trend-require-fresh: ${SIGNAL_MA_TREND_REQUIRE_FRESH:false}        # [F 보완①] 분봉 신선도 확인(죽은 돌파 회피). 기본 off=현행 무변경
@@ -289,6 +293,7 @@ stockadvisor:
       recovery-pct: ${TRADING_INVERSE_EXIT_RECOVERY_PCT:0.5}              # 지수 당일 등락률 > -이값% → 약세 소멸 청산(진입 -1%보다 완화)
       rebound-mom-pct: ${TRADING_INVERSE_EXIT_REBOUND_MOM_PCT:0.3}        # 지수 최근 모멘텀(mom30) ≥ +임계% → 반등 시작 청산(기저 임계)
       rebound-day-scale: ${TRADING_INVERSE_EXIT_REBOUND_DAY_SCALE:0.15}   # 반등 임계 낙폭 비례 상향 thr=max(기저,|당일등락|×이값) — 폭락일 데드캣 과민 방지(2026-07-16). 0=비활성
+      rebound-from-low-pct: ${TRADING_INVERSE_EXIT_REBOUND_FROM_LOW_PCT:1.0}  # 반등 청산에 요구하는 '장중 저점 대비 지수 회복폭'(%p). mom30 블립만으로 팔지 않게(2026-08-18 7왕복 −4,521원). 0=비활성
       stop-pct: ${TRADING_INVERSE_EXIT_STOP_PCT:2.0}                      # 인버스 가격 손절%(지수 역행) — 적응형 대체
       max-hold-minutes: ${TRADING_INVERSE_EXIT_MAX_HOLD_MINUTES:300}      # 백스톱
 
@@ -311,6 +316,7 @@ stockadvisor:
       min-samples: ${TRADING_ADAPTIVE_EXIT_MIN_SAMPLES:20}    # 마크 채택 최소 표본(미만 마크 제외)
       refresh-minutes: ${TRADING_ADAPTIVE_EXIT_REFRESH_MINUTES:30}  # 권장 보유시간 재계산 캐시 주기(분)
       max-hold-minutes: ${TRADING_ADAPTIVE_EXIT_MAX_HOLD_MINUTES:300}  # 보유시간 상한(종가 권장 시 캡)
+      smooth-window: ${TRADING_ADAPTIVE_EXIT_SMOOTH_WINDOW:3}  # 권장 마크 선택 전 이웃 평활 창(마크 수, 홀수). 60개 마크 중 max-pick의 노이즈 편향 억제(2026-08-18). 1=평활 없음
 
     # 적응형 청산방식 — 시간기반/트레일링/VWAP이탈/추세전환 중 전략별 평균 net 수익 최대 방식을 자동 채택.
     # (exit-comparison 시뮬레이션 기반) 표본 부족이면 시간기반(TIME) fallback. 안전 트리거(손절·서킷·장마감)는 항상 우선.

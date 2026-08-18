@@ -85,6 +85,49 @@ public class StrategyHoldTimeProvider {
         return new ArrayList<>(names);
     }
 
+    /**
+     * 권장 마크 선택(순수) — 자격 마크(표본 ≥ minSamples) 중 <b>이웃 평활값</b>이 최대인 마크.
+     *
+     * <p>2026-08-18: 종전에는 마크별 원시 평균의 단순 최대를 골랐는데, 마크마다 표본이 서로 다른 부분집합
+     * (n 60~230)이라 곡선이 ±0.4%p 노이즈를 갖는다. 60개 마크에서 최대를 뽑으면 그 노이즈의 상위 극단이
+     * 잡힌다 — 실측: K는 95분 +0.94%인데 이웃 90분 −0.44%·100분 −0.56%, J는 245분 +0.19% / 이웃 −0.60%,
+     * I는 255분 +0.45% / 250분 −0.36%. 이 마크는 곧 {@link StrategyPerformanceGate}의 채점 horizon이기도 해서
+     * 게이트 net까지 같은 크기만큼 낙관 편향된다. → 이웃 창(smoothWindow) 평균으로 평활한 뒤 최대를 고른다.
+     * 인접 마크가 함께 좋은 '구간'만 살아남으므로 단발 스파이크가 걸러진다.</p>
+     *
+     * <p>평활은 <b>선택에만</b> 쓰고 보고값(samples/avgReturnPct)은 원시 마크 그대로 노출한다 —
+     * 가시화에서 "그 마크의 실제 표본·수익"이 바뀌면 진단이 어려워진다. smoothWindow ≤ 1이면 종전 max-pick.</p>
+     */
+    static ExitTimingService.MarkStat pickBest(List<ExitTimingService.MarkStat> curve,
+                                               int minSamples, int smoothWindow) {
+        List<ExitTimingService.MarkStat> qualified = curve.stream()
+                .filter(m -> m.samples() >= minSamples)
+                .sorted(Comparator.comparingInt(ExitTimingService.MarkStat::markMinutes))
+                .toList();
+        if (qualified.isEmpty()) return null;
+        int half = Math.max(1, smoothWindow / 2);
+        // 창을 온전히 채우는 마크만 후보로 둔다(양 끝 half개 제외) — 잘린 창으로 평균을 내면 이웃이 한쪽뿐인
+        // 경계 마크가 구조적으로 유리해져(분모가 작아 스파이크가 덜 희석됨) 평활의 취지가 무너진다.
+        // 자격 마크가 창보다 적으면 평활 자체가 무의미 → 종전 max-pick.
+        if (smoothWindow <= 1 || qualified.size() < smoothWindow + 2) {
+            return qualified.stream()
+                    .max(Comparator.comparingDouble(ExitTimingService.MarkStat::avgReturnPct))
+                    .orElse(null);
+        }
+        ExitTimingService.MarkStat best = null;
+        double bestSmoothed = Double.NEGATIVE_INFINITY;
+        for (int i = half; i < qualified.size() - half; i++) {
+            double sum = 0;
+            for (int j = i - half; j <= i + half; j++) sum += qualified.get(j).avgReturnPct();
+            double smoothed = sum / (2 * half + 1);
+            if (smoothed > bestSmoothed) {
+                bestSmoothed = smoothed;
+                best = qualified.get(i);
+            }
+        }
+        return best;
+    }
+
     private synchronized void refreshIfStale() {
         Instant now = Instant.now();
         if (lastRefresh != null && Duration.between(lastRefresh, now).toMinutes() < props.refreshMinutes()) {
@@ -97,10 +140,7 @@ public class StrategyHoldTimeProvider {
     public synchronized void refresh() {
         Map<String, HoldInfo> map = new LinkedHashMap<>();
         for (ExitTimingService.StrategyExitTiming t : exitTimingService.analyze()) {
-            ExitTimingService.MarkStat best = t.curve().stream()
-                    .filter(m -> m.samples() >= props.minSamples())
-                    .max(Comparator.comparingDouble(ExitTimingService.MarkStat::avgReturnPct))
-                    .orElse(null);
+            ExitTimingService.MarkStat best = pickBest(t.curve(), props.minSamples(), props.smoothWindow());
             if (best == null) continue;   // 자격 마크 없음 → fallback(캐시 미등록)
             // 종가(EOD, markMinutes<0)이거나 과대 마크는 상한으로 캡 → 사실상 장마감까지 보유
             int mins = best.markMinutes() < 0

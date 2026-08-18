@@ -85,8 +85,23 @@ public class StrategyEvaluator {
     // 반등일 순추세 보류 가드(2026-07-22): 폭락 후 V자 초입 급반등일(당일 지수 ≥ surge% AND 기저 라벨 비강세)엔
     // 순추세 계열의 갭 되돌림 전멸이 2사이클 실측(7/15 12건 1승 −34,639 / 7/22 8건 0승 −81,672) → 당일 신규진입 보류.
     // 차단분은 reject=REBOUND_DAY 로 대조군 추적 → 가드 자체를 forward 검증. 역추세(C/D)·B·인버스는 무관.
-    private static final java.util.Set<String> TREND_FAMILY =
-            java.util.Set.of("SQUEEZE_BREAKOUT_H", "MA_TREND_F", "BREAKOUT_E", "OPENING_GAP_K");
+    // ⚠️ K 제외(2026-08-18) — 대조군 forward 검증에서 <b>가드가 K에는 역효과</b>임이 드러났다:
+    // REBOUND_DAY 차단분 +3.04%(n=89) vs K 진입분 −0.61%(n=381). 같은 전략에 걸린 INDEX_GAP_DAY가
+    // 차단분 −2.93%(n=26)로 정반대 성적인 것과 대비된다. K의 정체성은 "어제까지 국면 + 오늘 시초가 갭"이라
+    // 폭락 후 V자 반등일 아침의 갭업은 회피 대상이 아니라 오히려 표적에 가깝다(가드는 H/F 갭 되돌림 전멸이 계기였다).
+    // csv env로 노출해 되돌리기 쉽게 둔다(원복하려면 OPENING_GAP_K 추가).
+    @org.springframework.beans.factory.annotation.Value(
+            "${stockadvisor.signal.rebound-day-strategies:SQUEEZE_BREAKOUT_H,MA_TREND_F,BREAKOUT_E}")
+    private String reboundDayStrategiesCsv = "SQUEEZE_BREAKOUT_H,MA_TREND_F,BREAKOUT_E";
+    private volatile java.util.Set<String> trendFamily;
+    private java.util.Set<String> trendFamily() {
+        java.util.Set<String> s = trendFamily;
+        if (s == null) {
+            s = PolicyGate.parseCsv(reboundDayStrategiesCsv);
+            trendFamily = s;
+        }
+        return s;
+    }
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.rebound-day-guard-enabled:true}")
     private boolean reboundDayGuardEnabled = true;
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.rebound-day-min-surge-pct:2.0}")
@@ -141,10 +156,31 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.inverse-reentry-minutes:20}")
     private int inverseReentryMinutes = 20;
 
-    /** 인버스 재진입 자격(순수 판정, 테스트용 정적) — 쿨다운 경과 AND 활성 실포지션 없음. */
+    // 하루 재진입 사이클 상한(2026-08-18) — 왕복마다 비용 0.22%를 지불하므로 사이클이 늘수록 방향이 맞아도 진다.
+    // 실측: 8/18 KOSDAQ −3.52%일에 251340이 10차까지 재진입해 7왕복 −4,521원(같은 시간 인버스 자체는 +1%).
+    // 청산 로직 수정(저점 대비 회복 요건)이 주된 처방이고 이건 안전망 — 정상 동작 시 이 상한에 걸릴 일은 드물다.
+    // 0=무제한(종전 동작).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.inverse-max-reentries-per-day:3}")
+    private int inverseMaxReentriesPerDay = 3;
+
+    /** 인버스 재진입 자격(순수 판정, 테스트용 정적) — 쿨다운 경과 AND 활성 실포지션 없음. 사이클 상한 무제한. */
     static boolean inverseReentryEligible(List<TradeOutcome> priorRows, int cooldownMinutes,
                                           java.time.Instant now, boolean hasActivePosition) {
+        return inverseReentryEligible(priorRows, cooldownMinutes, now, hasActivePosition, 0);
+    }
+
+    /**
+     * 인버스 재진입 자격(순수) — 쿨다운 경과 AND 활성 실포지션 없음 AND 당일 진입 사이클 &lt; 상한.
+     * @param maxCyclesPerDay 하루 진입 사이클 상한(0=무제한). 이미 상한만큼 진입했으면 재진입 불가.
+     */
+    static boolean inverseReentryEligible(List<TradeOutcome> priorRows, int cooldownMinutes,
+                                          java.time.Instant now, boolean hasActivePosition,
+                                          int maxCyclesPerDay) {
         if (cooldownMinutes <= 0 || hasActivePosition) return false;
+        if (maxCyclesPerDay > 0
+                && priorRows.stream().filter(o -> !o.isControl()).count() >= maxCyclesPerDay) {
+            return false;   // 왕복비용 누적 방어 — 하루 상한 도달
+        }
         java.time.Instant lastEntry = priorRows.stream()
                 .filter(o -> !o.isControl())
                 .map(TradeOutcome::getAlertTime)
@@ -261,7 +297,8 @@ public class StrategyEvaluator {
                     if (ex.stream().allMatch(TradeOutcome::isControl)) return true; // 인버스: control만 → 재평가(승격 후보)
                     // 인버스 재진입: 진입 행이 있어도 쿨다운 경과 + 실포지션 0이면 새 사이클 허용(오후 재붕괴 재포착)
                     return inverseReentryEligible(ex, inverseReentryMinutes,
-                            java.time.Instant.now(), orderService.hasActivePosition(stockCode));
+                            java.time.Instant.now(), orderService.hasActivePosition(stockCode),
+                            inverseMaxReentriesPerDay);
                 })
                 .toList();
         if (pending.isEmpty()) {
@@ -407,7 +444,7 @@ public class StrategyEvaluator {
             String reject = strategy.rejectReason(sctx);   // null이면 진입
             // 반등일 순추세 보류 — 시장별 판정(60s 캐시 재사용, 추가 KIS 0). 인버스는 시장태그 없음 → 미적용.
             if (reject == null && reboundDayGuardEnabled && !inverse && market != null
-                    && TREND_FAMILY.contains(strategy.name())
+                    && trendFamily().contains(strategy.name())
                     && marketRegimeService.isReboundDay(market, reboundDayMinSurgePct)) {
                 reject = "REBOUND_DAY";
                 log.info("[{}] 반등일 순추세 보류 [{}] — 당일 {} 급등 + 기저 비강세(V자 초입)", strategy.name(), stockCode, market);

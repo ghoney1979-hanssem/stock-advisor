@@ -25,8 +25,9 @@ class StrategyHoldTimeProviderTest {
                 "15:20", FIXED_HOLD, true, List.of(), 3, 5, 0);
     }
 
+    /** 기존 케이스는 평활 없이(smoothWindow=1) 종전 max-pick 동작을 검증한다. */
     private AdaptiveExitProperties props(boolean enabled, int minSamples, int maxHold) {
-        return new AdaptiveExitProperties(enabled, minSamples, 30, maxHold);
+        return new AdaptiveExitProperties(enabled, minSamples, 30, maxHold, 1);
     }
 
     private ExitTimingService.MarkStat mark(int minutes, int samples, double avgReturn) {
@@ -80,6 +81,29 @@ class StrategyHoldTimeProviderTest {
 
         assertThat(p.holdMinutes("MEAN_REVERSION_C")).isEqualTo(FIXED_HOLD);
         verify(ets, never()).analyze();   // 비활성이면 분석 호출 안 함
+    }
+
+    @Test
+    void 평활은_단발_스파이크_대신_이웃까지_좋은_구간을_고른다() {
+        // K 실측 재현: 95분만 +0.94이고 이웃(90 −0.44 / 100 −0.56)은 음수 = 표본 노이즈의 상위 극단.
+        // 반면 60~70분은 세 마크가 함께 양호 → 평활(창3) 최대는 65분.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(60, 100, 0.40), mark(65, 100, 0.50), mark(70, 100, 0.55), mark(75, 100, 0.50),
+                mark(90, 100, -0.44), mark(95, 100, 0.94), mark(100, 100, -0.56));
+
+        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 3).markMinutes()).isEqualTo(70);
+        // 평활 없이는 종전대로 단발 스파이크(95분)를 고른다 — 회귀 대조
+        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1).markMinutes()).isEqualTo(95);
+    }
+
+    @Test
+    void 평활해도_표본부족_마크는_곡선에서_제외된다() {
+        // 95분(+9.99%)은 표본 미달이라 후보에서도 이웃 계산에서도 빠진다 → 60~75 구간에서만 선택.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(60, 100, 0.50), mark(65, 100, 0.60), mark(70, 100, 0.55), mark(75, 100, 0.10),
+                mark(95, 5, 9.99));
+
+        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 3).markMinutes()).isEqualTo(65);
     }
 
     @Test

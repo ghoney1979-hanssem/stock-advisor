@@ -159,6 +159,12 @@ public class StrategyPerformanceGate {
     private com.stockadvisor.repository.OrderRepository orderRepository;
     void setOrderRepository(com.stockadvisor.repository.OrderRepository r) { this.orderRepository = r; }   // 테스트용
 
+    // 채택 청산방식 조회(2026-08-18) — exit horizon(보유시간 마크)은 방식이 TIME일 때만 실제 청산과 일치하므로,
+    // 비-TIME 방식이면 게이트 horizon을 close로 낮춘다. 필드주입(생성자 무churn, 미주입 테스트는 종전 동작).
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ExitMethodProvider exitMethodProvider;
+    void setExitMethodProvider(ExitMethodProvider p) { this.exitMethodProvider = p; }   // 테스트용
+
     /** INVERSE 버킷 — 실주문 실현손익(net%)으로 채점. 임계는 기존과 동일(inverseMinSamples/부트스트랩/minNet). */
     private GateDecision evaluateInverseRealized(String strategy) {
         String lookbackCutoff = LocalDate.now(SEOUL).minusDays(props.lookbackDays()).format(YYYYMMDD);
@@ -254,6 +260,24 @@ public class StrategyPerformanceGate {
                 && market != null && !market.isBlank();
         // 스윙 전략은 청산 시점이 D+1(익일종가)이라 그 horizon으로 검증. 인트라데이는 "exit"=실제 청산 마크로 검증.
         String horizon = swingStrategies.contains(strategy) ? swingHorizon : props.horizon();
+        // ⚠️ exit horizon은 '보유시간 마크'라 채택 청산방식이 TIME일 때만 실제 청산 시점과 일치한다(2026-08-18).
+        // TRAILING/VWAP/추세전환 등은 시간 상한이 없어 실제로는 트리거 or 장마감까지 간다 — D 실측: 게이트는
+        // 65분 마크로 채점하는데 라이브 보유는 1~10분(트레일 조기 트리거)과 350~374분(장마감)의 양봉 분포였고,
+        // 65분 부근은 사실상 비어 있었다. 즉 게이트가 '검증한 적 없는 청산'으로 실주문을 열어주고 있었다.
+        // → 비-TIME 방식은 당일종가(close)로 검증한다. 장마감 보유가 지배적이라 실제에 가깝고, 동시에
+        //   권장 마크의 max-pick 낙관 편향도 제거돼 보수적(fail-closed 방향)이다.
+        String methodTag = "";
+        if ("exit".equals(horizon) && exitMethodProvider != null) {
+            try {
+                com.stockadvisor.domain.ExitMethodType type = exitMethodProvider.methodFor(strategy).type();
+                if (type != com.stockadvisor.domain.ExitMethodType.TIME) {
+                    horizon = "close";
+                    methodTag = "·" + type.korean() + "청산";
+                }
+            } catch (Exception ignored) {
+                // 청산방식 조회 실패 → 종전(보유시간 마크)으로 degrade
+            }
+        }
         // horizon="exit": 전략별 권장 보유시간(PositionExitService가 실제 청산하는 그 마크)의 가격을 OutcomeSample에서
         // 조회해 net을 측정 → "실제로 팔 시점의 수익"으로 검증(당일종가 아님).
         boolean exitMode = "exit".equals(horizon);
@@ -331,7 +355,7 @@ public class StrategyPerformanceGate {
         Double avg = n == 0 ? null : round2(sumR / nR);
         // 라벨: [시장·국면·horizon] — 스윙은 horizon(nextClose)을 명시해 "어떤 시점으로 검증했는지" 노출
         String horizonLabel = exitMode ? exitMark + "분"
-                : (!horizon.equals(props.horizon()) ? horizon : null);   // 스윙 nextClose 등 명시
+                : (!horizon.equals(props.horizon()) ? horizon + methodTag : null);   // 스윙 nextClose·비TIME청산 등 명시
         String tagInner = (marketSplit ? market + "·" : "") + (regime == null ? "" : regime.korean());
         if (horizonLabel != null) tagInner = tagInner.isEmpty() ? horizonLabel : tagInner + "·" + horizonLabel;
         String regimeTag = tagInner.isEmpty() ? "" : "[" + tagInner + "] ";
