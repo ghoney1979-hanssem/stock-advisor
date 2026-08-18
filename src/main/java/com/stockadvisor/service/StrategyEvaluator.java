@@ -156,6 +156,16 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.inverse-reentry-minutes:20}")
     private int inverseReentryMinutes = 20;
 
+    // ── 전역 진입 필터(2026-08-18, feature-mining 근거) ──
+    // 전략 단위가 아니라 조건 단위로 지는 구간. 셋 다 27거래일·비클러스터 표본에서 진입-대조군 edge가 음수였다.
+    // 전부 0=비활성이며, 되돌릴 땐 env만 0으로 두면 된다(코드 경로는 남음).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-change-pct:10.0}")
+    private double maxEntryChangePct = 10.0;        // 당일 등락률 ≥ 이값%면 진입 보류(CHANGE_OVERHEAT)
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-volume-ratio:15.0}")
+    private double maxEntryVolumeRatio = 15.0;      // 거래량배수 ≥ 이값이면 진입 보류(VOLUME_EXTREME)
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.min-entry-market-cap-eok:1000}")
+    private long minEntryMarketCapEok = 1000;       // 시총(억) < 이값이면 진입 보류(MICRO_CAP)
+
     // 하루 재진입 사이클 상한(2026-08-18) — 왕복마다 비용 0.22%를 지불하므로 사이클이 늘수록 방향이 맞아도 진다.
     // 실측: 8/18 KOSDAQ −3.52%일에 251340이 10차까지 재진입해 7왕복 −4,521원(같은 시간 인버스 자체는 +1%).
     // 청산 로직 수정(저점 대비 회복 요건)이 주된 처방이고 이건 안전망 — 정상 동작 시 이 상한에 걸릴 일은 드물다.
@@ -490,6 +500,34 @@ public class StrategyEvaluator {
                     log.info("[{}] 신선 악재뉴스 가드 — 진입 보류 [{}] 키워드='{}'", strategy.name(), stockCode, badKw);
                 }
             }
+            // ── 전역(전략 무관) 진입 필터 ─────────────────────────────────────────────────
+            // feature-mining(27거래일, 비클러스터)에서 전략이 아니라 **조건 자체**가 지는 구간이 확인됐다.
+            // 셋 다 진입-대조군 edge가 음수 = 그 조건에선 "진입하는 것" 자체가 미진입보다 나빴다.
+            // 전략별 임계가 아니라 모든 전략 공통이라 여기서 한 번에 건다(인버스는 등락률·시총 의미가 달라 제외).
+            // ⚠️ 이 위치(모든 전략별 가드 뒤)가 중요 — 어차피 탈락할 후보가 아니라 **진입했을 후보**만 걸러야
+            //    "차단이 옳았나"를 대조군으로 측정할 수 있고, 기존 reject 사유 통계도 오염되지 않는다.
+            if (reject == null && !inverse) {
+                // ① 당일 등락률 과열: 진입 −1.89%(n306) vs 같은 구간 대조군 +0.25% → edge −2.14%p(가장 강한 근거).
+                //    "이미 10% 오른 걸 사는 것"은 전략 종류와 무관하게 졌다.
+                if (maxEntryChangePct > 0 && signal.changeRate() >= maxEntryChangePct) {
+                    reject = "CHANGE_OVERHEAT";
+                    log.info("[{}] 전역 과열 보류 [{}] — 당일 등락률 {}%", strategy.name(), stockCode,
+                            String.format("%.1f", signal.changeRate()));
+                }
+                // ② 거래량배수 극단: ≥15배 진입 −2.56%(n152) edge −0.71%p, 8~15배도 −1.52%(n169).
+                //    "거래량 급증이 클수록 좋다"는 전제가 단조 역방향(B 볼륨하한 원복과 같은 방향의 증거).
+                else if (maxEntryVolumeRatio > 0 && signal.volumeRatio() >= maxEntryVolumeRatio) {
+                    reject = "VOLUME_EXTREME";
+                    log.info("[{}] 전역 거래량 극단 보류 [{}] — 거래량배수 {}배", strategy.name(), stockCode,
+                            String.format("%.1f", signal.volumeRatio()));
+                }
+                // ③ 초소형주: 시총 <1000억 진입 −1.89%(n163) edge −0.36%p. 유동성 필터(거래대금·슬리피지)로는
+                //    안 걸러지던 구간 — 거래대금이 순간 급증해도 되돌림이 크다.
+                else if (minEntryMarketCapEok > 0 && marketCap > 0 && marketCap < minEntryMarketCapEok) {
+                    reject = "MICRO_CAP";
+                    log.info("[{}] 전역 초소형주 보류 [{}] — 시총 {}억", strategy.name(), stockCode, marketCap);
+                }
+            }
             // 대조군 기록: 전역 controlTracking + 전략별 tracksControl + 집중(검증승자 제외) 모두 충족해야.
             // REBOUND_DAY 차단분은 전략의 대조군 설정(tracksControl/집중)과 무관하게 기록(2026-07-23) —
             // H/F 등 control-off 전략이 가드에 막히면 흔적이 없어 "가드가 막은 게 옳았나"를 검증할 수 없다.
@@ -503,7 +541,11 @@ public class StrategyEvaluator {
                         || "REBOUND_DAY".equals(reject) || "EXEC_OVERHEAT".equals(reject)
                         || "RET5D_OVERHEAT".equals(reject)
                         || "NOT_FRESH".equals(reject) || "WEAK_BREAKOUT".equals(reject)
-                        || "NOT_CONFIRMED".equals(reject) || "INDEX_GAP_DAY".equals(reject));
+                        || "NOT_CONFIRMED".equals(reject) || "INDEX_GAP_DAY".equals(reject)
+                        // 전역 필터 3종도 강제 기록 — 전 전략에 걸리는데 F/H/K 등 control-off 전략은 흔적이 안 남아
+                        // "차단이 옳았나"를 검증할 수 없다. 진입 직전 후보에만 걸리므로 표본 부담은 작다.
+                        || "CHANGE_OVERHEAT".equals(reject) || "VOLUME_EXTREME".equals(reject)
+                        || "MICRO_CAP".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }

@@ -21,6 +21,12 @@ import java.util.function.Function;
  * cond = {@code feature OP value}, OP ∈ {@code >= <= > <}. 예:
  * {@code VOLUME_LEADING_B:volume_ratio>=6|SQUEEZE_BREAKOUT_H:exec_strength<200;ret5d<10}.
  * 조건 feature가 null인 구표본(태깅 이전)은 확인 불가 → 제외(보수적).</p>
+ *
+ * <p><b>전역 규칙 {@code *}</b>(2026-08-18): 전략 자리에 {@code *}를 쓰면 <b>모든 전략</b>에 적용된다.
+ * 전략 무관 진입 필터(당일등락률·거래량배수·시총 상하한)를 추가했을 때 11개 전략을 일일이 나열하지 않아도 되고,
+ * 무엇보다 <b>since 리셋의 fail-closed 공백 없이</b> 구표본을 새 임계로 재채점할 수 있다.
+ * 전략별 규칙과 함께 지정하면 <b>둘 다 AND</b>로 적용된다. 예:
+ * {@code *:change_rate<10;volume_ratio<15;market_cap>=1000|VOLUME_LEADING_B:volume_ratio>=6}.</p>
  */
 public final class GateRefilter {
 
@@ -63,6 +69,23 @@ public final class GateRefilter {
     public boolean test(TradeOutcome o) {
         for (Cond c : conds) if (!c.test(o)) return false;
         return true;
+    }
+
+    /** 전역 규칙 키 — 모든 전략에 AND로 적용. */
+    public static final String ALL = "*";
+
+    /**
+     * 해당 전략에 적용할 술어 — 전역({@code *})과 전략별 규칙을 AND로 합친다. 둘 다 없으면 null(재필터 없음).
+     * 호출측이 {@code map.get(strategy)}만 보면 전역 규칙을 놓치므로 항상 이 메서드를 쓸 것.
+     */
+    public static GateRefilter forStrategy(Map<String, GateRefilter> map, String strategy) {
+        GateRefilter all = map.get(ALL);
+        GateRefilter own = map.get(strategy);
+        if (all == null) return own;
+        if (own == null) return all;
+        List<Cond> merged = new ArrayList<>(all.conds);
+        merged.addAll(own.conds);
+        return new GateRefilter(merged);
     }
 
     /** "STRATEGY:cond;cond|STRATEGY2:cond" → {STRATEGY: GateRefilter}. 파싱 실패 조건은 무시(안전). */

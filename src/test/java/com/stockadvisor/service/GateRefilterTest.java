@@ -40,6 +40,33 @@ class GateRefilterTest {
     }
 
     @Test
+    void 전역규칙은_모든_전략에_적용된다() {
+        // 전략 무관 진입 필터(당일등락률·거래량배수·시총)를 11개 전략에 일일이 안 쓰기 위한 경로.
+        Map<String, GateRefilter> m = GateRefilter.parse("*:volume_ratio<15");
+        GateRefilter rf = GateRefilter.forStrategy(m, "OPENING_GAP_K");   // 전략별 규칙이 없어도 전역이 적용
+        assertThat(rf.test(outcome(10, null))).isTrue();
+        assertThat(rf.test(outcome(20, null))).isFalse();
+    }
+
+    @Test
+    void 전역규칙과_전략별규칙은_AND로_합쳐진다() {
+        Map<String, GateRefilter> m = GateRefilter.parse("*:volume_ratio<15|VOLUME_LEADING_B:volume_ratio>=6");
+        GateRefilter b = GateRefilter.forStrategy(m, "VOLUME_LEADING_B");
+        assertThat(b.test(outcome(10, null))).isTrue();     // 6 <= 10 < 15
+        assertThat(b.test(outcome(3, null))).isFalse();     // 전략별(>=6) 실패
+        assertThat(b.test(outcome(20, null))).isFalse();    // 전역(<15) 실패
+        // 전략별 규칙이 없는 전략은 전역만
+        assertThat(GateRefilter.forStrategy(m, "MOMENTUM_A").test(outcome(3, null))).isTrue();
+    }
+
+    @Test
+    void 전역규칙이_없으면_전략별만_그것도_없으면_null() {
+        Map<String, GateRefilter> m = GateRefilter.parse("VOLUME_LEADING_B:volume_ratio>=6");
+        assertThat(GateRefilter.forStrategy(m, "VOLUME_LEADING_B")).isNotNull();
+        assertThat(GateRefilter.forStrategy(m, "MOMENTUM_A")).isNull();   // 재필터 없음 = 구표본 그대로 채점
+    }
+
+    @Test
     void 다중_전략_파싱_잘못된_조건_무시() {
         Map<String, GateRefilter> m = GateRefilter.parse("A:volume_ratio>=2|B:unknown_feat>1|C:rec_score>=40");
         assertThat(m).containsKeys("A", "C");

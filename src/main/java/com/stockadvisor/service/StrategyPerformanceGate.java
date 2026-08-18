@@ -332,7 +332,8 @@ public class StrategyPerformanceGate {
         java.util.Map<String, Integer> daysAll = new java.util.HashMap<>();
         java.util.Map<String, Integer> daysF = new java.util.HashMap<>();
         // 구표본 자동 재필터: 조이는 필터 추가 시 새 필터의 임계(태깅된 feature)를 구표본에도 적용 → 통과분만 채점.
-        GateRefilter refilter = refilters.get(strategy);
+        // 전역(*) 규칙 + 전략별 규칙을 AND로 — 전략 무관 진입 필터를 since 리셋 없이 구표본에 재적용하기 위함.
+        GateRefilter refilter = GateRefilter.forStrategy(refilters, strategy);
         final String refilterTag = refilter != null ? " ·재필터" : "";
         for (TradeOutcome o : rows) {
             if (o.isControl()) continue;   // 대조군(미진입) 제외 — 게이트는 '진입 성과'만 검증(스윙 nextClose에서 대조군 오염 방지)

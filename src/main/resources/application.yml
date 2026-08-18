@@ -108,6 +108,12 @@ stockadvisor:
     exec-overheat-min-strength: ${SIGNAL_EXEC_OVERHEAT_MIN_STRENGTH:200.0}
     # 다일 과열 필터 — 반등계열(H/G/J) 진입 시 최근 5일 수익률 > 이값%면 보류(RET5D_OVERHEAT). 흐름↑ 손실 분석(2026-07-29) 근거. 0=비활성
     ret5d-overheat-max-pct: ${SIGNAL_RET5D_OVERHEAT_MAX_PCT:10.0}
+    # 전역(전략 무관) 진입 필터 — feature-mining 27거래일·비클러스터 표본에서 진입-대조군 edge가 음수인 구간.
+    # 전략이 아니라 '조건 자체'가 지는 곳이라 전 전략 공통으로 건다. 인버스는 등락률·시총 의미가 달라 제외. 0=비활성.
+    # 차단분은 tracksControl 무관 강제 대조군 기록 → "차단이 옳았나"를 forward 검증.
+    max-entry-change-pct: ${SIGNAL_MAX_ENTRY_CHANGE_PCT:10.0}        # 당일 등락률 ≥이값% 진입 보류(CHANGE_OVERHEAT). 진입 -1.89%(n306) vs 대조군 +0.25%
+    max-entry-volume-ratio: ${SIGNAL_MAX_ENTRY_VOLUME_RATIO:15.0}    # 거래량배수 ≥이값 진입 보류(VOLUME_EXTREME). ≥15배 진입 -2.56%(n152)
+    min-entry-market-cap-eok: ${SIGNAL_MIN_ENTRY_MARKET_CAP_EOK:1000}  # 시총(억) <이값 진입 보류(MICRO_CAP). <1000억 진입 -1.89%(n163)
     # 반등일 순추세 보류 가드 — 당일 지수 ≥ surge% 급등 AND 기저(MA3) 라벨 비강세면 H/F/E/K 신규진입 보류(REBOUND_DAY). 2사이클 실측(7/15·7/22) 근거.
     rebound-day-guard-enabled: ${SIGNAL_REBOUND_DAY_GUARD_ENABLED:true}
     rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}
