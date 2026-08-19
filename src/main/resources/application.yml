@@ -173,6 +173,11 @@ stockadvisor:
     universe-snapshot-times: ${SIGNAL_UNIVERSE_SNAPSHOT_TIMES:09:30,11:00,13:00,14:30}  # 버킷 시각(csv). 1회만 원하면 09:30
     universe-snapshot-window-minutes: ${SIGNAL_UNIVERSE_SNAPSHOT_WINDOW_MINUTES:20}     # 버킷 시각 이후 이 분 내 스캔이 수집(12분 주기 커버)
     universe-snapshot-target-minutes: ${SIGNAL_UNIVERSE_SNAPSHOT_TARGET_MINUTES:90}     # 사후 타깃 horizon(우리 실제 보유시간대)
+    # ⚠️ 종가 타깃은 익일 일봉의 확정 종가(SignalResult.prevClose)로 채운다(2026-08-19 수정, 추가 KIS 0).
+    #    이전엔 "15:15 이후 스캔의 관측가" 근사였는데, 스캔이 12분 주기 + 세션가드 15:20이라 채울 창이 5분뿐이었고
+    #    순회 순서가 고정이라 채워지는 종목이 매일 같았다 — 실측 KOSDAQ 92% vs KOSPI 36%(전체 57%)로 시장 편중.
+    #    급증 편향을 없애려 만든 분모에 순회 순서 편향이 들어간 셈이라 정확한 종가로 전환. 대신 종가는 익일에 채워진다.
+    # ⚠️ +90분 타깃은 (버킷+90분 ≤ session-end)인 버킷만 대상 — 14:30 버킷은 16:00이라 구조적으로 도달 불가(결손 아님).
 
   # 매매비용 — 분석 순수익(net) 계산용. 왕복(매수+매도) 합산 %.
   # 기본 0.18 ≈ 위탁수수료(매수·매도 각 ~0.015%) + 증권거래세(매도 0.15%, 2025~ 코스피·코스닥 동일).

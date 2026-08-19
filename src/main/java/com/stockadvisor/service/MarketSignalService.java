@@ -132,10 +132,13 @@ public class MarketSignalService {
         long todayOpen = parseLong(today.openPrice());
         long prevClose = rows.size() > 1 ? parseLong(rows.get(1).closePrice()) : 0;
         double gapPct = (todayOpen > 0 && prevClose > 0) ? (double) (todayOpen - prevClose) / prevClose * 100 : 0;
+        // 전일 확정 종가 + 그 영업일 — UniverseSnapshotService가 전일 스냅샷의 종가 타깃을 정확히 채우는 데 쓴다(추가 KIS 0).
+        String prevBusinessDate = rows.size() > 1 ? rows.get(1).businessDate() : null;
 
         return Optional.of(new SignalResult(volumeRatio, changeRate, closePrice, todayVolume,
                 volumeSpike, freshActive, reboundActive, priorHigh, maCrossUp, rsiCrossUp, squeezeBreakout,
-                atrPct, distFromHighPct, ret5dPct, gapPct, maBreakoutFresh, maDistPct, squeezeBreakoutFresh));
+                atrPct, distFromHighPct, ret5dPct, gapPct, maBreakoutFresh, maDistPct, squeezeBreakoutFresh,
+                prevClose, prevBusinessDate));
     }
 
     /**
