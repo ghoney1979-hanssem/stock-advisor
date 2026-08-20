@@ -923,6 +923,53 @@ class StrategyPerformanceGateTest {
         assertThat(d.reason()).contains("실현손익·통합").contains("성과 미달");
     }
 
+    /** prod 유사 설정 — 국면조건부 on + fallback on(이 조합에서만 부트스트랩 죽은 코드 버그가 났다). */
+    private StrategyPerformanceProperties prodLikeProps(int minSamples, double minNetAvg) {
+        return new StrategyPerformanceProperties(true, 20, minSamples, minNetAvg, "close",
+                true, false, true, 50, 0.5, 0.5, 10, 0.3, false, 30, "", 0, 999.0);
+    }
+
+    /** fallback 활성 + 국면 산출됨(=prod 설정) 상태의 게이트 — 부트스트랩 도달 가능성 검증용. */
+    private StrategyPerformanceGate fallbackOnGate(StrategyPerformanceProperties p, List<TradeOutcome> rows,
+                                                   String bootstrapCsv) {
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.NEUTRAL);   // 국면 산출됨 → fallback 분기 진입
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, false, false,
+                "", bootstrapCsv, "", "");
+    }
+
+    @Test
+    void 부트스트랩_전략은_fallback활성_국면산출_상태에서도_도달한다() {
+        // 🐞 2026-08-21 회귀: fallback 분기가 무조건 return해 아래 '일반 부트스트랩' 분기가 prod 설정
+        // (fallbackEnabled=true + 국면 산출)에서 죽은 코드였다 — bootstrap-strategies에 넣어도 무효였다.
+        // 표본 5건(minSamples 30 미달) + 전국면 pool도 fallbackMinSamples 미달 → 부트스트랩으로 축소진입 허용돼야 한다.
+        List<TradeOutcome> rows = new ArrayList<>(samples("VALUE_REVERSAL_J", 5, 1.0 + COST, "NEUTRAL"));
+
+        StrategyPerformanceGate.GateDecision d =
+                fallbackOnGate(prodLikeProps(30, 0.3), rows, "VALUE_REVERSAL_J").evaluate("VALUE_REVERSAL_J");
+
+        assertThat(d.allowed()).isTrue();
+        assertThat(d.fallback()).isTrue();   // OrderService가 축소사이징(fallbackSizeMult) 적용
+        assertThat(d.reason()).contains("부트스트랩");
+    }
+
+    @Test
+    void 부트스트랩_미지정_전략은_종전대로_fallback미달_차단() {
+        // 대조: 같은 조건에서 bootstrap-strategies 에 없는 전략은 그대로 차단(회귀 방지)
+        List<TradeOutcome> rows = new ArrayList<>(samples("MOMENTUM_A", 5, 1.0 + COST, "NEUTRAL"));
+
+        StrategyPerformanceGate.GateDecision d =
+                fallbackOnGate(prodLikeProps(30, 0.3), rows, "VALUE_REVERSAL_J").evaluate("MOMENTUM_A");
+
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).contains("fallback미달");
+    }
+
     @Test
     void 단일일_클러스터_버킷은_net_좋아도_교차거래일_미충족으로_차단() {
         // 30건 전부 한 거래일(20260626) — net +2%(≥기준)여도 이벤트 1개라 LIVE 졸업 불가(share 100%>50)

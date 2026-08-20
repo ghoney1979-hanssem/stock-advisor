@@ -459,11 +459,19 @@ public class StrategyPerformanceGate {
                                 looAll == null ? "" : looAll.tag()),
                         nAll, avgAll, regimeName, market, true);
             }
-            return new GateDecision(strategy, false,
-                    String.format("%s국면표본부족(%d/%d)+fallback미달(전국면 net %s, n=%d/%d)",
-                            regimeTag, n, minSamples,
-                            avgAll == null ? "N/A" : String.format("%.2f%%", avgAll), nAll, props.fallbackMinSamples()),
-                    n, avg, regimeName, market, false);
+            // 🐞 2026-08-21: 여기서 무조건 return하는 바람에 아래 '일반 부트스트랩(재검증 다리)' 분기가
+            //    prod 설정(fallbackEnabled=true + 국면 산출됨)에서 영영 도달하지 못하는 죽은 코드였다.
+            //    bootstrap-strategies에 전략을 넣어도 아무 일이 없었고(J 추가 시도로 발견), CLAUDE.md가 안내하는
+            //    "since 리셋 fail-closed 공백은 bootstrap-strategies로 완화" 처방 자체가 작동하지 않았다.
+            //    → 부트스트랩 지정 전략은 여기서 끝내지 말고 아래 재검증 다리로 흘려보낸다.
+            //    (fallback '통과'는 전국면 pool로 검증된 더 강한 근거라 위에서 먼저 잡히므로 우선순위는 그대로.)
+            if (!bootstrapStrategies.contains(strategy)) {
+                return new GateDecision(strategy, false,
+                        String.format("%s국면표본부족(%d/%d)+fallback미달(전국면 net %s, n=%d/%d)",
+                                regimeTag, n, minSamples,
+                                avgAll == null ? "N/A" : String.format("%.2f%%", avgAll), nAll, props.fallbackMinSamples()),
+                        n, avg, regimeName, market, false);
+            }
         }
         // INVERSE 부트스트랩: 표본 미달이어도 축소사이징(inverseBootstrapSizeMult)으로 실주문 허용 — 적은 비용으로
         // 실표본을 수집(폭락일에만 쌓이는 인버스 특성 보완). 표본이 inverseMinSamples에 차면 이 분기에 안 오고
