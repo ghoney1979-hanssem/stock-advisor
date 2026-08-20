@@ -74,9 +74,9 @@ class InverseIndexStrategyTest {
     @Test
     void 반등일이면_플러스권_fade_진입_허용() {
         // 2026-07-22 확대: REBOUND_DAY 성립일(당일 고점 +2%↑ & 기저 비강세)엔 상한 -1% → +2%.
-        // 아침 +2.4% 찍고 +1.5%로 꺾여 내려오는 중(mom10/30 동시 하락) → fade 진입.
+        // 아침 +2.8% 찍고 +1.5%로 꺾여 내려오는 중(고점 대비 -1.3%p = fade 확인) + mom10/30 동시 하락 → fade 진입.
         KisApiClient kis = mock(KisApiClient.class);
-        when(kis.fetchIndexChangeRate("1001")).thenReturn(1.5);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.8, 1.5);   // 스캔 1회차 고점 → 2회차 fade
         com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
         when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
         when(regime.intradayFlow("KOSDAQ")).thenReturn(
@@ -84,6 +84,51 @@ class InverseIndexStrategyTest {
         InverseIndexStrategy s = strategy(kis);
         s.setRegimeService(regime);
         s.setRequireFalling(true);
+
+        s.rejectReason(ctx("251340", true));   // 1회차(+2.8%) — 당일 고점 기록
+        assertThat(s.rejectReason(ctx("251340", true))).isNull();
+    }
+
+    @Test
+    void 반등일이어도_고점_근처면_NOT_FADING() {
+        // 2026-08-20 실측 재현: 코스닥이 하루 종일 +1.7~2.3%에 머물렀는데 확대창(-0.5%~+2%)이 열려 있어
+        // 진입 즉시 청산 트리거(지수 > -0.5%)에 걸리는 왕복이 11차까지 반복(-3,711원).
+        // 고점 +2.3% 대비 현재 +1.84% = 0.46%p차 → fade 미진행이므로 보류돼야 한다.
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.3, 1.84);
+        com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
+        when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
+        InverseIndexStrategy s = strategy(kis);
+        s.setRegimeService(regime);
+
+        s.rejectReason(ctx("251340", true));   // 1회차(+2.3%) — 당일 고점 기록
+        assertThat(s.rejectReason(ctx("251340", true))).isEqualTo("NOT_FADING");
+    }
+
+    @Test
+    void 반등일_fade_미확인이어도_진짜_약세면_진입() {
+        // fade 확인 요건은 '확대창에 기대야만 통과할 후보'에만 적용 — 평상일 상한(-1%) 아래로 이미 꺾인
+        // 진짜 약세는 확대창과 무관하므로 막으면 안 된다(회귀 방지).
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(-2.3);   // 고점도 -2.3 → fade 0%p지만 진짜 약세
+        com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
+        when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
+        InverseIndexStrategy s = strategy(kis);
+        s.setRegimeService(regime);
+
+        assertThat(s.rejectReason(ctx("251340", true))).isNull();
+    }
+
+    @Test
+    void fade_확인_비활성이면_종전동작() {
+        // fadeConfirmPct=0 → 2026-07-22 도입분 그대로(반등일이면 고점 근처여도 확대창 통과)
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(1.84);
+        com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
+        when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
+        InverseIndexStrategy s = strategy(kis);
+        s.setRegimeService(regime);
+        s.setFadeConfirmPct(0);
 
         assertThat(s.rejectReason(ctx("251340", true))).isNull();
     }

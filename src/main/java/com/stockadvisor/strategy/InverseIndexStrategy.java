@@ -6,8 +6,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 전략 I — 인버스 = 지수 약세 트리거 (섀도우, <b>거래량 무관</b>).
@@ -23,6 +26,7 @@ import java.util.Map;
 public class InverseIndexStrategy implements TradingStrategy {
 
     private static final Logger log = LoggerFactory.getLogger(InverseIndexStrategy.class);
+    private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
 
     private final KisApiClient kisApiClient;
     private final boolean enabled;
@@ -42,7 +46,14 @@ public class InverseIndexStrategy implements TradingStrategy {
     private double reboundFadeMaxPct = 2.0;
     @Value("${stockadvisor.signal.rebound-day-min-surge-pct:2.0}")
     private double reboundSurgePct = 2.0;   // 반등일 판정 임계 — 순추세 가드와 동일 knob 공유
+    // fade 확인 요건(2026-08-20, 11차 재진입 −3,711원 계기): 반등일 확대창은 "갭업이 무너지는 날"을 노린 것인데,
+    // 지수가 고점 근처에 머무는 동안에도 창이 열려 있어 진입 허용구간(−0.5%~+2%)이 청산 트리거(지수 > −0.5%)와
+    // 통째로 겹쳤다 — 진입 즉시 청산되는 왕복비용 루프. 창을 열되 "고점 대비 fadeConfirmPct%p 이상 실제로 밀렸을 것"을
+    // 함께 요구한다(8/20 실측: 고점 +2.4% vs 진입 시 +1.84% = 0.56%p차 → 차단됐을 후보). 0=비활성(종전 동작).
+    @Value("${stockadvisor.signal.inverse-fade-confirm-pct:1.0}")
+    private double fadeConfirmPct = 1.0;
     void setReboundFadeMaxPct(double v) { this.reboundFadeMaxPct = v; }   // 테스트용
+    void setFadeConfirmPct(double v) { this.fadeConfirmPct = v; }         // 테스트용
     // 필드주입(생성자 무churn) — 미주입/흐름 미가용(장초 분봉 부족)이면 판정 생략(degrade open, 기존 동작).
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.MarketRegimeService regimeService;
@@ -94,11 +105,18 @@ public class InverseIndexStrategy implements TradingStrategy {
         if (idx == null) return "NO_INDEX_MAP";
         Double chg = safeIndexChange(idx);
         if (chg == null) return "NO_INDEX";                       // 지수 조회 실패
+        double dayHigh = trackDayHigh(idx, chg);   // 진입 판정과 같은 소스의 당일 고점(아래 주석 참조)
         double upperPct = -minDropPct;   // 기본 진입 상한(약세 확인선)
         if (reboundFadeMaxPct > 0 && regimeService != null) {
             String mkt = "0001".equals(idx) ? "KOSPI" : ("1001".equals(idx) ? "KOSDAQ" : null);
             if (mkt != null && regimeService.isReboundDay(mkt, reboundSurgePct)) {
-                upperPct = reboundFadeMaxPct;   // 반등일 한정 fade 허용(+2%까지)
+                if (fadeConfirmPct <= 0 || dayHigh - chg >= fadeConfirmPct) {
+                    upperPct = reboundFadeMaxPct;   // 반등일 + fade 진행 확인 → 확대창(+2%까지)
+                } else if (chg > -minDropPct) {
+                    // 확대창에 기대야만 통과할 후보(평상일 상한 위)인데 fade가 아직 진행 안 됨 → 보류.
+                    // ⚠️ 진짜 약세(chg ≤ -minDrop)는 확대창과 무관하므로 여기서 막지 않는다.
+                    return "NOT_FADING";
+                }
             }
         }
         if (chg > upperPct) return "INDEX_NOT_WEAK";              // 상한 위(아직 안 꺾임/평상일 비약세)
@@ -122,6 +140,19 @@ public class InverseIndexStrategy implements TradingStrategy {
             // 흐름 미가용(장초 분봉 부족/조회 실패) → 기존 동작(당일 약세만으로 진입)
         }
         return null;                                              // 지수 약세 + 아직 하락/보합 중 → 인버스 롱
+    }
+
+    // 당일 지수 등락률 고점 추적 — 지수코드별, 날짜 바뀌면 리셋. 관측 시점 기반(스캔 주기 호출로 충분).
+    // ⚠️ MarketRegimeService.dayHighChangeOf를 쓰지 않는다: 그쪽은 프록시 ETF(069500/229200) 등락률 기준인데
+    // 이 전략의 진입선은 실지수(fetchIndexChangeRate) 기준이라 스케일이 다르다 — 2026-08-20 실측으로 같은 시각
+    // 프록시 +4.1~6.6% vs 실지수 +1.7~2.3%였다. 서로 다른 소스로 (고점 − 현재)를 계산하면 항상 fade로 오판한다.
+    private final Map<String, double[]> dayHighChg = new ConcurrentHashMap<>();   // indexCode -> {epochDay, highPct}
+
+    private double trackDayHigh(String indexCode, double chg) {
+        long today = LocalDate.now(SEOUL).toEpochDay();
+        double[] cur = dayHighChg.compute(indexCode, (k, prev) ->
+                (prev == null || (long) prev[0] != today || chg > prev[1]) ? new double[]{today, chg} : prev);
+        return cur[1];
     }
 
     private Double safeIndexChange(String indexCode) {

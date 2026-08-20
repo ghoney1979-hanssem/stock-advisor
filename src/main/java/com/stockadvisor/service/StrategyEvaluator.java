@@ -545,7 +545,10 @@ public class StrategyEvaluator {
                         // 전역 필터 3종도 강제 기록 — 전 전략에 걸리는데 F/H/K 등 control-off 전략은 흔적이 안 남아
                         // "차단이 옳았나"를 검증할 수 없다. 진입 직전 후보에만 걸리므로 표본 부담은 작다.
                         || "CHANGE_OVERHEAT".equals(reject) || "VOLUME_EXTREME".equals(reject)
-                        || "MICRO_CAP".equals(reject));
+                        || "MICRO_CAP".equals(reject)
+                        // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
+                        // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
+                        || "NOT_FADING".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }
