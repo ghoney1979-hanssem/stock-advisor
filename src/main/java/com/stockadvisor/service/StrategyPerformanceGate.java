@@ -84,6 +84,8 @@ public class StrategyPerformanceGate {
                                    @Value("${stockadvisor.trading.swing-horizon:nextClose}") String swingHorizon,
                                    // 교차거래일 요건 — 버킷의 한 거래일 점유율이 이 %를 넘으면 단일일 클러스터로 보고 LIVE 졸업 차단. 0=비활성.
                                    @Value("${stockadvisor.trading.perf-gate.max-single-day-share-pct:80}") double maxSingleDaySharePct,
+                                   // 최대기여일 제외 net(LOO) 요건 — 버킷 net이 단 하루로 설명되면 LIVE 차단. false=종전 동작.
+                                   @Value("${stockadvisor.trading.perf-gate.loo-top-day:true}") boolean looTopDay,
                                    // 전략별 net 재검증 시작일 — 로직/임계 변경 시 구표본 제외("STRATEGY:yyyyMMdd,..."). 변경일 이후 표본만 채점.
                                    @Value("${stockadvisor.trading.perf-gate.strategy-since:}") String strategySinceCsv,
                                    // 부트스트랩 허용 전략(csv) — since 리셋 등으로 표본 미달이어도 축소사이징 실주문(재검증 중 완전정지 방지). 기본 빈값=fail-closed.
@@ -105,6 +107,7 @@ public class StrategyPerformanceGate {
         this.swingStrategies = PolicyGate.parseCsv(swingCsv);
         this.swingHorizon = swingHorizon;
         this.maxSingleDaySharePct = maxSingleDaySharePct;
+        this.looTopDay = looTopDay;
         this.strategySince = parseSince(strategySinceCsv);
         this.bootstrapStrategies = PolicyGate.parseCsv(bootstrapStrategiesCsv);
         this.refilters = GateRefilter.parse(refilterCsv);
@@ -115,6 +118,7 @@ public class StrategyPerformanceGate {
     private final java.util.Map<String, GateRefilter> refilters;
 
     private final double maxSingleDaySharePct;
+    private final boolean looTopDay;
     /** 전략 → net 재검증 시작일(yyyyMMdd). 로직 변경 시 구표본 제외용. */
     private final java.util.Map<String, String> strategySince;
     /** since 리셋 후 표본 미달이어도 축소사이징 실주문 허용할 전략(재검증 다리). */
@@ -342,9 +346,10 @@ public class StrategyPerformanceGate {
         double sumAll = 0; int nAll = 0;
         double sumF = 0; int nF = 0;
         // 교차 거래일 요건: 버킷별 (alertDate → 표본수) — 단일일 지배(클러스터) 판정용.
-        java.util.Map<String, Integer> daysR = new java.util.HashMap<>();
-        java.util.Map<String, Integer> daysAll = new java.util.HashMap<>();
-        java.util.Map<String, Integer> daysF = new java.util.HashMap<>();
+        // 값은 {표본수, net합} — 점유율(수)과 최대기여일 제외 net(합) 둘 다 필요하다.
+        java.util.Map<String, double[]> daysR = new java.util.HashMap<>();
+        java.util.Map<String, double[]> daysAll = new java.util.HashMap<>();
+        java.util.Map<String, double[]> daysF = new java.util.HashMap<>();
         // 구표본 자동 재필터: 조이는 필터 추가 시 새 필터의 임계(태깅된 feature)를 구표본에도 적용 → 통과분만 채점.
         // 전역(*) 규칙 + 전략별 규칙을 AND로 — 전략 무관 진입 필터를 since 리셋 없이 구표본에 재적용하기 위함.
         GateRefilter refilter = GateRefilter.forStrategy(refilters, strategy);
@@ -359,11 +364,11 @@ public class StrategyPerformanceGate {
             double cost = roundTripCostPct + slip;
             double net = (double) (price - o.getBuyPrice()) / o.getBuyPrice() * 100 - cost;
             String d = o.getAlertDate();
-            sumAll += net; nAll++; bump(daysAll, d);                            // 전국면 pool
+            sumAll += net; nAll++; bump(daysAll, d, net);                       // 전국면 pool
             boolean regimeMatch = regimeName == null || regimeName.equals(o.getEntryMarketTrend());
-            if (regimeMatch) { sumR += net; nR++; bump(daysR, d); }              // 국면 매칭
+            if (regimeMatch) { sumR += net; nR++; bump(daysR, d, net); }         // 국면 매칭
             if (regimeMatch && flowUp != null && o.getEntryIndexMom30() != null
-                    && (o.getEntryIndexMom30() >= 0) == flowUp) { sumF += net; nF++; bump(daysF, d); }   // 국면+흐름 매칭
+                    && (o.getEntryIndexMom30() >= 0) == flowUp) { sumF += net; nF++; bump(daysF, d, net); }   // 국면+흐름 매칭
         }
         int n = nR;
         Double avg = n == 0 ? null : round2(sumR / nR);
@@ -391,12 +396,13 @@ public class StrategyPerformanceGate {
                 if (mutateHyst) openState.put(keyF, false);
                 return clusterBlock(strategy, flowTag, shareF, nF, daysF.size(), avgF, regimeName, market);
             }
-            boolean allow = avgF >= effMinNetF;
+            LooNet looF = looTopDay ? looExcludingTopDay(daysF, sumF, nF) : null;
+            boolean allow = avgF >= effMinNetF && (looF == null || looF.net() >= effMinNetF);
             if (mutateHyst) openState.put(keyF, allow);
             return new GateDecision(strategy, allow,
-                    String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            flowTag, allow ? "통과" : "성과 미달", avgF, allow ? "≥" : "<", effMinNetF, nF,
-                            wasOpenF ? HYST_TAG : ""),
+                    String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
+                            flowTag, allow ? "통과" : "성과 미달", avgF, avgF >= effMinNetF ? "≥" : "<", effMinNetF, nF,
+                            looF == null ? "" : looF.tag(), wasOpenF ? HYST_TAG : ""),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
@@ -409,12 +415,13 @@ public class StrategyPerformanceGate {
                 if (mutateHyst) openState.put(keyR, false);
                 return clusterBlock(strategy, regimeTag, shareR, n, daysR.size(), avg, regimeName, market);
             }
-            boolean allow = avg >= effMinNetR;
+            LooNet looR = looTopDay ? looExcludingTopDay(daysR, sumR, n) : null;
+            boolean allow = avg >= effMinNetR && (looR == null || looR.net() >= effMinNetR);
             if (mutateHyst) openState.put(keyR, allow);
             return new GateDecision(strategy, allow,
-                    String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s",
-                            regimeTag, allow ? "통과" : "성과 미달", avg, allow ? "≥" : "<", effMinNetR, n,
-                            wasOpenR ? HYST_TAG : ""),
+                    String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
+                            regimeTag, allow ? "통과" : "성과 미달", avg, avg >= effMinNetR ? "≥" : "<", effMinNetR, n,
+                            looR == null ? "" : looR.tag(), wasOpenR ? HYST_TAG : ""),
                     n, avg, regimeName, market, false);
         }
         // 여기 도달 = 엄격(흐름·국면) 버킷 판정에 실패(표본부족) → 아래는 전부 비엄격 경로(fallback·부트스트랩·fail-closed).
@@ -433,11 +440,14 @@ public class StrategyPerformanceGate {
                 return clusterBlock(strategy, regimeTag + "전국면 ", singleDaySharePct(daysAll, nAll),
                         nAll, daysAll.size(), avgAll, regimeName, market);
             }
-            if (nAll >= props.fallbackMinSamples() && avgAll != null && avgAll >= props.fallbackMinNetAvgPct()) {
+            LooNet looAll = looTopDay ? looExcludingTopDay(daysAll, sumAll, nAll) : null;
+            if (nAll >= props.fallbackMinSamples() && avgAll != null && avgAll >= props.fallbackMinNetAvgPct()
+                    && (looAll == null || looAll.net() >= props.fallbackMinNetAvgPct())) {
                 // ③ 통과 → fallback=true(OrderService가 축소사이징 적용)
                 return new GateDecision(strategy, true,
-                        String.format("%s국면표본부족(%d/%d)→전국면 fallback통과(net %.2f%% ≥ %.2f%%, n=%d) — 축소진입",
-                                regimeTag, n, minSamples, avgAll, props.fallbackMinNetAvgPct(), nAll),
+                        String.format("%s국면표본부족(%d/%d)→전국면 fallback통과(net %.2f%% ≥ %.2f%%, n=%d)%s — 축소진입",
+                                regimeTag, n, minSamples, avgAll, props.fallbackMinNetAvgPct(), nAll,
+                                looAll == null ? "" : looAll.tag()),
                         nAll, avgAll, regimeName, market, true);
             }
             return new GateDecision(strategy, false,
@@ -510,16 +520,52 @@ public class StrategyPerformanceGate {
     }
 
     // ── 교차 거래일 요건(단일일 클러스터 방지, 2026-08-12) ──
-    private static void bump(java.util.Map<String, Integer> m, String d) {
-        if (d != null) m.merge(d, 1, Integer::sum);
+    private static void bump(java.util.Map<String, double[]> m, String d, double net) {
+        if (d == null) return;
+        double[] cur = m.computeIfAbsent(d, k -> new double[2]);
+        cur[0] += 1;
+        cur[1] += net;
     }
 
     /** 버킷의 최대 단일 거래일 점유율(%). 표본 없으면 0. */
-    private static double singleDaySharePct(java.util.Map<String, Integer> days, int n) {
+    private static double singleDaySharePct(java.util.Map<String, double[]> days, int n) {
         if (n <= 0 || days.isEmpty()) return 0;
-        int max = 0;
-        for (int c : days.values()) if (c > max) max = c;
+        double max = 0;
+        for (double[] v : days.values()) if (v[0] > max) max = v[0];
         return 100.0 * max / n;
+    }
+
+    /**
+     * 최대기여일 제외 net(LOO, 2026-08-20) — "이 버킷의 net이 단 하루로 설명되는가".
+     *
+     * <p>점유율 가드(80%)만으로는 부족했다: D-KOSPI는 74/100(74%)로 문턱을 간발로 통과했는데 그 74건이
+     * 7/31 하루(+3.82%)라 버킷 net +2.52%가 사실상 그 하루였다. 게다가 점유율은 <b>새 진입/섀도우가 분모에
+     * 쌓이기만 해도 희석</b>돼(8/20 장중 90% → 밤 74%) 그 하루에 대한 새 증거 없이 게이트가 다시 열린다.</p>
+     *
+     * <p><b>net 합이 가장 큰 하루</b>를 빼고 남은 표본의 net을 돌려준다. 호출측은 전체 net과 이 값이
+     * <b>둘 다</b> 기준을 넘을 때만 연다 — 가장 크게 기여한 날을 빼므로 남은 net은 항상 전체 이하다.
+     * 즉 단조적으로 더 엄격해지기만 해, 기존에 닫혀 있던 버킷이 이 요건 때문에 열리는 일은 없다.</p>
+     *
+     * <p>거래일이 하나뿐이거나 남는 표본이 없으면 null(판정 생략) — 그 경우는 점유율 가드가 처리한다.</p>
+     */
+    private static LooNet looExcludingTopDay(java.util.Map<String, double[]> days, double sum, int n) {
+        if (days.size() < 2 || n <= 0) return null;
+        String top = null;
+        double topSum = Double.NEGATIVE_INFINITY;
+        for (var e : days.entrySet()) {
+            if (e.getValue()[1] > topSum) { topSum = e.getValue()[1]; top = e.getKey(); }
+        }
+        int topCount = (int) days.get(top)[0];
+        int rest = n - topCount;
+        if (rest <= 0) return null;
+        return new LooNet(top, topCount, Math.round((sum - topSum) / rest * 100.0) / 100.0);
+    }
+
+    /** 최대기여일 제외 결과 — 사유문에 "어느 날을 뺐고 남은 net이 얼마인지"까지 실어 가시화한다. */
+    private record LooNet(String day, int count, double net) {
+        String tag() {
+            return String.format(" ·최대기여일(%s, n=%d) 제외 net %.2f%%", day, count, net);
+        }
     }
 
     /** 한 거래일 점유율이 문턱(maxSingleDaySharePct)을 초과하면 단일일 클러스터로 판정(0=비활성). */
