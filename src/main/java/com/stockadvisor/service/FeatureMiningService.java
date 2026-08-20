@@ -114,6 +114,18 @@ public class FeatureMiningService {
         //    edgeVsControlPct는 구조적으로 null이다(커버리지 0%). 반사실 비교를 하려면 대조군 태깅이 선행돼야 한다.
         d.add(new NumDef("뉴스경과분", o -> o.getEntryNewsAgeMin() == null ? null : o.getEntryNewsAgeMin().doubleValue(),
                 new double[]{60, 240, 720, 2880}));
+        // 개장후경과분(2026-08-21): "아침 진입만 지는" 패턴이 2회 연속 실측됐는데 시각 축이 없어 물을 수가 없었다 —
+        // 8/14 LIVE 15건이 전부 09:01~09:24에 몰려 −188,665원, 8/20 D LIVE 5건이 09:37~09:51에 몰려 −29,140원(평균 −2.05%)인 반면
+        // 같은 날 10시 이후 D 신호는 +6.86%/+3.10%/+2.92%였다. 구조적 열위인지 우연인지 판정하려면 bin별 net이 필요하다.
+        // alertTime이 이미 저장돼 있어 **소급 계산**된다(신규 태깅 불필요 = forward-only 제약 없음, 추가 조회 0).
+        // 경계 15/60/150/270분 → "개장 15분", "~10:00", "~11:30", "~13:30", "13:30~마감".
+        // ⚠️ 연속매매(09:00~15:30) 밖 값은 null로 버린다 — 장전 공시 경로 등이 "<15" bin에 섞이면 정작 보려는
+        //    '개장 직후' 구간이 오염된다(세션 가드상 드물지만 0은 아니다).
+        d.add(new NumDef("개장후경과분", o -> {
+            if (o.getAlertTime() == null) return null;
+            int min = o.getAlertTime().atZone(SEOUL).toLocalTime().toSecondOfDay() / 60 - 9 * 60;
+            return (min < 0 || min > 390) ? null : (double) min;
+        }, new double[]{15, 60, 150, 270}));
         return d;
     }
 
