@@ -106,6 +106,14 @@ public class FeatureMiningService {
         d.add(new NumDef("지수갭%", TradeOutcome::getEntryIndexGapPct, new double[]{0, 1, 2}));   // 지수 통째 갭업일 여부
         d.add(new NumDef("뉴스1h건수", o -> o.getEntryNewsCnt1h() == null ? null : o.getEntryNewsCnt1h().doubleValue(),
                 new double[]{1, 3}));
+        // 뉴스경과분(2026-08-21): 승자/패자 분석에서 <b>10개 전략 중 8개가 같은 방향</b>으로 갈렸다 —
+        // 승자의 최신 뉴스가 더 최근이다(E 1,153 vs 2,204 / G 2,005 vs 3,697 / A 1,168 vs 3,027 / F 1,934 vs 2,439 / J 3,053 vs 4,823).
+        // 전략별 조건이 아니라 <b>전 전략 공통</b>으로 나온 첫 신호라 bin별 net을 볼 가치가 있다.
+        // 첫 경계 60분은 FRESH_BAD_NEWS 가드의 fresh-news-window-minutes와 같은 기준(해석 정합).
+        // ⚠️ <b>대조군은 뉴스 태깅이 0%</b>(진입 시에만 종목당 1콜 lazy) → 이 축은 <b>진입군 랭킹 전용</b>이고
+        //    edgeVsControlPct는 구조적으로 null이다(커버리지 0%). 반사실 비교를 하려면 대조군 태깅이 선행돼야 한다.
+        d.add(new NumDef("뉴스경과분", o -> o.getEntryNewsAgeMin() == null ? null : o.getEntryNewsAgeMin().doubleValue(),
+                new double[]{60, 240, 720, 2880}));
         return d;
     }
 
