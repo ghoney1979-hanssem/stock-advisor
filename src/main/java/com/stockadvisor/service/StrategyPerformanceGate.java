@@ -86,6 +86,8 @@ public class StrategyPerformanceGate {
                                    @Value("${stockadvisor.trading.perf-gate.max-single-day-share-pct:80}") double maxSingleDaySharePct,
                                    // 최대기여일 제외 net(LOO) 요건 — 버킷 net이 단 하루로 설명되면 LIVE 차단. false=종전 동작.
                                    @Value("${stockadvisor.trading.perf-gate.loo-top-day:true}") boolean looTopDay,
+                                   // INVERSE 버킷을 전략 무관 단일 풀로 채점(아래 evaluateInverseRealized 참조). false=전략별.
+                                   @Value("${stockadvisor.trading.perf-gate.inverse-pooled:true}") boolean inversePooled,
                                    // 전략별 net 재검증 시작일 — 로직/임계 변경 시 구표본 제외("STRATEGY:yyyyMMdd,..."). 변경일 이후 표본만 채점.
                                    @Value("${stockadvisor.trading.perf-gate.strategy-since:}") String strategySinceCsv,
                                    // 부트스트랩 허용 전략(csv) — since 리셋 등으로 표본 미달이어도 축소사이징 실주문(재검증 중 완전정지 방지). 기본 빈값=fail-closed.
@@ -108,6 +110,7 @@ public class StrategyPerformanceGate {
         this.swingHorizon = swingHorizon;
         this.maxSingleDaySharePct = maxSingleDaySharePct;
         this.looTopDay = looTopDay;
+        this.inversePooled = inversePooled;
         this.strategySince = parseSince(strategySinceCsv);
         this.bootstrapStrategies = PolicyGate.parseCsv(bootstrapStrategiesCsv);
         this.refilters = GateRefilter.parse(refilterCsv);
@@ -119,6 +122,7 @@ public class StrategyPerformanceGate {
 
     private final double maxSingleDaySharePct;
     private final boolean looTopDay;
+    private final boolean inversePooled;
     /** 전략 → net 재검증 시작일(yyyyMMdd). 로직 변경 시 구표본 제외용. */
     private final java.util.Map<String, String> strategySince;
     /** since 리셋 후 표본 미달이어도 축소사이징 실주문 허용할 전략(재검증 다리). */
@@ -181,7 +185,11 @@ public class StrategyPerformanceGate {
         java.util.List<com.stockadvisor.domain.Order> rows = orderRepository
                 .findByModeAndSideAndClosed(com.stockadvisor.domain.TradingMode.LIVE,
                         com.stockadvisor.domain.OrderSide.BUY, true).stream()
-                .filter(o -> strategy.equals(o.getStrategy()))
+                // 전략 무관 단일 풀(2026-08-20): 인버스 매매의 손익은 어느 전략이 신호를 냈느냐가 아니라
+                // 공통 청산 로직(trading.inverse-exit)이 결정하는데, 버킷만 전략별로 쪼개져 있어 I가 실패로
+                // 닫혀도(8/20 net −0.52%, n=10) 나머지 10개 전략은 각자 "실현표본 0/10"이라 부트스트랩으로
+                // 열린 채 같은 매매를 계속 낼 수 있었다. 풀링하면 한 번 쌓인 인버스 실적이 전 경로에 반영된다.
+                .filter(o -> inversePooled || strategy.equals(o.getStrategy()))
                 .filter(o -> "INVERSE".equals(o.getMarket()))
                 .filter(o -> o.getOrderDate() != null && o.getOrderDate().compareTo(cutoff) >= 0)
                 .filter(o -> o.getRealizedPnl() != null)
@@ -202,20 +210,21 @@ public class StrategyPerformanceGate {
         if (!props.enabled()) {
             return new GateDecision(strategy, true, "게이트 비활성", n, avg, null, "INVERSE", false);
         }
+        String poolTag = inversePooled ? "·통합" : "";
         if (n >= minSamples) {
             if (avg < props.inverseMinNetAvgPct()) {
                 return new GateDecision(strategy, false,
-                        String.format("[INVERSE·실현손익] 성과 미달(net %.2f%% < 기준 %.2f%%, n=%d)", avg, props.inverseMinNetAvgPct(), n),
+                        String.format("[INVERSE·실현손익%s] 성과 미달(net %.2f%% < 기준 %.2f%%, n=%d)", poolTag, avg, props.inverseMinNetAvgPct(), n),
                         n, avg, null, "INVERSE", false);
             }
             return new GateDecision(strategy, true,
-                    String.format("[INVERSE·실현손익] 통과(net %.2f%% ≥ 기준 %.2f%%, n=%d)", avg, props.inverseMinNetAvgPct(), n),
+                    String.format("[INVERSE·실현손익%s] 통과(net %.2f%% ≥ 기준 %.2f%%, n=%d)", poolTag, avg, props.inverseMinNetAvgPct(), n),
                     n, avg, null, "INVERSE", false);
         }
         if (props.inverseBootstrapSizeMult() > 0) {
             return new GateDecision(strategy, true,
-                    String.format("[INVERSE·실현손익] 인버스 부트스트랩(실현표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)",
-                            n, minSamples, props.inverseBootstrapSizeMult()),
+                    String.format("[INVERSE·실현손익%s] 인버스 부트스트랩(실현표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)",
+                            poolTag, n, minSamples, props.inverseBootstrapSizeMult()),
                     n, avg, null, "INVERSE", true);
         }
         return new GateDecision(strategy, false,

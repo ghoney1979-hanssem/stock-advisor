@@ -13,6 +13,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -83,7 +84,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, false, "", "", "", "");   // 스윙 없음(전일국면 전략도 없음)
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, false, false, "", "", "", "");   // 스윙 없음(전일국면 전략도 없음)
     }
 
     // 스윙 전략 게이트(swingHorizon=nextClose)
@@ -95,7 +96,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0, false, "", "", "", "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "MEAN_REVERSION_C", "nextClose", 0.0, false, false, "", "", "", "");
     }
 
     /** trend + mom30 태깅 표본 — 국면+흐름 3차원 검증용. */
@@ -117,7 +118,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, false, "", "", "", "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, false, false, "", "", "", "");
     }
 
     @Test
@@ -479,7 +480,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, false, "", "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, false, false, "", "", "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -518,7 +519,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, false, "", "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, false, false, "", "", "", "");
         ExitMethodProvider methods = mock(ExitMethodProvider.class);
         when(methods.methodFor("INDEX_RELATIVE_D")).thenReturn(
                 new ExitStrategyService.BestExit("INDEX_RELATIVE_D", com.stockadvisor.domain.ExitMethodType.TRAILING, 3, 0, 800));
@@ -557,7 +558,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, false, "", "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, false, false, "", "", "", "");
         ExitMethodProvider methods = mock(ExitMethodProvider.class);
         when(methods.methodFor("MA_TREND_F")).thenReturn(
                 new ExitStrategyService.BestExit("MA_TREND_F", com.stockadvisor.domain.ExitMethodType.TIME, 60, 0, 800));
@@ -594,7 +595,7 @@ class StrategyPerformanceGateTest {
         StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 20, 0.0, "exit", false, false,
                 false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel, hold, sampleRepo,
-                List.of(), COST, "", "nextClose", 0.0, false, "", "", "", "");
+                List.of(), COST, "", "nextClose", 0.0, false, false, "", "", "", "");
 
         StrategyPerformanceGate.GateDecision d = g.evaluate("VOLUME_LEADING_B");
 
@@ -727,7 +728,7 @@ class StrategyPerformanceGateTest {
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
                 mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
-                COST, "", "nextClose", 0.0, false, "", "", "", "");
+                COST, "", "nextClose", 0.0, false, false, "", "", "", "");
 
         // ① 강세 버킷 net 0.4 → 열기바(0.3) 통과 → 강세 버킷만 오픈
         when(regimeSvc.trendOf(any())).thenReturn(MarketTrend.BULL);
@@ -789,7 +790,7 @@ class StrategyPerformanceGateTest {
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
                 mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
-                COST, "", "nextClose", 0.0, false, "", "", "", "OPENING_GAP_K");
+                COST, "", "nextClose", 0.0, false, false, "", "", "", "OPENING_GAP_K");
 
         // 표본은 전부 NEUTRAL 태그 — 전일 라벨(NEUTRAL) 버킷으로 잡혀야 5건이 매칭돼 통과
         StrategyPerformanceGate.GateDecision d = g.evaluate("OPENING_GAP_K", "KOSPI");
@@ -800,7 +801,7 @@ class StrategyPerformanceGateTest {
         // 미지정 전략은 종전대로 장중 라벨(BULL) 사용 → NEUTRAL 표본이 안 잡혀 표본부족
         StrategyPerformanceGate g2 = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
                 mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
-                COST, "", "nextClose", 0.0, false, "", "", "", "");
+                COST, "", "nextClose", 0.0, false, false, "", "", "", "");
         StrategyPerformanceGate.GateDecision d2 = g2.evaluate("OPENING_GAP_K", "KOSPI");
         assertThat(d2.regimeTrend()).isEqualTo("BULL");
         assertThat(d2.allowed()).isFalse();
@@ -824,7 +825,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, true, "", "", "", "");
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", 0.0, true, false, "", "", "", "");
     }
 
     @Test
@@ -871,6 +872,55 @@ class StrategyPerformanceGateTest {
 
         assertThat(d.allowed()).isTrue();
         assertThat(d.reason()).doesNotContain("최대기여일");
+    }
+
+    /** inversePooled=true 게이트 — INVERSE 버킷을 전략 무관 단일 풀로 채점. */
+    private StrategyPerformanceGate pooledInverseGate(StrategyPerformanceProperties p,
+                                                      List<com.stockadvisor.domain.Order> orders) {
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(List.of());
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(null);
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        com.stockadvisor.repository.OrderRepository orderRepo =
+                mock(com.stockadvisor.repository.OrderRepository.class);
+        when(orderRepo.findByModeAndSideAndClosed(any(), any(), anyBoolean())).thenReturn(orders);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
+                mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(), COST,
+                "", "nextClose", 0.0, false, true, "", "", "", "");
+        g.setOrderRepository(orderRepo);
+        return g;
+    }
+
+    /** 손실 인버스 실현 주문 1건(전략명 지정) — 매수 1,000원 × 10주에 손익 −20원 = net −0.2%. */
+    private com.stockadvisor.domain.Order inverseLoss(String strategy, String date) {
+        com.stockadvisor.domain.Order o = mock(com.stockadvisor.domain.Order.class);
+        when(o.getStrategy()).thenReturn(strategy);
+        when(o.getMarket()).thenReturn("INVERSE");
+        when(o.getOrderDate()).thenReturn(date);
+        when(o.getRealizedPnl()).thenReturn(-20L);
+        when(o.getAvgFillPrice()).thenReturn(1_000L);
+        when(o.getFilledQty()).thenReturn(10L);
+        return o;
+    }
+
+    @Test
+    void 인버스_버킷은_전략_무관_단일풀로_채점된다() {
+        // 2026-08-20: I가 실현 −0.52%(n=10)로 닫혔는데 다른 10개 전략은 각자 "실현표본 0/10"이라
+        // 부트스트랩으로 열린 채 같은 인버스 매매를 계속 낼 수 있었다. 풀링하면 I의 실적이 E에도 반영된다.
+        String today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul"))
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+        List<com.stockadvisor.domain.Order> orders = new ArrayList<>();
+        for (int i = 0; i < 10; i++) orders.add(inverseLoss("INVERSE_INDEX_I", today));
+
+        // E 자신의 인버스 실현표본은 0건이지만, 풀에 I의 10건(net −0.2%)이 있으므로 성과 미달로 차단
+        StrategyPerformanceGate.GateDecision d =
+                pooledInverseGate(props(true, 30, 0.3), orders).evaluate("BREAKOUT_E", "INVERSE");
+
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.samples()).isEqualTo(10);
+        assertThat(d.reason()).contains("실현손익·통합").contains("성과 미달");
     }
 
     @Test
@@ -930,7 +980,7 @@ class StrategyPerformanceGateTest {
         ExecutionCostModel costModel = mock(ExecutionCostModel.class);
         when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
         return new StrategyPerformanceGate(repo, p, regimeSvc, costModel, mock(StrategyHoldTimeProvider.class),
-                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, false,
+                mock(OutcomeSampleRepository.class), List.of(), COST, "", "nextClose", maxSingleDaySharePct, false, false,
                 sinceCsv, bootstrapCsv, refilterCsv, "");
     }
 

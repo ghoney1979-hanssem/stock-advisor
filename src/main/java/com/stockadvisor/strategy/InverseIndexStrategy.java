@@ -143,9 +143,9 @@ public class InverseIndexStrategy implements TradingStrategy {
     }
 
     // 당일 지수 등락률 고점 추적 — 지수코드별, 날짜 바뀌면 리셋. 관측 시점 기반(스캔 주기 호출로 충분).
-    // ⚠️ MarketRegimeService.dayHighChangeOf를 쓰지 않는다: 그쪽은 프록시 ETF(069500/229200) 등락률 기준인데
-    // 이 전략의 진입선은 실지수(fetchIndexChangeRate) 기준이라 스케일이 다르다 — 2026-08-20 실측으로 같은 시각
-    // 프록시 +4.1~6.6% vs 실지수 +1.7~2.3%였다. 서로 다른 소스로 (고점 − 현재)를 계산하면 항상 fade로 오판한다.
+    // 판정에 쓰는 chg(= fetchIndexChangeRate, 60s 캐시)를 그대로 누적하므로 추가 KIS 호출 0.
+    // MarketRegimeService.dayHighChangeOf도 같은 소스지만 private + 시장(KOSPI/KOSDAQ) 키라, 지수코드 키로
+    // 이미 손에 든 값을 누적하는 편이 자족적이다(가시성 확대 불필요). 두 추적기는 같은 값을 보므로 상충 없음.
     private final Map<String, double[]> dayHighChg = new ConcurrentHashMap<>();   // indexCode -> {epochDay, highPct}
 
     private double trackDayHigh(String indexCode, double chg) {
