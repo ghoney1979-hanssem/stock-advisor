@@ -99,6 +99,9 @@ public class SignalAdminController {
     // 유니버스 스냅샷 수집 현황 조회 — 필드주입(생성자 무churn).
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.UniverseSnapshotService universeSnapshotService;
+    // 유니버스 횡단면 분석 — 동일 패턴(생성자 무churn, 미주입 테스트 보호).
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.UniverseAnalysisService universeAnalysisService;
     private final SwingTrailAnalysisService swingTrailAnalysisService;
     private final SwingExitProvider swingExitProvider;
     private final MarketRegimeService marketRegimeService;
@@ -480,12 +483,35 @@ public class SignalAdminController {
 
     /**
      * 유니버스 스냅샷 수집 현황(Phase 1) — 일자·버킷별 행 수 + 사후 타깃 충족률.
-     * 분석(lift 테이블)은 표본 누적 후 Phase 2에서 별도 엔드포인트로.
+     * 분석(lift 테이블)은 {@code /universe-analysis}.
      */
     @GetMapping("/universe-snapshot-status")
     public Map<String, Object> universeSnapshotStatus() {
         return Map.of("config", universeSnapshotService.config(),
                 "collected", universeSnapshotService.describe());
+    }
+
+    /**
+     * 유니버스 횡단면 분석(Phase 2) — <b>P(승자|feature)</b>를 전체 base rate 대비 lift로.
+     *
+     * <p>다른 분석 엔드포인트는 전부 "거래량 급증 모집단" 안에서만 표본을 뽑으므로 스크리닝 자체를 검증할 수 없다.
+     * 이건 워치리스트 전 종목 스냅샷이 분모라 <b>급증 밖</b>까지 본다 — 신규 전략 발굴의 유일한 비편향 소스.</p>
+     *
+     * @param horizon m90(+90분) / close(당일종가, 기본) / nextClose(익일종가)
+     * @param since   snapDate 하한(yyyyMMdd) — 시간분할 검증용. 종가는 20260819부터 확정 종가라 그 이전은 편향
+     * @param until   snapDate 상한(yyyyMMdd)
+     */
+    @GetMapping("/universe-analysis")
+    public Object universeAnalysis(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "30") int lookbackDays,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "close") String horizon,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String market,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String snapTime,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "50") int minSamples,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String since,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String until) {
+        if (universeAnalysisService == null) return Map.of("error", "service unavailable");
+        return universeAnalysisService.analyze(lookbackDays, horizon, market, snapTime, minSamples, since, until);
     }
 
     /** 전략별 적응형 손절선 — 승자 MAE 기반 채택값 vs 고정 −7%(fail-closed). */
