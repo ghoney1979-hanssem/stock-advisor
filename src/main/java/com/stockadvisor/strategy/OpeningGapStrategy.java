@@ -6,6 +6,11 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 전략 K — 개장 갭 (순수 시초가, 섀도우, <b>거래량 무관</b>).
@@ -35,19 +40,30 @@ public class OpeningGapStrategy implements TradingStrategy {
     private final double minScore;     // 추천 점수 게이트
     private final LocalTime windowEnd; // 개장 창 종료(09:00~이 시각)
     private final double maxIndexGap;  // 지수 갭 상한%(이 이상 갭업한 날은 진입 보류). 0=비활성
+    private final Set<String> allowedRegimes;  // 진입 허용 전일국면(csv). 빈값=제약 없음
 
     public OpeningGapStrategy(@Value("${stockadvisor.signal.opening-gap-enabled:true}") boolean enabled,
                               @Value("${stockadvisor.signal.opening-gap-min-gap:2.0}") double minGap,
                               @Value("${stockadvisor.signal.opening-gap-max-gap:10.0}") double maxGap,
                               @Value("${stockadvisor.signal.opening-gap-min-score:40.0}") double minScore,
                               @Value("${stockadvisor.signal.opening-gap-window-end:09:30}") String windowEnd,
-                              @Value("${stockadvisor.signal.opening-gap-max-index-gap:0}") double maxIndexGap) {
+                              @Value("${stockadvisor.signal.opening-gap-max-index-gap:0}") double maxIndexGap,
+                              @Value("${stockadvisor.signal.opening-gap-allowed-regimes:BULL,NEUTRAL}") String allowedRegimes) {
         this.enabled = enabled;
         this.minGap = minGap;
         this.maxGap = maxGap;
         this.minScore = minScore;
         this.windowEnd = LocalTime.parse(windowEnd);
         this.maxIndexGap = maxIndexGap;
+        this.allowedRegimes = parseRegimes(allowedRegimes);
+    }
+
+    static Set<String> parseRegimes(String csv) {
+        if (csv == null || csv.isBlank()) return Set.of();
+        return Arrays.stream(csv.split(","))
+                .map(t -> t.trim().toUpperCase(Locale.ROOT))
+                .filter(t -> !t.isEmpty())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     private boolean inWindow() {
@@ -87,7 +103,8 @@ public class OpeningGapStrategy implements TradingStrategy {
         if (gap < minGap) return "NO_GAP";                    // 갭업 부족
         if (gap > maxGap) return "GAP_TOO_BIG";               // 과대갭(상한가 추격) 회피
         if (indexGapDay(ctx.indexGapPct(), maxIndexGap)) return "INDEX_GAP_DAY";  // 지수 통째 갭업일 제외
-        if ("BEAR".equals(ctx.entryTrend())) return "REGIME_BEAR";  // 약세장 갭업 제외
+        String regimeReject = regimeReject(ctx.entryTrend(), allowedRegimes);
+        if (regimeReject != null) return regimeReject;   // 허용 국면 밖(기본 약세장 제외)
         if (s.changeRate() < gap) return "FADING";            // 현재가<시가(갭 못 지킴)
         if (ctx.recScore() < minScore) return "SCORE";
         return null;                                          // 갭업 유지 + 비약세 → 개장 롱
@@ -104,6 +121,22 @@ public class OpeningGapStrategy implements TradingStrategy {
      * <p>지수 갭 미상(장전·휴장·조회실패)이면 false = 필터 미적용(degrade open — 데이터 실패로 매매를 막지 않음).
      * maxIndexGap ≤ 0이면 비활성.</p>
      */
+    /**
+     * 전일국면 허용 판정(순수) — 허용 목록 밖이면 {@code "REGIME_<국면>"}, 통과면 null.
+     *
+     * <p>v1은 {@code BEAR}만 하드코딩 제외였으나, 2026-08-21 `feature-mining` 국면 분해에서 <b>K는 국면에 따라
+     * 정반대</b>임이 드러나 csv 설정으로 전환했다 — 진입-대조군 edge가 <b>BULL +1.76%p(n=243) ↔ NEUTRAL −4.73%p(n=128)</b>.
+     * 즉 중립국면 K는 "고른 종목(−1.35%)이 거른 종목(+3.38%)보다 나쁜" 구간이라, 약세장과 같은 이유로 제외 대상이 된다.</p>
+     *
+     * <p>⚠️ <b>국면 미상(null)은 통과</b>(degrade open — 국면 산출 실패로 매매를 막지 않는다. 실측상 미상 표본은
+     * n=13 / +0.62%로 열위 근거도 없다). 허용 목록이 비면 제약 없음.</p>
+     */
+    static String regimeReject(String entryTrend, Set<String> allowed) {
+        if (allowed.isEmpty() || entryTrend == null) return null;
+        if (allowed.contains(entryTrend)) return null;
+        return "REGIME_" + entryTrend;   // REGIME_BEAR(기존 사유 통계 유지) / REGIME_NEUTRAL
+    }
+
     static boolean indexGapDay(Double indexGapPct, double maxIndexGap) {
         if (maxIndexGap <= 0 || indexGapPct == null) return false;
         return indexGapPct >= maxIndexGap;

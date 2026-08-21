@@ -142,6 +142,8 @@ stockadvisor:
     # 지수가 갭업하면 개별 갭업은 종목 촉매가 아니라 시장 갭의 반영 → 되돌림 시 종목선택 무관 동반 하락
     # (2026-08-14 실측: KOSPI +2.6%/KOSDAQ +1.6% 갭업일 K 7건 → 4건 손절선 직행, -120,050원). 0=비활성.
     opening-gap-max-index-gap: ${SIGNAL_OPENING_GAP_MAX_INDEX_GAP:1.5}
+    # 진입 허용 전일국면(csv). 기본 BULL,NEUTRAL=약세장만 제외(종전 동작). BULL만 두면 중립국면 K도 제외.
+    opening-gap-allowed-regimes: ${SIGNAL_OPENING_GAP_ALLOWED_REGIMES:BULL,NEUTRAL}
     # 대조군 집중: 검증된 승자(perf-gate 통과) 전략은 대조군 수집 중단(부하↓), 손실·미검증만 수집(진단 집중). 성과저하 시 자동 재개.
     control-focus-enabled: ${SIGNAL_CONTROL_FOCUS_ENABLED:true}
     mean-reversion-min-drop: ${SIGNAL_C_MIN_DROP:3.0}      # [C] 역추세: 당일 -3% 이상 하락

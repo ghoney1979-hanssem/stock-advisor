@@ -548,7 +548,11 @@ public class StrategyEvaluator {
                         || "MICRO_CAP".equals(reject)
                         // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
                         // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
-                        || "NOT_FADING".equals(reject));
+                        || "NOT_FADING".equals(reject)
+                        // REGIME_NEUTRAL(K 중립국면 제외, 2026-08-21)도 강제 기록 — K는 control-off라
+                        // 흔적이 없으면 "중립국면을 막은 게 옳았나"를 forward로 판정할 표본이 안 쌓인다.
+                        // (REGIME_BEAR은 종전대로 미기록 — 기존 사유 통계·부담을 그대로 둔다.)
+                        || "REGIME_NEUTRAL".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }
