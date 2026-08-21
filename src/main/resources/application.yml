@@ -159,6 +159,16 @@ stockadvisor:
     # [G/J] 동일 필터 — 반등 계열은 흐름↓에서 일관 열위(2026-08-21, lag30·60 양쪽): G 흐름↓ -0.90/-0.88 vs 흐름↑ -0.08/-0.05, J -0.90 vs -0.17/-0.15
     rsi-reversal-require-rising-flow: ${SIGNAL_G_REQUIRE_RISING_FLOW:false}
     value-reversal-require-rising-flow: ${SIGNAL_J_REQUIRE_RISING_FLOW:false}
+    # [L] 눌림 반전(2026-08-21 신설, 섀도우) — 기존 전략들이 사는 것의 거울상.
+    # 근거: 유니버스 lift(급증 -0.20%p / MA아래·저거래량 양수) + 거래량배수 단조 역방향 + B의 WEAK_VOLUME 대조군 + 전역 필터 3종.
+    reversal-enabled: ${SIGNAL_REVERSAL_ENABLED:true}
+    reversal-max-volume-ratio: ${SIGNAL_REVERSAL_MAX_VOLUME_RATIO:1.0}   # 이 배수 이상이면 '급증'이라 제외
+    reversal-min-pullback-pct: ${SIGNAL_REVERSAL_MIN_PULLBACK_PCT:3.0}   # 20일선 아래 최소 이격
+    reversal-max-pullback-pct: ${SIGNAL_REVERSAL_MAX_PULLBACK_PCT:10.0}  # 그 이상은 추세붕괴로 제외
+    reversal-max-ret5d-pct: ${SIGNAL_REVERSAL_MAX_RET5D_PCT:-5.0}        # 최근 5일 약세만
+    reversal-max-change-pct: ${SIGNAL_REVERSAL_MAX_CHANGE_PCT:2.0}       # 당일 급등 추격 방지
+    reversal-max-drop-pct: ${SIGNAL_REVERSAL_MAX_DROP_PCT:5.0}           # 당일 폭락(떨어지는 칼날) 제외
+    reversal-min-score: ${SIGNAL_REVERSAL_MIN_SCORE:40.0}
     # [E] 신고가 돌파 모멘텀 — 직전 N일 최고가를 거래량 급증과 함께 돌파하면 롱(강세 추격, 공격적). A~D의 역추세 편향과 반대 방향으로 다양성 부여
     breakout-lookback: ${SIGNAL_BREAKOUT_LOOKBACK:20}      # [E] 직전 20거래일 최고가(오늘 제외) 초과면 돌파
     breakout-min-score: ${SIGNAL_BREAKOUT_MIN_SCORE:40.0}  # [E] 진입 최소 추천 점수(건전성)
