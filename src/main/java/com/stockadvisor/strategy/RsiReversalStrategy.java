@@ -18,9 +18,12 @@ import org.springframework.stereotype.Component;
 public class RsiReversalStrategy implements TradingStrategy {
 
     private final boolean enabled;
+    private final boolean requireRisingFlow;   // 진입시점 지수흐름(mom30)<0이면 보류. 기본 off
 
-    public RsiReversalStrategy(@Value("${stockadvisor.signal.rsi-reversal-enabled:true}") boolean enabled) {
+    public RsiReversalStrategy(@Value("${stockadvisor.signal.rsi-reversal-enabled:true}") boolean enabled,
+                               @Value("${stockadvisor.signal.rsi-reversal-require-rising-flow:false}") boolean requireRisingFlow) {
         this.enabled = enabled;
+        this.requireRisingFlow = requireRisingFlow;
     }
 
     @Override
@@ -43,7 +46,24 @@ public class RsiReversalStrategy implements TradingStrategy {
         if (!enabled) return "DISABLED";
         if (ctx.inverse()) return "INVERSE";                 // 인버스는 전용 전략(I) — 중복 방지
         if (!ctx.signal().rsiCrossUp()) return "NO_RSI_CROSS";
+        // 흐름↓ 스킵(마지막 게이트) — G 조건을 다 통과한 후보만 흐름으로 최종 판정.
+        // 그래야 FLOW_DOWN 대조군 = "G 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
+        String flow = flowReject(ctx.indexMom30(), requireRisingFlow);
+        if (flow != null) return flow;
         return null;                                         // 건전성·유동성은 상위 evaluateStock에서 필터됨
+    }
+
+    /**
+     * 흐름↓ 스킵 판정(순수) — 진입 시점 지수 mom30 &lt; 0이면 {@code "FLOW_DOWN"}.
+     *
+     * <p>근거(2026-08-21 `flow-analysis`, <b>lag30·lag60 양쪽 일관</b>): G는 흐름↓ net <b>−0.90%(n=217)/−0.88%(n=236)</b> vs 흐름↑ <b>−0.08%/−0.05%</b>(n=404/389) — 반등 계열이라 지수가 내리는 중의 과매도 반등은 "떨어지는 칼날"이 된다.</p>
+     *
+     * <p>⚠️ <b>흐름 미산출(null)이면 미적용</b>(degrade open — 개장 ~30분·조회실패. D의 기존 흐름 가드와 동일 원칙).
+     * ⚠️ 흐름 방향의 유불리는 <b>전략마다 반대</b>다(B는 딥바잉이라 흐름↓ 우위) — 전역 게이트로 만들지 말 것.</p>
+     */
+    static String flowReject(Double indexMom30, boolean require) {
+        if (!require || indexMom30 == null) return null;
+        return indexMom30 < 0.0 ? "FLOW_DOWN" : null;
     }
 
     @Override

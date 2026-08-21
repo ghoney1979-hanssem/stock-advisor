@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RsiReversalStrategyTest {
 
-    private final RsiReversalStrategy strategy = new RsiReversalStrategy(true);
+    private final RsiReversalStrategy strategy = new RsiReversalStrategy(true, false);
 
     private SignalResult signal(boolean rsiCrossUp) {
         return new SignalResult(1.0, 0.0, 10_000, 1_000_000, false, false, false, 0, false, rsiCrossUp, false);
@@ -42,5 +42,24 @@ class RsiReversalStrategyTest {
         assertThat(strategy.tracksControl()).isFalse();
         assertThat(strategy.preScreen("005930", signal(true))).isTrue();
         assertThat(strategy.preScreen("005930", signal(false))).isFalse();
+    }
+
+    @Test
+    void 흐름필터_켜면_흐름하락에서_FLOW_DOWN_이고_미산출은_통과() {
+        RsiReversalStrategy flowOn = new RsiReversalStrategy(true, true);
+        // 흐름↓(mom30 < 0) → 보류
+        assertThat(flowOn.rejectReason(flowCtx(-0.5))).isEqualTo("FLOW_DOWN");
+        // 흐름↑(mom30 ≥ 0) → 진입
+        assertThat(flowOn.rejectReason(flowCtx(0.0))).isNull();
+        // 흐름 미산출(개장 ~30분·조회실패) → degrade open(필터 미적용)
+        assertThat(flowOn.rejectReason(flowCtx(null))).isNull();
+        // 기본(off)이면 흐름↓여도 종전대로 진입
+        assertThat(strategy.rejectReason(flowCtx(-0.5))).isNull();
+    }
+
+    /** 다른 조건은 모두 통과시키고 흐름만 바꾼 ctx(흐름이 마지막 게이트임을 확인). */
+    private StrategyContext flowCtx(Double indexMom30) {
+        return new StrategyContext("005930", signal(true), 50, RecommendationType.HOLD,
+                null, false, false, null, indexMom30);
     }
 }

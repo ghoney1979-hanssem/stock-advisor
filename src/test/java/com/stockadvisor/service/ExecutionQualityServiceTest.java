@@ -133,4 +133,53 @@ class ExecutionQualityServiceTest {
         assertThat(q.avgShadowNetPct()).isCloseTo(6.82, within(0.01));   // +7% − 0.18
         assertThat(q.avgGapPct()).isLessThan(0);
     }
+
+    @Test
+    void 비TIME_청산방식이면_exit마크가_아니라_종가로_대조한다() {
+        // 게이트가 2026-08-18에 받은 보정을 여기도 적용(2026-08-21). D처럼 TRAILING을 쓰는 전략은
+        // 20분 마크에서 실제로 거의 팔지 않으므로, 그 마크와 대조하면 집행 드래그가 과소평가된다.
+        // 실: 매수 10,000×10, 손익 −200 → realNet −0.2%
+        // 섀도우: 신호 10,000, exit마크(45분) 10,050(+0.5%) / 종가 9,800(−2.0%)
+        //   → TIME이면 shadowNet +0.32%(gap −0.52%p), 비TIME이면 종가 기준 −2.18%(gap +1.98%p)
+        Order buy = closedBuy("INDEX_RELATIVE_D", "005930", "20260709", 10_000, 10, -200);
+        when(orderRepo.findByModeAndSideAndClosed(TradingMode.LIVE, OrderSide.BUY, true)).thenReturn(List.of(buy));
+        TradeOutcome sh = shadow("INDEX_RELATIVE_D", "005930", "20260709", 10_000);
+        sh.setPriceClose(9_800L);   // 실제 엔티티(모의 아님) — setter 사용
+        when(outcomeRepo.findByStrategyAndStockCodeAndAlertDate("INDEX_RELATIVE_D", "005930", "20260709"))
+                .thenReturn(List.of(sh));
+        OutcomeSample m = mark(45, 10_050);
+        lenient().when(sampleRepo.findByStrategyAndMarkMinutesBetween(anyString(), anyInt(), anyInt())).thenReturn(List.of(m));
+
+        ExitMethodProvider trailing = mock(ExitMethodProvider.class);
+        when(trailing.methodFor("INDEX_RELATIVE_D"))
+                .thenReturn(new ExitStrategyService.BestExit("INDEX_RELATIVE_D",
+                        com.stockadvisor.domain.ExitMethodType.TRAILING, 3, 0, 800));
+
+        ExecutionQualityService svc = svc();
+        svc.setExitMethodProvider(trailing);
+        ExecutionQualityService.StrategyExecQuality q = svc.analyze().get(0);
+
+        assertThat(q.trades().get(0).horizon()).isEqualTo("close·트레일링청산");   // 45분 마크가 아니라 종가
+        assertThat(q.avgShadowNetPct()).isCloseTo(-2.18, within(0.01));
+        assertThat(q.avgGapPct()).isCloseTo(1.98, within(0.01));
+    }
+
+    @Test
+    void TIME_청산방식이면_종전대로_exit마크로_대조한다() {
+        Order buy = closedBuy("VOLUME_LEADING_B", "005930", "20260709", 10_000, 10, 1_000);
+        when(orderRepo.findByModeAndSideAndClosed(TradingMode.LIVE, OrderSide.BUY, true)).thenReturn(List.of(buy));
+        when(outcomeRepo.findByStrategyAndStockCodeAndAlertDate("VOLUME_LEADING_B", "005930", "20260709"))
+                .thenReturn(List.of(shadow("VOLUME_LEADING_B", "005930", "20260709", 10_000)));
+        OutcomeSample m = mark(45, 10_050);
+        when(sampleRepo.findByStrategyAndMarkMinutesBetween(anyString(), anyInt(), anyInt())).thenReturn(List.of(m));
+
+        ExitMethodProvider time = mock(ExitMethodProvider.class);
+        when(time.methodFor("VOLUME_LEADING_B"))
+                .thenReturn(new ExitStrategyService.BestExit("VOLUME_LEADING_B",
+                        com.stockadvisor.domain.ExitMethodType.TIME, 45, 0, 800));
+
+        ExecutionQualityService svc = svc();
+        svc.setExitMethodProvider(time);
+        assertThat(svc.analyze().get(0).trades().get(0).horizon()).isEqualTo("45분");
+    }
 }

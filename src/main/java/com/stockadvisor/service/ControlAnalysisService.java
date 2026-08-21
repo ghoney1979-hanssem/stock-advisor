@@ -25,6 +25,11 @@ public class ControlAnalysisService {
 
     private static final int MIN_SAMPLES = 10;   // 진단 신뢰 최소 진입 표본
     private static final int EXIT_MARK_TOLERANCE_MIN = 30;   // perf-gate와 동일 — 권장 청산마크 ±근접 대체
+    // 단일일 클러스터 가드(2026-08-21) — feature-mining·strategy-gate가 이미 쓰던 문턱과 동일하게 맞춤.
+    // 계기: C가 verdict "OK / net +4.71%(n=195)"로 유일한 흑자 전략으로 보고됐는데, 실제로는 195건 중
+    // 134건(69%)이 2026-06-26 하루(그날 +7.52%)였다 — 같은 데이터가 엔드포인트에 따라 정반대 결론을 냈다.
+    private static final double MAX_DAY_SHARE_PCT = 80.0;
+    private static final int MIN_DISTINCT_DAYS = 3;
 
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final ExecutionCostModel executionCostModel;
@@ -47,7 +52,16 @@ public class ControlAnalysisService {
         this.swingStrategies = PolicyGate.parseCsv(swingCsv);
     }
 
-    public record Stat(String group, int samples, Double avgNetReturnPct, Double winRatePct) {}
+    /**
+     * @param distinctDays     이 그룹 표본이 걸친 <b>서로 다른 진입일</b> 수 — 1이면 사실상 이벤트 1개(독립표본 아님)
+     * @param maxDaySharePct   단일 거래일이 차지하는 최대 비중(%) — 건수 기준 클러스터 진단
+     * @param topDay           net 합 기여가 가장 큰 거래일(yyyyMMdd)
+     * @param netExTopDayPct   그 하루를 뺀 나머지 net 평균(%) — 표본이 그 날뿐이면 null
+     * @param clustered        건수 편중(share/일수) <b>또는</b> LOO에서 net 부호가 뒤집히면 true
+     */
+    public record Stat(String group, int samples, Double avgNetReturnPct, Double winRatePct,
+                       int distinctDays, Double maxDaySharePct, String topDay, Double netExTopDayPct,
+                       boolean clustered) {}
     public record StrategyControl(String strategy, String horizon, Stat entered, List<Stat> rejectedByReason,
                                   String hint) {}
 
@@ -66,8 +80,8 @@ public class ControlAnalysisService {
     public List<StrategyControl> analyze(String horizon) {
         boolean exitMode = "exit".equals(horizon);
         Map<String, Map<Long, Long>> exitByStrat = exitMode ? new java.util.HashMap<>() : null;   // 전략별 (outcomeId→권장마크가)
-        // strategy -> "ENTERED" 또는 "REJECT:사유" -> [sumNet, wins, count]
-        Map<String, Map<String, double[]>> agg = new TreeMap<>();
+        // strategy -> "ENTERED" 또는 "REJECT:사유" -> 누적(net합·승수·건수 + 진입일별 건수)
+        Map<String, Map<String, Acc>> agg = new TreeMap<>();
         for (TradeOutcome o : tradeOutcomeRepository.findAll()) {
             Long price = exitMode
                     ? exitByStrat.computeIfAbsent(o.getStrategy(), this::buildExitPrices).get(o.getId())
@@ -77,9 +91,9 @@ public class ControlAnalysisService {
                     : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());
             double net = (double) (price - o.getBuyPrice()) / o.getBuyPrice() * 100 - roundTripCostPct - slip;
             String group = o.isControl() ? "REJECT:" + (o.getRejectReason() == null ? "기타" : o.getRejectReason()) : "ENTERED";
-            double[] a = agg.computeIfAbsent(o.getStrategy(), k -> new LinkedHashMap<>())
-                    .computeIfAbsent(group, k -> new double[3]);
-            a[0] += net; if (net > 0) a[1] += 1; a[2] += 1;
+            agg.computeIfAbsent(o.getStrategy(), k -> new LinkedHashMap<>())
+                    .computeIfAbsent(group, k -> new Acc())
+                    .add(net, o.getAlertDate());
         }
 
         List<StrategyControl> result = new ArrayList<>();
@@ -129,7 +143,8 @@ public class ControlAnalysisService {
             case "LOSER_MISCALIBRATED" -> 0;
             case "LOSER_REGIME" -> 1;
             case "UNDERSAMPLED" -> 2;
-            default -> 3;   // OK
+            case "CLUSTERED" -> 3;
+            default -> 4;   // OK
         };
     }
 
@@ -141,6 +156,19 @@ public class ControlAnalysisService {
                     "UNDERSAMPLED", String.format("표본 부족(%d<%d) — 수집·관측 지속", n, MIN_SAMPLES), List.of());
         }
         double net = e.avgNetReturnPct();
+        // 단일일 클러스터 — net을 판정에 쓰지 않는다(이벤트 1개를 표본 n개로 오인하는 것 방지).
+        // 수치는 그대로 실어 보내되 verdict으로 "믿지 말 것"을 표시한다.
+        if (e.clustered()) {
+            String loo = e.netExTopDayPct() == null ? "판정불가"
+                    : String.format("%+.2f%%", e.netExTopDayPct());
+            return new Diagnosis(sc.strategy(), sc.horizon(), net, e.samples(), "CLUSTERED",
+                    String.format("⚠️ 단일일 의존(net %+.2f%%, n%d, 거래일 %d, 최대비중 %.0f%%) — "
+                                    + "최대기여일(%s) 제외 net %s로 결론이 뒤집힘. 판정 보류",
+                            net, e.samples(), e.distinctDays(),
+                            e.maxDaySharePct() == null ? 0 : e.maxDaySharePct(),
+                            e.topDay() == null ? "-" : e.topDay(), loo),
+                    List.of());
+        }
         if (net >= 0) {
             return new Diagnosis(sc.strategy(), sc.horizon(), net, e.samples(),
                     "OK", String.format("정상(net %+.2f%%, n%d) — 유지", net, e.samples()), List.of());
@@ -148,8 +176,9 @@ public class ControlAnalysisService {
         // 손실 — 진입분보다 나은 탈락사유(필터 재검토 후보) 수집
         List<String> better = new ArrayList<>();
         for (Stat r : sc.rejectedByReason()) {
-            if (r.samples() >= MIN_SAMPLES && r.avgNetReturnPct() != null && r.avgNetReturnPct() > net) {
-                better.add(String.format("%s(%+.2f%%, n%d)", r.group(), r.avgNetReturnPct(), r.samples()));
+            // 클러스터된 탈락 버킷은 비교 대상에서 제외 — "하루 이벤트가 만든 net"으로 필터를 흔들지 않는다.
+            if (r.samples() >= MIN_SAMPLES && !r.clustered() && r.avgNetReturnPct() != null && r.avgNetReturnPct() > net) {
+                better.add(String.format("%s(%+.2f%%, n%d, %d일)", r.group(), r.avgNetReturnPct(), r.samples(), r.distinctDays()));
             }
         }
         if (!better.isEmpty()) {
@@ -167,10 +196,55 @@ public class ControlAnalysisService {
         return m;
     }
 
-    private Stat toStat(String group, double[] a) {
-        if (a == null || a[2] == 0) return new Stat(group, 0, null, null);
-        int n = (int) a[2];
-        return new Stat(group, n, round2(a[0] / n), round2(100.0 * a[1] / n));
+    private Stat toStat(String group, Acc a) {
+        if (a == null || a.count == 0) return new Stat(group, 0, null, null, 0, null, null, null, false);
+        int n = a.count;
+        int days = a.cntByDay.size();
+        double net = a.sumNet / n;
+        double share = 100.0 * a.cntByDay.values().stream().mapToInt(c -> c[0]).max().orElse(0) / n;
+
+        // LOO — net 합 기여 최대인 하루를 빼고 다시 평균. 남는 표본이 없으면 판정 불가(null).
+        String topDay = a.topDay();
+        Double netExTop = null;
+        if (topDay != null && days > 1) {
+            int restN = n - a.cntByDay.get(topDay)[0];
+            if (restN > 0) netExTop = (a.sumNet - a.sumByDay.get(topDay)[0]) / restN;
+        }
+
+        // 클러스터 판정: ① 건수 편중(비중/거래일 수) ② LOO에서 net 부호가 뒤집힘.
+        // ②가 실전에서 결정적이다 — C는 ①(69% < 80%, 25거래일)을 통과하지만 06-26 하루를 빼면
+        // net이 +4.71% → −1.46%로 부호가 뒤집힌다(=그 흑자는 전부 그 하루였다).
+        boolean clustered = share > MAX_DAY_SHARE_PCT
+                || days < MIN_DISTINCT_DAYS
+                || (netExTop != null && Math.signum(net) != Math.signum(netExTop));
+
+        return new Stat(group, n, round2(net), round2(100.0 * a.wins / n),
+                days, round2(share), topDay, round2(netExTop), clustered);
+    }
+
+    /** 그룹별 누적기 — net 합·승수·건수 + <b>진입일별 건수</b>(클러스터 판정용). */
+    private static final class Acc {
+        double sumNet;
+        int wins;
+        int count;
+        final Map<String, int[]> cntByDay = new LinkedHashMap<>();      // 일자 -> [건수]
+        final Map<String, double[]> sumByDay = new LinkedHashMap<>();   // 일자 -> [net 합]
+
+        void add(double net, String alertDate) {
+            sumNet += net;
+            if (net > 0) wins++;
+            count++;
+            if (alertDate == null) return;
+            cntByDay.computeIfAbsent(alertDate, k -> new int[1])[0]++;
+            sumByDay.computeIfAbsent(alertDate, k -> new double[1])[0] += net;
+        }
+
+        /** net 합 기여 절대값이 가장 큰 거래일 — 그 하루를 빼고도 결론이 유지되는지 보기 위함(perf-gate의 LOO와 동일 사상). */
+        String topDay() {
+            return sumByDay.entrySet().stream()
+                    .max(java.util.Comparator.comparingDouble(e -> Math.abs(e.getValue()[0])))
+                    .map(Map.Entry::getKey).orElse(null);
+        }
     }
 
     /** 진입분보다 평균수익이 높은 탈락 사유가 있으면 "완화 검토" 힌트. */
@@ -215,5 +289,10 @@ public class ControlAnalysisService {
 
     private Double round2(double v) {
         return Math.round(v * 100.0) / 100.0;
+    }
+
+    /** null 허용 오버로드 — LOO net은 표본이 한 날뿐이면 null(판정 불가). */
+    private Double round2(Double v) {
+        return v == null ? null : round2((double) v);
     }
 }

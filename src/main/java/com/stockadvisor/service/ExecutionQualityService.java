@@ -52,6 +52,12 @@ public class ExecutionQualityService {
     private final String swingHorizon;       // 스윙 검증 horizon(기본 nextClose)
     private final Set<String> swingStrategies;
 
+    // 채택 청산방식 조회(2026-08-21) — 게이트(StrategyPerformanceGate)가 2026-08-18에 받은 것과 같은 보정.
+    // 필드주입이라 생성자 무churn, 미주입 테스트는 종전 동작(exit 마크).
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ExitMethodProvider exitMethodProvider;
+    void setExitMethodProvider(ExitMethodProvider p) { this.exitMethodProvider = p; }   // 테스트용
+
     public ExecutionQualityService(OrderRepository orderRepository,
                                    TradeOutcomeRepository tradeOutcomeRepository,
                                    OutcomeSampleRepository outcomeSampleRepository,
@@ -94,10 +100,27 @@ public class ExecutionQualityService {
         ordersByStrat.forEach((strategy, orders) -> {
             boolean swing = swingStrategies.contains(strategy);
             String horizon = swing ? swingHorizon : perfGateHorizon;
+            // ⚠️ exit horizon은 '보유시간 마크'라 채택 청산방식이 TIME일 때만 실제 청산 시점과 일치한다.
+            // 게이트는 2026-08-18에 이 보정을 받았는데 여기만 빠져 있었다(2026-08-21 수정) — 그래서 D처럼
+            // TRAILING을 쓰는 전략은 "실제로 거의 팔지 않는 20분 마크"의 섀도우와 실집행을 비교해
+            // gap이 +0.18%p("괴리 미미")로 보고됐다. 실제 라이브 D 보유는 1~10분과 350~374분의 양봉 분포였고,
+            // 같은 날 실현은 섀도우(20분) 대비 1.5~2%p 열위였다 → 집행 드래그를 구조적으로 과소평가한 셈.
+            String methodTag = "";
+            if ("exit".equals(horizon) && exitMethodProvider != null) {
+                try {
+                    com.stockadvisor.domain.ExitMethodType type = exitMethodProvider.methodFor(strategy).type();
+                    if (type != com.stockadvisor.domain.ExitMethodType.TIME) {
+                        horizon = "close";
+                        methodTag = "·" + type.korean() + "청산";
+                    }
+                } catch (Exception ignored) {
+                    // 청산방식 조회 실패 → 종전(보유시간 마크)으로 degrade
+                }
+            }
             boolean exitMode = "exit".equals(horizon);
             int exitMark = exitMode ? holdTimeProvider.holdMinutes(strategy) : -1;
             Map<Long, Long> exitPriceByOutcome = exitMode ? buildExitPrices(strategy, exitMark) : Map.of();
-            String horizonLabel = exitMode ? exitMark + "분" : horizon;
+            String horizonLabel = (exitMode ? exitMark + "분" : horizon) + methodTag;
 
             List<TradeCompare> trades = new ArrayList<>();
             for (Order o : orders) {

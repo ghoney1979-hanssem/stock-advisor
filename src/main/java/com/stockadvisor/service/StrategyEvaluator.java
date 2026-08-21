@@ -552,7 +552,10 @@ public class StrategyEvaluator {
                         // REGIME_NEUTRAL(K 중립국면 제외, 2026-08-21)도 강제 기록 — K는 control-off라
                         // 흔적이 없으면 "중립국면을 막은 게 옳았나"를 forward로 판정할 표본이 안 쌓인다.
                         // (REGIME_BEAR은 종전대로 미기록 — 기존 사유 통계·부담을 그대로 둔다.)
-                        || "REGIME_NEUTRAL".equals(reject));
+                        || "REGIME_NEUTRAL".equals(reject)
+                        // FLOW_DOWN(G/J 흐름↓ 스킵, 2026-08-21)도 강제 기록 — 둘 다 control-off라
+                        // 흔적이 없으면 "흐름↓를 막은 게 옳았나"를 forward 검증할 수 없다. D는 tracksControl=true라 원래 기록됨.
+                        || "FLOW_DOWN".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }

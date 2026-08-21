@@ -77,7 +77,11 @@ public class SwingExitProvider {
                 continue;
             }
             SwingTrailAnalysisService.MethodStat best = sa.methods().stream()
+                    // ⚠️ 단일일 의존(최대기여일 제외 시 부호 반전) 우위는 채택하지 않는다(2026-08-21) —
+                    // C의 익일보유 net +4.71%가 06-26 하루에서 나온 값이었고, 트레일 비교도 같은 표본 위에 있었다.
+                    // 이 조건은 기존 필터에 AND로만 얹히므로 게이트는 닫히는 방향으로만 움직인다(fail-closed).
                     .filter(m -> m.trailPct() > 0 && m.triggered() >= minTriggered && m.avgNetPct() != null
+                            && !m.clustered()
                             && m.avgNetPct() > hold.avgNetPct() + marginPct)
                     .max((x, y) -> Double.compare(x.avgNetPct(), y.avgNetPct()))
                     .orElse(null);

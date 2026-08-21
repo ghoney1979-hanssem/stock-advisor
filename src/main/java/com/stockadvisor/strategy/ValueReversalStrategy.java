@@ -17,9 +17,12 @@ import org.springframework.stereotype.Component;
 public class ValueReversalStrategy implements TradingStrategy {
 
     private final boolean enabled;
+    private final boolean requireRisingFlow;   // 진입시점 지수흐름(mom30)<0이면 보류. 기본 off
 
-    public ValueReversalStrategy(@Value("${stockadvisor.signal.value-reversal-enabled:true}") boolean enabled) {
+    public ValueReversalStrategy(@Value("${stockadvisor.signal.value-reversal-enabled:true}") boolean enabled,
+                                 @Value("${stockadvisor.signal.value-reversal-require-rising-flow:false}") boolean requireRisingFlow) {
         this.enabled = enabled;
+        this.requireRisingFlow = requireRisingFlow;
     }
 
     @Override
@@ -43,7 +46,24 @@ public class ValueReversalStrategy implements TradingStrategy {
         if (ctx.inverse()) return "INVERSE";                     // 인버스는 전용 전략(I)
         if (!ctx.signal().rsiCrossUp()) return "NO_RSI_CROSS";   // 반등 촉매(RSI 과매도 상향돌파) 없음
         if (!ctx.undervalued()) return "NOT_UNDERVALUED";        // 업종 대비 저평가 아님 → 가치 축 미충족
+        // 흐름↓ 스킵(마지막 게이트) — J 조건을 다 통과한 후보만 흐름으로 최종 판정.
+        // 그래야 FLOW_DOWN 대조군 = "J 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
+        String flow = flowReject(ctx.indexMom30(), requireRisingFlow);
+        if (flow != null) return flow;
         return null;
+    }
+
+    /**
+     * 흐름↓ 스킵 판정(순수) — 진입 시점 지수 mom30 &lt; 0이면 {@code "FLOW_DOWN"}.
+     *
+     * <p>근거(2026-08-21 `flow-analysis`, <b>lag30·lag60 양쪽 일관</b>): J는 흐름↓ net <b>−0.90%(n=79)</b> vs 흐름↑ <b>−0.17%/−0.15%</b>(n=156/155) — G와 같은 반등 계열이라 방향도 같다. ⚠️ 흐름↓ 표본이 79로 작다(G의 217/236보다 약한 근거).</p>
+     *
+     * <p>⚠️ <b>흐름 미산출(null)이면 미적용</b>(degrade open — 개장 ~30분·조회실패. D의 기존 흐름 가드와 동일 원칙).
+     * ⚠️ 흐름 방향의 유불리는 <b>전략마다 반대</b>다(B는 딥바잉이라 흐름↓ 우위) — 전역 게이트로 만들지 말 것.</p>
+     */
+    static String flowReject(Double indexMom30, boolean require) {
+        if (!require || indexMom30 == null) return null;
+        return indexMom30 < 0.0 ? "FLOW_DOWN" : null;
     }
 
     @Override
