@@ -223,10 +223,15 @@ public class SignalAdminController {
     }
 
     /** 멀티데이 청산 트리거 시뮬 — 일봉 경로에 보유D+N/트레일%/MA이탈/손절 시뮬해 전략별 net 최대 방식(Phase 2). */
+    /**
+     * @param fullPathsOnly true면 D+15까지 마크가 다 찬 표본만(고정 코호트) — horizon마다 표본이 바뀌는
+     *                      코호트 편향 없이 "보유기간만"의 효과를 본다. 대가는 표본 급감이라 기본(false)과 함께 볼 것.
+     */
     @GetMapping("/multiday-exit-comparison")
-    public Object multidayExitComparison() {
+    public Object multidayExitComparison(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean fullPathsOnly) {
         if (multidayExitAnalysisService == null) return java.util.Map.of("error", "service unavailable");
-        return multidayExitAnalysisService.compare();
+        return multidayExitAnalysisService.compare(fullPathsOnly);
     }
 
     /**

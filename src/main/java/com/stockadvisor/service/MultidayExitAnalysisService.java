@@ -56,16 +56,30 @@ public class MultidayExitAnalysisService {
                                          double recommendedNetPct) { }
 
     public List<MultidayExitComparison> compare() {
+        return compare(false);
+    }
+
+    /**
+     * @param fullPathsOnly 완전 경로(D+15까지 마크가 다 찬 표본)만으로 비교 — <b>고정 코호트</b>.
+     *
+     * <p><b>왜 필요한가</b>(2026-08-21): 기본 비교는 horizon마다 표본이 다르다 — D는 D+1 n=890 → D+5 n=775 →
+     * D+10 n=533으로 줄어든다. 뒤쪽 horizon일수록 "그만큼 오래 전에 진입한 것"만 남으므로 <b>서로 다른 시장 국면의
+     * 부분집합</b>을 비교하는 셈이고, "보유를 늘릴수록 좋아진다"는 결론이 코호트 교체의 산물일 수 있다
+     * (실측: D가 D+10 +3.16%인데 D+15는 −2.26%로 급락 — 표본이 533→174로 바뀐다). 같은 표본으로 고정하면
+     * 그 교란 없이 <b>보유기간만</b>의 효과를 본다. 대가는 표본 급감(D 898→174)이라 둘을 함께 볼 것.</p>
+     */
+    public List<MultidayExitComparison> compare(boolean fullPathsOnly) {
         List<MultidayExitComparison> out = new ArrayList<>();
         for (String s : STRATEGIES) {
-            out.add(compareStrategy(s));
+            out.add(compareStrategy(s, fullPathsOnly));
         }
         return out;
     }
 
-    private MultidayExitComparison compareStrategy(String strategy) {
-        List<Path> paths = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy));
-        int fullPaths = (int) paths.stream().filter(Path::complete).count();
+    private MultidayExitComparison compareStrategy(String strategy, boolean fullPathsOnly) {
+        List<Path> all = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy));
+        int fullPaths = (int) all.stream().filter(Path::complete).count();
+        List<Path> paths = fullPathsOnly ? all.stream().filter(Path::complete).toList() : all;
 
         List<MethodResult> methods = new ArrayList<>();
         for (int n : HOLD_DAYS) methods.add(agg("보유 D+" + n, n, paths, p -> holdToDay(p, n, roundTripPct)));
@@ -79,7 +93,7 @@ public class MultidayExitAnalysisService {
                 .max((a, b) -> Double.compare(a.avgNetPct(), b.avgNetPct()))
                 .orElse(null);
 
-        return new MultidayExitComparison(strategy, paths.size(), fullPaths, methods,
+        return new MultidayExitComparison(strategy, all.size(), fullPaths, methods,
                 best == null ? "표본부족" : best.method(),
                 best == null ? 0.0 : best.avgNetPct());
     }

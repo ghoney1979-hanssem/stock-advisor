@@ -5,11 +5,14 @@ import com.stockadvisor.repository.OutcomeDailyMarkRepository;
 import com.stockadvisor.service.MultidayExitAnalysisService.Path;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** 멀티데이 청산 트리거 시뮬 순수 코어 단위 테스트(Phase 2). cost=0으로 gross 검증. */
 class MultidayExitAnalysisServiceTest {
@@ -79,5 +82,56 @@ class MultidayExitAnalysisServiceTest {
         assertThat(paths.get(0).days()).containsExactly(0, 1, 2, 3);   // 정렬됨
         assertThat(paths.get(0).complete()).isTrue();                  // D3=maxHold 도달
         assertThat(paths.get(1).complete()).isFalse();                 // D1까지 → 미완주
+    }
+
+    @Test
+    void fullPathsOnly는_고정코호트로_비교해_코호트교체_착시를_제거한다() {
+        // 실측 D의 구조 재현: 완주 표본(D+15까지)은 계속 손실인데, 짧은 horizon에만 존재하는 미완주 표본이
+        // 크게 이겨서 "오래 들수록 좋아진다"로 보이는 상황. 고정 코호트로 보면 그 착시가 사라져야 한다.
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        long id = 1;
+        for (int i = 0; i < 25; i++) {            // 완주 20개: D+1 −1%, D+3 −3% (계속 손실)
+            marks.addAll(fullPath(id++, new long[]{10_000, 9_900, 9_800, 9_700}));
+        }
+        for (int i = 0; i < 25; i++) {            // 미완주: D+1 +6%까지만 존재(D+3 없음)
+            marks.add(new OutcomeDailyMark(id, "INDEX_RELATIVE_D", 10_000, 0, "20260801", 10_000));
+            marks.add(new OutcomeDailyMark(id, "INDEX_RELATIVE_D", 10_000, 1, "20260804", 10_600));
+            id++;
+        }
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 20);
+
+        MultidayExitAnalysisService.MultidayExitComparison mixed = d(svc.compare(false));
+        MultidayExitAnalysisService.MultidayExitComparison fixed = d(svc.compare(true));
+
+        // 혼합 코호트: D+1이 미완주 승자에 끌려 올라감(50건 평균 +2.5%)
+        assertThat(hold(mixed, 1).avgNetPct()).isCloseTo(2.5, within(1e-6));
+        assertThat(hold(mixed, 1).samples()).isEqualTo(50);
+        // 고정 코호트: 완주 25건만 → D+1은 그대로 −1%
+        assertThat(hold(fixed, 1).avgNetPct()).isCloseTo(-1.0, within(1e-6));
+        assertThat(hold(fixed, 1).samples()).isEqualTo(25);
+        // outcomes/fullPaths는 두 모드에서 동일하게 '전체 기준'으로 보고돼 표본 축소를 알아볼 수 있다
+        assertThat(fixed.outcomes()).isEqualTo(50);
+        assertThat(fixed.fullPaths()).isEqualTo(25);
+    }
+
+    private List<OutcomeDailyMark> fullPath(long id, long[] closes) {
+        List<OutcomeDailyMark> out = new ArrayList<>();
+        String[] dates = {"20260801", "20260804", "20260805", "20260806"};
+        for (int d = 0; d < closes.length; d++) {
+            out.add(new OutcomeDailyMark(id, "INDEX_RELATIVE_D", 10_000, d, dates[d], closes[d]));
+        }
+        return out;
+    }
+
+    private MultidayExitAnalysisService.MultidayExitComparison d(
+            List<MultidayExitAnalysisService.MultidayExitComparison> rows) {
+        return rows.stream().filter(r -> r.strategy().equals("INDEX_RELATIVE_D")).findFirst().orElseThrow();
+    }
+
+    private MultidayExitAnalysisService.MethodResult hold(
+            MultidayExitAnalysisService.MultidayExitComparison c, int days) {
+        return c.methods().stream().filter(m -> m.method().equals("보유 D+" + days)).findFirst().orElseThrow();
     }
 }
