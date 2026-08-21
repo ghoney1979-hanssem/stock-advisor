@@ -141,4 +141,40 @@ class FeatureMiningServiceTest {
         assertThat(b.controlNetPct()).isNull();                   // 편향 부분집합 → 계산 안 함
         assertThat(b.edgeVsControlPct()).isNull();
     }
+
+    @Test
+    void since_until로_진입일_구간을_잘라_시간분할_검증이_가능하다() {
+        // 전반(06-02~06-03)은 +2%, 후반(06-05~06-06)은 -2% — 전 구간을 합치면 0%로 보여
+        // "엣지 없음"이 되지만, 갈라 보면 부호가 뒤집히는 불안정 pocket임이 드러난다.
+        List<TradeOutcome> rows = new ArrayList<>();
+        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? "20260602" : "20260603", i, 2.0));
+        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? "20260605" : "20260606", 50 + i, -2.0));
+        when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
+
+        assertThat(net(svc().mine(90, "close", null, null, 20, 80.0, false))).isCloseTo(0.0, within(1e-6));
+        // 전반만
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, null, "20260603")))
+                .isCloseTo(2.0, within(1e-6));
+        // 후반만
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, "20260605", null)))
+                .isCloseTo(-2.0, within(1e-6));
+    }
+
+    @Test
+    void since가_주어지면_lookbackDays_cutoff보다_우선한다() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        for (int i = 0; i < 12; i++) rows.add(vr(10, "20260602", i, 1.0));
+        when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
+
+        FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 10, 80.0, false, "20260601", null);
+        assertThat(r.since()).isEqualTo("20260601");   // cutoff가 since로 대체돼 응답에 노출
+        assertThat(r.until()).isNull();
+    }
+
+    /** 거래량배수 8~15 bucket의 진입 net(테스트 전용 축약). */
+    private double net(FeatureMiningService.MiningReport r) {
+        return r.features().stream().filter(f -> f.feature().equals("거래량배수")).findFirst().orElseThrow()
+                .buckets().stream().filter(b -> b.range().equals("8~15")).findFirst().orElseThrow()
+                .netAvgPct();
+    }
 }

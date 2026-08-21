@@ -239,9 +239,12 @@ public class SignalAdminController {
             @org.springframework.web.bind.annotation.RequestParam(required = false) String regime,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "20") int minSamples,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "80") double maxDayShare,
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeControl) {
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeControl,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String since,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String until) {
         if (featureMiningService == null) return java.util.Map.of("error", "service unavailable");
-        return featureMiningService.mine(lookbackDays, horizon, market, regime, minSamples, maxDayShare, includeControl);
+        return featureMiningService.mine(lookbackDays, horizon, market, regime, minSamples, maxDayShare,
+                includeControl, since, until);
     }
 
     /** 장중흐름 분석 — 전략별 진입시 지수흐름(mom lag) 부호별 net·승률(exit-horizon)·국면분리·what-if. lag=30|60. */

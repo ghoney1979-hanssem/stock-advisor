@@ -81,7 +81,9 @@ public class FeatureMiningService {
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
+    /** @param since/until 진입일 구간(yyyyMMdd, 포함). 시간분할 검증용 — 전·후반 부호가 갈리면 그 pocket은 채택 금지. */
     public record MiningReport(int rows, int lookbackDays, String horizon, String market, String regime, int minSamples,
+                               String since, String until,
                                double maxDaySharePct, List<Bucket> highlights, List<Bucket> avoid,
                                List<FeatureMining> features) {}
 
@@ -141,11 +143,31 @@ public class FeatureMiningService {
 
     public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
                              double maxDaySharePct, boolean includeControl) {
-        String cutoff = LocalDate.now(SEOUL).minusDays(lookbackDays).format(YYYYMMDD);
+        return mine(lookbackDays, horizon, market, regime, minSamples, maxDaySharePct, includeControl, null, null);
+    }
+
+    /**
+     * @param since 진입일 하한(yyyyMMdd, 포함). null이면 lookbackDays 기준 cutoff.
+     * @param until 진입일 상한(yyyyMMdd, 포함). null이면 제한 없음.
+     *
+     * <p><b>왜 필요한가</b>(2026-08-21 발굴 세션): pocket 후보를 전·후반으로 갈라 부호가 유지되는지 보는 게
+     * 다중검정 허수를 거르는 가장 실용적인 방법인데, 이 파라미터가 없어 매번 raw SQL로 내려가야 했다.
+     * 발굴 필터에 "시간분할 부호 일치"를 넣으려면 이게 전제다.</p>
+     */
+    public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
+                             double maxDaySharePct, boolean includeControl, String since, String until) {
+        String cutoff = (since != null && !since.isBlank())
+                ? since
+                : LocalDate.now(SEOUL).minusDays(lookbackDays).format(YYYYMMDD);
         List<TradeOutcome> entered = new ArrayList<>();
         List<TradeOutcome> control = new ArrayList<>();   // 미진입 후보(반사실 비교용) — includeControl일 때만
         for (TradeOutcome o : tradeOutcomeRepository.findByAlertDateGreaterThanEqual(cutoff)) {
             if (o.getBuyPrice() <= 0) continue;
+            // 구간 필터는 저장소 쿼리(하한)와 별개로 여기서도 확인 — 저장소 구현에 의존하지 않게(상한은 여기서만).
+            if (o.getAlertDate() != null) {
+                if (o.getAlertDate().compareTo(cutoff) < 0) continue;
+                if (until != null && !until.isBlank() && o.getAlertDate().compareTo(until) > 0) continue;
+            }
             if (market != null && !market.isBlank() && !market.equals(o.getEntryMarket())) continue;
             if (regime != null && !regime.isBlank() && !regime.equals(o.getEntryMarketTrend())) continue;
             if (o.isControl()) { if (includeControl) control.add(o); } else entered.add(o);
@@ -195,7 +217,7 @@ public class FeatureMiningService {
                 .sorted(Comparator.comparingDouble(Bucket::netAvgPct)).limit(10).toList();
 
         return new MiningReport(rows.size(), lookbackDays, horizon == null ? "close" : horizon, market, regime,
-                minSamples, maxDaySharePct, highlights, avoid, features);
+                minSamples, cutoff, until, maxDaySharePct, highlights, avoid, features);
     }
 
     private FeatureMining mineFeature(String feature, List<TradeOutcome> entered, List<TradeOutcome> control,
