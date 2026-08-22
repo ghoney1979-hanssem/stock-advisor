@@ -7,6 +7,7 @@ import com.stockadvisor.domain.OrderSide;
 import com.stockadvisor.market.dto.KisAskingPriceResponse;
 import com.stockadvisor.market.dto.KisBalanceResponse;
 import com.stockadvisor.market.dto.KisCcldResponse;
+import com.stockadvisor.market.dto.KisInvestorResponse;
 import com.stockadvisor.market.dto.KisDailyPriceResponse;
 import com.stockadvisor.market.dto.KisCcnlResponse;
 import com.stockadvisor.market.dto.KisNewsResponse;
@@ -130,6 +131,22 @@ public class KisApiClient {
                     + (response == null ? "응답 없음" : response.message()));
         }
         return response;
+    }
+
+    /**
+     * 종목별 투자자매매동향(FHKST01010900) — 일별 개인·외국인·기관 순매수. <b>1콜에 최근 30거래일치</b>.
+     * 소급 태깅(`InvestorFlowBacktagService`)이 종목당 1콜로 그 종목의 모든 진입일을 덮는 근거.
+     * 실패/무효면 null(호출측이 skip — 소급은 매매 경로가 아니라 실패해도 무해).
+     */
+    public KisInvestorResponse fetchInvestorDaily(String stockCode) {
+        KisInvestorResponse response = get(
+                uriBuilder -> uriBuilder
+                        .path("/uapi/domestic-stock/v1/quotations/inquire-investor")
+                        .queryParam("FID_COND_MRKT_DIV_CODE", "J")
+                        .queryParam("FID_INPUT_ISCD", stockCode)
+                        .build(),
+                "FHKST01010900", KisInvestorResponse.class, stockCode);
+        return (response == null || !response.isSuccess()) ? null : response;
     }
 
     /**

@@ -28,6 +28,7 @@ import com.stockadvisor.service.ExecutionQualityService;
 import com.stockadvisor.service.BacktestService;
 import com.stockadvisor.service.RegimeBacktagService;
 import com.stockadvisor.service.FlowBacktagService;
+import com.stockadvisor.service.InvestorFlowBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
 import com.stockadvisor.service.OrderCancelService;
@@ -115,6 +116,7 @@ public class SignalAdminController {
     private final BacktestService backtestService;
     private final RegimeBacktagService regimeBacktagService;
     private final FlowBacktagService flowBacktagService;
+    private final InvestorFlowBacktagService investorFlowBacktagService;
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -155,6 +157,7 @@ public class SignalAdminController {
                                  BacktestService backtestService,
                                  RegimeBacktagService regimeBacktagService,
                                  FlowBacktagService flowBacktagService,
+                                 InvestorFlowBacktagService investorFlowBacktagService,
                                  FlowAnalysisService flowAnalysisService,
                                  MaeAnalysisService maeAnalysisService,
                                  MarketOpenNotifier marketOpenNotifier,
@@ -194,6 +197,7 @@ public class SignalAdminController {
         this.backtestService = backtestService;
         this.regimeBacktagService = regimeBacktagService;
         this.flowBacktagService = flowBacktagService;
+        this.investorFlowBacktagService = investorFlowBacktagService;
         this.flowAnalysisService = flowAnalysisService;
         this.maeAnalysisService = maeAnalysisService;
         this.marketOpenNotifier = marketOpenNotifier;
@@ -205,6 +209,18 @@ public class SignalAdminController {
     @PostMapping("/backfill-regime-tags")
     public RegimeBacktagService.BacktagResult backfillRegimeTags() {
         return regimeBacktagService.backfill();
+    }
+
+    /**
+     * 외국인·기관 수급(순매수 비중) 소급 태깅 — 종목당 1콜로 그 종목의 모든 과거 진입일(대조군 포함)을 채운다.
+     *
+     * <p>⚠️ KIS 이력이 ~30거래일이라 <b>창이 매일 뒤로 밀린다</b> — 오래된 표본을 원하면 미루지 말 것.
+     * 재실행 안전(이미 태깅된 종목은 조회조차 하지 않는다).</p>
+     */
+    @PostMapping("/backfill-investor-flow")
+    public InvestorFlowBacktagService.BacktagReport backfillInvestorFlow(
+            @RequestParam(required = false) Integer lookbackDays) {
+        return investorFlowBacktagService.backfill(lookbackDays);
     }
 
     /** 장중흐름(mom30/60) 소급 태깅 — 저장된 entry_market_change로 각 날 지수경로 재구성·보간(근사, mom10 제외). */

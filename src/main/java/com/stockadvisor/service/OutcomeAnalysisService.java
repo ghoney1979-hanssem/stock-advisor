@@ -93,6 +93,9 @@ public class OutcomeAnalysisService {
             // ⚠️ 평균 비교는 왜도에 약하다(뉴스경과분에서 이미 데인 함정) → 판정은 feature-mining의 bin별 net으로 할 것.
             numeric.add(feature("호가불균형1%", wins, losses, TradeOutcome::getEntryObi1));
             numeric.add(feature("호가불균형5%", wins, losses, TradeOutcome::getEntryObi5));
+            // 수급(직전 거래일 확정 순매수 비중) — 소급 태깅이라 과거 표본에도 붙는다.
+            numeric.add(feature("외국인순매수%", wins, losses, TradeOutcome::getEntryFrgnNtbyRatio));
+            numeric.add(feature("기관순매수%", wins, losses, TradeOutcome::getEntryOrgnNtbyRatio));
             numeric.add(feature("종목갭%", wins, losses, TradeOutcome::getEntryGapPct));         // K 갭 상한 튜닝 근거
             numeric.add(feature("지수갭%", wins, losses, TradeOutcome::getEntryIndexGapPct));    // "지수 통째 갭업일"이 승패를 가르나
             numeric.add(feature("거래량배수", wins, losses, TradeOutcome::getEntryVolumeRatio));

@@ -111,6 +111,17 @@ public class FeatureMiningService {
         //    두 축을 함께 두는 건 다중검정 비용이지만, forward-only라 지금 안 모으면 몇 주를 잃는다(수집≠검정).
         d.add(new NumDef("호가불균형1%", TradeOutcome::getEntryObi1, new double[]{-30, 0, 30}));
         d.add(new NumDef("호가불균형5%", TradeOutcome::getEntryObi5, new double[]{-30, 0, 30}));
+        // 수급(2026-08-22): 직전 거래일 외국인·기관 순매수 비중%(순매수/거래량). 가설은
+        // "수급이 뒷받침된 급등은 유지되고 개인 물량만의 급등은 되돌려진다".
+        // ⚠️ 이 축만 **소급 태깅**돼 40일 표본에 즉시 붙는다(다른 축은 forward-only) — 대조군도 채워져 edge가 나온다.
+        // ⚠️ 기준일이 진입일 '직전'이라 look-ahead가 없다. 당일 수급을 쓰면 그 자체가 미래 정보다.
+        d.add(new NumDef("외국인순매수%", TradeOutcome::getEntryFrgnNtbyRatio, new double[]{-2, 0, 2}));
+        d.add(new NumDef("기관순매수%", TradeOutcome::getEntryOrgnNtbyRatio, new double[]{-2, 0, 2}));
+        // 합산 축 — 컬럼 추가 없이 저장값 두 개로 파생(외국인·기관이 같은 방향일 때가 진짜 수급 신호라는 가설).
+        d.add(new NumDef("수급합%", o -> {
+            Double f = o.getEntryFrgnNtbyRatio(), g = o.getEntryOrgnNtbyRatio();
+            return (f == null || g == null) ? null : f + g;
+        }, new double[]{-3, 0, 3}));
         d.add(new NumDef("지수mom30", TradeOutcome::getEntryIndexMom30, new double[]{0}));
         d.add(new NumDef("종목갭%", TradeOutcome::getEntryGapPct, new double[]{2, 4, 7}));        // K 갭 구간별 성과
         d.add(new NumDef("지수갭%", TradeOutcome::getEntryIndexGapPct, new double[]{0, 1, 2}));   // 지수 통째 갭업일 여부

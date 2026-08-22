@@ -134,6 +134,18 @@ public class TradeOutcome {
     @Column(name = "entry_obi5")
     private Double entryObi5;              // 상위 5호가 누적 불균형% — 깊이(안정적, **판정용 주지표**)
 
+    // ── 수급(외국인·기관 순매수 비중, 2026-08-22) ──
+    // 순매수 수량 / 그날 거래량 × 100. 절대 수량은 종목 크기에 지배돼 feature가 못 된다(삼성전자 150만주 vs 소형주 1만주).
+    // ⚠️ **진입일 '직전' 거래일 확정치**다 — 진입일 당일 행은 장 마감까지의 수급이라 진입 시점엔 없던 정보(look-ahead).
+    // ⚠️ 이 축만 **소급 태깅이 된다**(KIS가 1콜에 30거래일치를 준다) — 뉴스·체결강도·호가불균형은 전부 forward-only였다.
+    //    그래서 `InvestorFlowBacktagService`가 기존 표본(대조군 포함)을 한 번에 채우고, 판정이 수집을 기다리지 않는다.
+    @Column(name = "entry_frgn_ntby_ratio")
+    private Double entryFrgnNtbyRatio;     // 외국인 순매수 비중%(양수=순매수)
+    @Column(name = "entry_orgn_ntby_ratio")
+    private Double entryOrgnNtbyRatio;     // 기관 순매수 비중%
+    @Column(name = "entry_ntby_basis_date", length = 8)
+    private String entryNtbyBasisDate;     // 실제 기준 거래일 — 소급 정합성 확인용(진입일보다 반드시 앞서야 한다)
+
     @Column(name = "entry_market_breadth_pct") private Double entryMarketBreadthPct; // 해당 시장(KOSPI/KOSDAQ) 상승비율%
     // 스윙 트레일링 검증(C) — 보유 중 고점(>매수) 대비 3/5/7% 되돌림 첫 도달가. 미도달=null(→익일종가 청산으로 간주).
     @Column(name = "trail3_price") private Long trail3Price;
@@ -202,6 +214,12 @@ public class TradeOutcome {
     public void setEntryOrderBookImbalance(Double obi1, Double obi5) {
         this.entryObi1 = obi1;
         this.entryObi5 = obi5;
+    }
+    /** 수급(직전 거래일 확정 순매수 비중) 태깅 — 소급/라이브 공통. */
+    public void setEntryInvestorFlow(Double frgnRatioPct, Double orgnRatioPct, String basisDate) {
+        this.entryFrgnNtbyRatio = frgnRatioPct;
+        this.entryOrgnNtbyRatio = orgnRatioPct;
+        this.entryNtbyBasisDate = basisDate;
     }
     public void setEntryIntradayFlow(Double mom10Pct, Double mom30Pct, Double mom60Pct) {
         this.entryIndexMom10 = mom10Pct;
