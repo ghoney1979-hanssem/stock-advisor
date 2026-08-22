@@ -110,7 +110,7 @@ public class TradeOutcome {
     @Column(name = "entry_gap_pct")       private Double entryGapPct;            // 종목 당일 갭%((시가−전일종가)/전일종가)
     @Column(name = "entry_index_gap_pct") private Double entryIndexGapPct;       // 해당 시장 지수 당일 갭% — "지수 통째 갭업일"이었나
     // 시장 폭(breadth) — 진입 시점(직전 스캔) 상승종목 비율%. 지수(수준)·mom(흐름)과 다른 "참여 넓이" 축.
-    @Column(name = "entry_breadth_pct")        private Double entryBreadthPct;
+    @Column(name = "entry_breadth_pct")        private Double entryBreadthPct;        // 전체 워치리스트 상승비율%
 
     /** 진입 시점 최근 1시간 뉴스 건수(KIS 종목뉴스) — 뉴스 촉매 여부 검증용(forward-only). */
     @Column(name = "entry_news_cnt_1h")
@@ -122,7 +122,18 @@ public class TradeOutcome {
 
     /** 진입 시점 당일 체결강도(%, 매수체결/매도체결×100 — >100 매수 우위). 뉴스와 같은 측정-먼저 feature. */
     @Column(name = "entry_exec_strength")
-    private Double entryExecStrength;      // 전체 워치리스트 상승비율%
+    private Double entryExecStrength;
+
+    // ── 호가 불균형(order book imbalance, 2026-08-22) ──
+    // (매수잔량−매도잔량)/(매수잔량+매도잔량)×100. 체결강도가 '이미 체결된 것'의 압력이라면 이건 '아직 안 체결된 대기 물량'의 압력이라
+    // 서로 다른 축이다. 단기(30~90분) 예측력이 문헌에 문서화된 지표라 가설이 선행하는 몇 안 되는 후보.
+    // ⚠️ 수집 지점이 StrategyEvaluator의 슬리피지 조회(볼륨게이트 통과 후보 전원)라 **대조군도 함께 태깅**된다 —
+    //    뉴스 축이 진입군에만 붙어 edgeVsControl이 구조적으로 null이던 문제를 처음부터 피한다. 추가 KIS 호출 0.
+    @Column(name = "entry_obi1")
+    private Double entryObi1;              // 최우선 1호가 불균형% — 즉시 압력(반응 빠름·노이즈 큼)
+    @Column(name = "entry_obi5")
+    private Double entryObi5;              // 상위 5호가 누적 불균형% — 깊이(안정적, **판정용 주지표**)
+
     @Column(name = "entry_market_breadth_pct") private Double entryMarketBreadthPct; // 해당 시장(KOSPI/KOSDAQ) 상승비율%
     // 스윙 트레일링 검증(C) — 보유 중 고점(>매수) 대비 3/5/7% 되돌림 첫 도달가. 미도달=null(→익일종가 청산으로 간주).
     @Column(name = "trail3_price") private Long trail3Price;
@@ -184,6 +195,14 @@ public class TradeOutcome {
         this.alertTime = Instant.now();
     }
     public void setEntrySlippagePct(Double pct) { this.entrySlippagePct = pct; }
+    /**
+     * 호가 불균형 기록 — 슬리피지와 같은 호가 응답에서 나오므로 늘 함께 태깅된다(추가 조회 0).
+     * 한쪽 사다리가 비어 계산 불가면 null 그대로 저장(0=균형과 구분).
+     */
+    public void setEntryOrderBookImbalance(Double obi1, Double obi5) {
+        this.entryObi1 = obi1;
+        this.entryObi5 = obi5;
+    }
     public void setEntryIntradayFlow(Double mom10Pct, Double mom30Pct, Double mom60Pct) {
         this.entryIndexMom10 = mom10Pct;
         this.entryIndexMom30 = mom30Pct;

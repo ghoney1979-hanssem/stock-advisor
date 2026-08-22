@@ -452,16 +452,28 @@ public class SignalAdminController {
         return kisApiClient.fetchNewsTitles(stockCode);
     }
 
+    /** 실측 호가 — 스프레드/슬리피지 + 호가 불균형(진입 태깅 entry_obi1/obi5와 같은 계산) 검증용. */
     @GetMapping("/spread")
     public Map<String, Object> spread(@RequestParam String stockCode) {
-        KisApiClient.Spread sp = kisApiClient.fetchAskingPrice(stockCode);
+        KisApiClient.OrderBook ob = kisApiClient.fetchOrderBook(stockCode);
+        KisApiClient.Spread sp = ob == null ? null : ob.spread();
         if (sp == null) {
             return Map.of("stockCode", stockCode, "available", false);
         }
         Double slip = executionCostModel.roundTripSlippagePctFromSpread(sp.bestAsk(), sp.bestBid());
-        return Map.of("stockCode", stockCode, "available", true,
-                "bestAsk", sp.bestAsk(), "bestBid", sp.bestBid(),
-                "roundTripSlippagePct", slip == null ? "n/a" : slip);
+        Double obi1 = ob.imbalancePct(1);
+        Double obi5 = ob.imbalancePct(5);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("stockCode", stockCode);
+        out.put("available", true);
+        out.put("bestAsk", sp.bestAsk());
+        out.put("bestBid", sp.bestBid());
+        out.put("roundTripSlippagePct", slip == null ? "n/a" : slip);
+        out.put("obi1Pct", obi1 == null ? "n/a" : obi1);       // + = 매수 대기물량 우위
+        out.put("obi5Pct", obi5 == null ? "n/a" : obi5);
+        out.put("askLevels", ob.asks().size());
+        out.put("bidLevels", ob.bids().size());
+        return out;
     }
 
     /**

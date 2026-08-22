@@ -301,13 +301,49 @@ public class KisApiClient {
     /** 호가 한 단계(가격·잔량). */
     public record Level(long price, long qty) {}
 
-    /** 매도 10호가(가격↑ 순, 잔량 포함) + 최우선 매수호가. */
-    public record OrderBook(long bestBid, java.util.List<Level> asks) {
+    /**
+     * 매도 10호가(가격↑ 순) + 매수 10호가(가격↓ 순), 각 잔량 포함. bestBid는 매수 최우선호가(bids 비었을 때도 유효).
+     * ⚠️ 2인자 생성자는 호환용(bids 미수집) — 기존 호출/테스트 무churn.
+     */
+    public record OrderBook(long bestBid, java.util.List<Level> asks, java.util.List<Level> bids) {
+        public OrderBook(long bestBid, java.util.List<Level> asks) { this(bestBid, asks, java.util.List.of()); }
+
         public long bestAsk() { return asks.isEmpty() ? 0 : asks.get(0).price(); }
+
+        /** 실측 스프레드(1호가). 호가가 무효(교차·결측)면 null → 호출측 tick 추정 fallback. */
+        public Spread spread() {
+            long ask = bestAsk();
+            if (ask <= 0 || bestBid <= 0 || ask < bestBid) return null;
+            return new Spread(ask, bestBid);
+        }
+
+        /**
+         * 호가 불균형(order book imbalance) — 상위 {@code levels}단계 잔량 기준
+         * <b>(매수잔량 − 매도잔량) / (매수잔량 + 매도잔량) × 100</b>. 범위 −100(매도 일방) ~ +100(매수 일방).
+         *
+         * <p>순수 계산이라 KIS 없이 테스트된다. 한쪽 사다리가 아예 비었으면(장전·거래정지) null —
+         * 0(균형)으로 오해되지 않게 결측을 분명히 구분한다. 요청 단계가 수집분보다 많으면 있는 만큼만 합산한다.</p>
+         *
+         * <p>⚠️ 스냅샷 지표다 — 체결 직전 취소가 잦은 종목은 실제 압력과 다를 수 있다(측정 단계 수용).</p>
+         */
+        public Double imbalancePct(int levels) {
+            if (levels <= 0 || asks.isEmpty() || bids.isEmpty()) return null;
+            long askQty = sumQty(asks, levels);
+            long bidQty = sumQty(bids, levels);
+            long total = askQty + bidQty;
+            if (total <= 0) return null;
+            return (double) (bidQty - askQty) / total * 100;
+        }
+
+        private static long sumQty(java.util.List<Level> levels, int n) {
+            long sum = 0;
+            for (int i = 0; i < Math.min(n, levels.size()); i++) sum += levels.get(i).qty();
+            return sum;
+        }
     }
 
     /**
-     * 매도 10호가(가격+잔량) + 최우선 매수호가 조회. 캐시 미사용(호가는 실시간). 실패/무효면 null.
+     * 매도·매수 각 10호가(가격+잔량) 조회. 캐시 미사용(호가는 실시간). 실패/무효면 null.
      */
     public OrderBook fetchOrderBook(String stockCode) {
         KisAskingPriceResponse r = get(
@@ -319,16 +355,21 @@ public class KisApiClient {
                 TR_ID_ASKING_PRICE, KisAskingPriceResponse.class, stockCode);
         if (r == null || !r.isSuccess() || r.output() == null) return null;
         long bid = parseLongSafe(r.output().bidp1());
-        String[] prices = r.output().askPrices();
-        String[] qtys = r.output().askQtys();
-        java.util.List<Level> asks = new java.util.ArrayList<>();
+        java.util.List<Level> asks = toLevels(r.output().askPrices(), r.output().askQtys());   // 가격↑(askp1 최우선) 순 그대로
+        java.util.List<Level> bids = toLevels(r.output().bidPrices(), r.output().bidQtys());   // 가격↓(bidp1 최우선) 순 그대로
+        if (asks.isEmpty() || bid <= 0) return null;
+        return new OrderBook(bid, asks, bids);
+    }
+
+    /** 호가 사다리(가격·잔량 문자열 배열) → Level 목록. 결측·0은 건너뛴다. */
+    private java.util.List<Level> toLevels(String[] prices, String[] qtys) {
+        java.util.List<Level> levels = new java.util.ArrayList<>();
         for (int i = 0; i < prices.length; i++) {
             long p = parseLongSafe(prices[i]);
             long q = parseLongSafe(qtys[i]);
-            if (p > 0 && q > 0) asks.add(new Level(p, q));   // 가격↑(askp1 최우선) 순 그대로
+            if (p > 0 && q > 0) levels.add(new Level(p, q));
         }
-        if (asks.isEmpty() || bid <= 0) return null;
-        return new OrderBook(bid, asks);
+        return levels;
     }
 
     /**
@@ -336,10 +377,7 @@ public class KisApiClient {
      */
     public Spread fetchAskingPrice(String stockCode) {
         OrderBook ob = fetchOrderBook(stockCode);
-        if (ob == null) return null;
-        long ask = ob.bestAsk();
-        if (ask <= 0 || ob.bestBid() <= 0 || ask < ob.bestBid()) return null;
-        return new Spread(ask, ob.bestBid());
+        return ob == null ? null : ob.spread();
     }
 
     /**

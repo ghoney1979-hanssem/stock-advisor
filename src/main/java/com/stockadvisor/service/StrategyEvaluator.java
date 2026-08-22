@@ -356,10 +356,19 @@ public class StrategyEvaluator {
         //    개장 전 시세(누적거래량 0)를 전 종목 캐싱해, 09:00~09:40 전 종목이 거래대금 0으로 걸러지던 버그.
         long turnoverKrw = executionCostModel.turnoverKrw(signal.todayVolume(), signal.closePrice());
         Double entrySlippagePct = null;
+        Double obi1 = null, obi5 = null;
         try {
-            KisApiClient.Spread sp = kisApiClient.fetchAskingPrice(stockCode);
-            if (sp != null) entrySlippagePct = executionCostModel.roundTripSlippagePctFromSpread(sp.bestAsk(), sp.bestBid());
-        } catch (Exception ignore) { /* 호가 조회 실패 → tick fallback */ }
+            // ⚠️ fetchAskingPrice가 아니라 fetchOrderBook — 같은 1콜에서 스프레드와 호가 불균형을 함께 얻는다.
+            //    이 자리는 볼륨게이트 통과 후보 '전원'이 지나므로 대조군까지 태깅돼, 뉴스 축이 겪은
+            //    "대조군 커버리지 0% → edgeVsControl 구조적 null"을 처음부터 피한다(추가 KIS 호출 0).
+            KisApiClient.OrderBook ob = kisApiClient.fetchOrderBook(stockCode);
+            if (ob != null) {
+                KisApiClient.Spread sp = ob.spread();
+                if (sp != null) entrySlippagePct = executionCostModel.roundTripSlippagePctFromSpread(sp.bestAsk(), sp.bestBid());
+                obi1 = ob.imbalancePct(1);
+                obi5 = ob.imbalancePct(5);
+            }
+        } catch (Exception ignore) { /* 호가 조회 실패 → tick fallback + 불균형 미태깅 */ }
         if (entrySlippagePct == null) {
             entrySlippagePct = executionCostModel.estimateRoundTripSlippagePct(signal.closePrice());
         }
@@ -581,6 +590,7 @@ public class StrategyEvaluator {
                     per, pbr, market, marketCap, sector, marketChange);
             outcome.setEntryMarketTrend(sctx.entryTrend());   // 전략별 국면 기준(K=전일 확정)으로 태깅 — 게이트 버킷과 일치
             outcome.setEntrySlippagePct(entrySlippagePct);
+            outcome.setEntryOrderBookImbalance(obi1, obi5);   // 호가 불균형 — 대조군 행도 함께 태깅(진입 분기 앞)
             if (flow != null && flow.available()) outcome.setEntryIntradayFlow(flow.mom10Pct(), flow.mom30Pct(), flow.mom60Pct());
             outcome.setEntrySetupFeatures(signal.atrPct(), signal.distFromHighPct(), signal.ret5dPct());   // 셋업(종목 상태) feature
             outcome.setEntryGapFeatures(signal.gapPct(), indexGapPct);   // 개장 갭 축(K 갭 상한 튜닝의 전제) — 추가 KIS 0

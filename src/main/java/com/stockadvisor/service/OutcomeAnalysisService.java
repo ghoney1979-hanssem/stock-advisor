@@ -89,6 +89,10 @@ public class OutcomeAnalysisService {
             numeric.add(feature("뉴스경과분", wins, losses,
                     o -> o.getEntryNewsAgeMin() == null ? null : o.getEntryNewsAgeMin().doubleValue()));
             numeric.add(feature("체결강도%", wins, losses, TradeOutcome::getEntryExecStrength));
+            // 호가 불균형 — 체결강도(체결된 압력)와 짝이 되는 '미체결 대기 물량' 압력.
+            // ⚠️ 평균 비교는 왜도에 약하다(뉴스경과분에서 이미 데인 함정) → 판정은 feature-mining의 bin별 net으로 할 것.
+            numeric.add(feature("호가불균형1%", wins, losses, TradeOutcome::getEntryObi1));
+            numeric.add(feature("호가불균형5%", wins, losses, TradeOutcome::getEntryObi5));
             numeric.add(feature("종목갭%", wins, losses, TradeOutcome::getEntryGapPct));         // K 갭 상한 튜닝 근거
             numeric.add(feature("지수갭%", wins, losses, TradeOutcome::getEntryIndexGapPct));    // "지수 통째 갭업일"이 승패를 가르나
             numeric.add(feature("거래량배수", wins, losses, TradeOutcome::getEntryVolumeRatio));

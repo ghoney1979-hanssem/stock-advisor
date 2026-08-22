@@ -103,6 +103,14 @@ public class FeatureMiningService {
         d.add(new NumDef("고가거리%", TradeOutcome::getEntryDistHighPct, new double[]{-5, -2, 0}));
         d.add(new NumDef("ret5d%", TradeOutcome::getEntryRet5dPct, new double[]{-5, 0, 5, 10}));
         d.add(new NumDef("체결강도%", TradeOutcome::getEntryExecStrength, new double[]{100, 150, 200}));
+        // 호가 불균형(2026-08-22): (매수잔량−매도잔량)/(합)×100. 체결강도가 '이미 체결된' 압력이라면 이건 '아직 대기 중인' 압력이라
+        // 서로 다른 축이고, 단기(30~90분) 예측력이 문헌에 문서화돼 있어 **가설이 선행하는** 몇 안 되는 후보다.
+        // ⚠️ 뉴스 축과 결정적으로 다른 점: 수집 지점이 볼륨게이트 통과 후보 전원이라 **대조군도 태깅**된다
+        //    → edgeVsControlPct가 실제로 나온다(뉴스는 커버리지 0%라 구조적 null이었다).
+        // ⚠️ 판정 주지표는 obi5(깊이·안정적), obi1은 즉시 압력이라 노이즈가 크다 — 둘이 어긋나면 obi5를 믿을 것.
+        //    두 축을 함께 두는 건 다중검정 비용이지만, forward-only라 지금 안 모으면 몇 주를 잃는다(수집≠검정).
+        d.add(new NumDef("호가불균형1%", TradeOutcome::getEntryObi1, new double[]{-30, 0, 30}));
+        d.add(new NumDef("호가불균형5%", TradeOutcome::getEntryObi5, new double[]{-30, 0, 30}));
         d.add(new NumDef("지수mom30", TradeOutcome::getEntryIndexMom30, new double[]{0}));
         d.add(new NumDef("종목갭%", TradeOutcome::getEntryGapPct, new double[]{2, 4, 7}));        // K 갭 구간별 성과
         d.add(new NumDef("지수갭%", TradeOutcome::getEntryIndexGapPct, new double[]{0, 1, 2}));   // 지수 통째 갭업일 여부
