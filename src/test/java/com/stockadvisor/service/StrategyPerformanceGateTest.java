@@ -848,7 +848,7 @@ class StrategyPerformanceGateTest {
     @Test
     void 여러날에_고르게_퍼진_수익은_최대기여일_제외해도_통과() {
         // 같은 net이라도 하루가 지배하지 않으면(5거래일 균등) LOO 요건을 통과해야 한다 — 과잉 차단 방지.
-        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        String[] dates = recentDates(5);
         List<TradeOutcome> rows = new ArrayList<>();
         for (int i = 0; i < 50; i++) rows.add(outcomeOn("MOMENTUM_A", dates[i % 5], i, 1.0 + COST));
 
@@ -1031,6 +1031,26 @@ class StrategyPerformanceGateTest {
                 sinceCsv, bootstrapCsv, refilterCsv, "");
     }
 
+    /**
+     * 룩백 창 <b>안</b>에 확실히 드는 최근 날짜(yyyyMMdd, n일 전).
+     *
+     * <p>⚠️ 위 {@code gateSince}만 cutoff를 실제로 존중하는 repo를 쓴다(나머지 헬퍼는 rows를 그대로 돌려준다).
+     * 그래서 gateSince 계열 테스트에 날짜를 <b>하드코딩하면 시간이 지나며 룩백 밖으로 밀려나 표본이 조용히 잘린다</b> —
+     * 실제로 {@code 20260801~20260805}를 박아둔 재필터 테스트 3건이 2026-08-22에 그렇게 깨졌다(표본 60→48, 5→4,
+     * 클러스터 케이스는 25건이 통째로 사라져 '표본 부족'으로 경로 자체가 바뀌었다). gateSince 계열은 이 헬퍼를 쓸 것.</p>
+     */
+    private String daysAgo(int n) {
+        return java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).minusDays(n)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+    }
+
+    /** 서로 다른 최근 날짜 n개 — 교차 거래일 요건(단일일 클러스터 방지)을 충족시키면서 전부 룩백 창 안. */
+    private String[] recentDates(int n) {
+        String[] dates = new String[n];
+        for (int i = 0; i < n; i++) dates[i] = daysAgo(i + 1);
+        return dates;
+    }
+
     @Test
     void since_리셋되면_이전_표본_제외되어_표본부족_차단() {
         String today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul"))
@@ -1047,7 +1067,7 @@ class StrategyPerformanceGateTest {
     @Test
     void 부트스트랩_전략은_표본미달이어도_축소사이징_허용() {
         List<TradeOutcome> rows = new ArrayList<>();   // 5건(<minSamples 20)
-        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", "20260805", i, 2.0));
+        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", daysAgo(1), i, 2.0));
         StrategyPerformanceGate.GateDecision d =
                 gateSince(props(true, 20, 0.0), rows, "", "MOMENTUM_A").evaluate("MOMENTUM_A");
         assertThat(d.allowed()).isTrue();
@@ -1058,7 +1078,7 @@ class StrategyPerformanceGateTest {
     @Test
     void 부트스트랩_미지정_전략은_표본미달이면_차단() {
         List<TradeOutcome> rows = new ArrayList<>();
-        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", "20260805", i, 2.0));
+        for (int i = 0; i < 5; i++) rows.add(outcomeOn("MOMENTUM_A", daysAgo(1), i, 2.0));
         StrategyPerformanceGate.GateDecision d =
                 gateSince(props(true, 20, 0.0), rows, "", "").evaluate("MOMENTUM_A");
         assertThat(d.allowed()).isFalse();          // fail-closed 유지
@@ -1073,7 +1093,7 @@ class StrategyPerformanceGateTest {
 
     @Test
     void 재필터는_새필터_통과_구표본만_채점() {
-        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        String[] dates = recentDates(5);   // ⚠️ 하드코딩 금지 — 룩백 밖으로 밀려나 표본이 잘린다
         List<TradeOutcome> rows = new ArrayList<>();
         // 저볼륨(3배) 30건 net −2 — 새 필터(vol≥6)면 걸렀을 구표본
         for (int i = 0; i < 30; i++) rows.add(outcomeVr(dates[i % 5], i, -2.0, 3));
@@ -1094,7 +1114,7 @@ class StrategyPerformanceGateTest {
     void 재필터_태그는_표본부족_경로에서도_붙는다() {
         // 🐞 2026-08-18: 태그를 반환점마다 이어 붙이다 보니 엄격 경로 2곳에만 있었다 — 클러스터 차단·fallback·
         // 표본부족 경로는 표본이 재필터로 줄어든 채 판정됐는데도 사유만 보면 알 수 없었다(D-KOSPI 실측 n 92→87).
-        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        String[] dates = recentDates(5);   // ⚠️ 하드코딩 금지 — 룩백 밖으로 밀려나 표본이 잘린다
         List<TradeOutcome> rows = new ArrayList<>();
         for (int i = 0; i < 30; i++) rows.add(outcomeVr(dates[i % 5], i, -2.0, 3));    // 전부 재필터 탈락(vol<6)
         for (int i = 0; i < 5; i++) rows.add(outcomeVr(dates[i % 5], 100 + i, 2.0, 10)); // 통과 5건 → minSamples 미달
@@ -1111,8 +1131,8 @@ class StrategyPerformanceGateTest {
     void 재필터_태그는_단일일_클러스터_차단_경로에서도_붙는다() {
         List<TradeOutcome> rows = new ArrayList<>();
         // 통과분(vol 10) 25건이 전부 같은 날 → 클러스터 차단 경로로 진입
-        for (int i = 0; i < 25; i++) rows.add(outcomeVr("20260801", i, 2.0, 10));
-        for (int i = 0; i < 10; i++) rows.add(outcomeVr("20260802", 100 + i, -2.0, 3));   // 재필터 탈락
+        for (int i = 0; i < 25; i++) rows.add(outcomeVr(daysAgo(1), i, 2.0, 10));
+        for (int i = 0; i < 10; i++) rows.add(outcomeVr(daysAgo(2), 100 + i, -2.0, 3));   // 재필터 탈락
 
         var d = gateSince(props(true, 20, 0.0), rows, "", "", "MOMENTUM_A:volume_ratio>=6", 80.0)
                 .evaluate("MOMENTUM_A");
@@ -1123,7 +1143,7 @@ class StrategyPerformanceGateTest {
 
     @Test
     void 재필터가_없으면_태그도_없다() {
-        String[] dates = {"20260801", "20260802", "20260803", "20260804", "20260805"};
+        String[] dates = recentDates(5);   // ⚠️ 하드코딩 금지 — 룩백 밖으로 밀려나 표본이 잘린다
         List<TradeOutcome> rows = new ArrayList<>();
         for (int i = 0; i < 30; i++) rows.add(outcomeVr(dates[i % 5], i, 2.0, 10));
 
