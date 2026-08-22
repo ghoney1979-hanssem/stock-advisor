@@ -446,6 +446,34 @@ public class SignalAdminController {
                 "ticks", r.output() == null ? 0 : r.output().size());
     }
 
+    /**
+     * ⚠️ <b>검증 전용(2026-08-22)</b> — 외국인·기관 수급 API 실응답 확인. 조회만 하고 태깅·매매엔 일절 관여하지 않는다.
+     *
+     * <p>두 후보를 <b>동시에</b> 찔러 비교한다: ① 종목별 일별 투자자매매동향(후보당 1콜)
+     * ② 시장 전체 가집계(스캔당 1콜, 단 커버리지 미지수). 어느 쪽 응답이 쓸 만한지가 태깅 설계를 결정한다.</p>
+     *
+     * <p>⚠️ 한쪽 실패가 다른 쪽 결과를 가리지 않게 <b>개별 격리</b>한다 — TR ID·파라미터가 미검증이라
+     * 둘 중 하나만 통할 가능성이 실제로 있다(그 판정이 이 엔드포인트의 목적이다).</p>
+     */
+    @GetMapping("/investor-probe")
+    public Map<String, Object> investorProbe(@RequestParam(required = false) String stockCode,
+                                             @RequestParam(defaultValue = "0000") String market) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        if (stockCode != null && !stockCode.isBlank()) {
+            try {
+                out.put("종목별_일별", kisApiClient.probeInvestorDaily(stockCode));
+            } catch (Exception e) {
+                out.put("종목별_일별_오류", String.valueOf(e.getMessage()));
+            }
+        }
+        try {
+            out.put("시장전체_가집계", kisApiClient.probeForeignInstitutionTotal(market, "0"));
+        } catch (Exception e) {
+            out.put("시장전체_가집계_오류", String.valueOf(e.getMessage()));
+        }
+        return out;
+    }
+
     /** 종목 뉴스/공시 제목 조회(FHKST01011800) — 진입 뉴스 태깅 검증용. */
     @GetMapping("/news")
     public Object news(@RequestParam String stockCode) {

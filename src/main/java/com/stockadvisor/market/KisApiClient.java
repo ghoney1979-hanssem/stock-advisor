@@ -133,6 +133,52 @@ public class KisApiClient {
     }
 
     /**
+     * ⚠️ <b>검증 전용(2026-08-22)</b> — 종목별 투자자매매동향(FHKST01010900) raw 조회.
+     *
+     * <p>외국인·기관 수급을 feature로 붙일지 판단하려면 <b>실응답부터</b> 봐야 한다 — 필드명, 일자 해상도,
+     * 그리고 결정적으로 <b>장중에 오늘 행이 갱신되는지(추정치)</b>가 설계를 가른다(당일 촉매 feature vs D-1 셋업 feature).
+     * 그래서 타입 DTO가 아니라 raw Map으로 받는다. 설계 확정 후 타입 DTO로 교체할 것.</p>
+     *
+     * <p>⚠️ 종목당 1콜이라 이 자체로는 태깅에 쓰기 전에 비용 판단이 필요하다
+     * (호가 불균형처럼 기존 호출에 얹는 공짜 경로가 없다).</p>
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Object> probeInvestorDaily(String stockCode) {
+        return get(
+                uriBuilder -> uriBuilder
+                        .path("/uapi/domestic-stock/v1/quotations/inquire-investor")
+                        .queryParam("FID_COND_MRKT_DIV_CODE", "J")
+                        .queryParam("FID_INPUT_ISCD", stockCode)
+                        .build(),
+                "FHKST01010900", java.util.Map.class, stockCode);
+    }
+
+    /**
+     * ⚠️ <b>검증 전용(2026-08-22)</b> — 국내기관·외국인 매매종목 가집계(FHPTJ04400000) raw 조회.
+     *
+     * <p>종목별 조회의 대안 — <b>1콜로 다수 종목</b>을 덮을 수 있으면 스캔당 1콜로 상각된다(종목별이면 후보당 1콜).
+     * 관건은 <b>커버리지</b>다: 랭킹 상위 N만 준다면 워치리스트 1,500종목 중 극히 일부만 태깅돼
+     * 그 자체가 선택 편향(잘 팔린 종목만 관측)이 된다. 실응답의 행 수와 종목 구성으로 판정할 것.</p>
+     *
+     * @param marketCode 0000 전체 / 0001 코스피 / 1001 코스닥
+     * @param sortCode   0 순매수 상위 / 1 순매도 상위
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Object> probeForeignInstitutionTotal(String marketCode, String sortCode) {
+        return get(
+                uriBuilder -> uriBuilder
+                        .path("/uapi/domestic-stock/v1/quotations/foreign-institution-total")
+                        .queryParam("FID_COND_MRKT_DIV_CODE", "V")
+                        .queryParam("FID_COND_SCR_DIV_CODE", "16449")
+                        .queryParam("FID_INPUT_ISCD", marketCode)
+                        .queryParam("FID_DIV_CLS_CODE", "0")        // 0 수량 / 1 금액
+                        .queryParam("FID_RANK_SORT_CLS_CODE", sortCode)
+                        .queryParam("FID_ETC_CLS_CODE", "0")
+                        .build(),
+                "FHPTJ04400000", java.util.Map.class, "investor-total");
+    }
+
+    /**
      * 종목 뉴스/공시 제목 조회 (종합 시황·공시 FHKST01011800, 최신순).
      * 진입 시점 뉴스 feature 태깅용 — 진입 건당 1콜(비캐시, 신선도가 목적). 전역 rateGate 공유.
      */
