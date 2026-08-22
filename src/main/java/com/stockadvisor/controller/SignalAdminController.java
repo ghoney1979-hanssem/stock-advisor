@@ -490,6 +490,20 @@ public class SignalAdminController {
         return out;
     }
 
+    /**
+     * ⚠️ <b>검증 전용(2026-08-22)</b> — 뉴스 <b>날짜 페이징</b> 가능 여부 확인. 조회만 한다.
+     *
+     * <p>과거 날짜를 지정해 그 시점 뉴스가 오면 소급 태깅이 가능해지고, 대조군 커버리지 0%(=뉴스 축의
+     * {@code edgeVsControlPct}가 구조적 null)라는 8/21 미판정이 해소된다. 무시되고 최신만 오면 소급은 불가.</p>
+     */
+    @GetMapping("/news-probe")
+    public Map<String, Object> newsProbe(@RequestParam String stockCode,
+                                         @RequestParam(required = false) String date,
+                                         @RequestParam(required = false) String hour,
+                                         @RequestParam(required = false) String srno) {
+        return kisApiClient.probeNews(stockCode, date, hour, srno);
+    }
+
     /** 종목 뉴스/공시 제목 조회(FHKST01011800) — 진입 뉴스 태깅 검증용. */
     @GetMapping("/news")
     public Object news(@RequestParam String stockCode) {

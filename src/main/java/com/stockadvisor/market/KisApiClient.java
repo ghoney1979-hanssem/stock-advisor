@@ -150,6 +150,31 @@ public class KisApiClient {
     }
 
     /**
+     * ⚠️ <b>검증 전용(2026-08-22)</b> — 뉴스 조회의 <b>날짜 페이징 가능 여부</b> 확인용 raw 조회.
+     *
+     * <p>뉴스 축은 대조군 커버리지가 0%라 {@code edgeVsControlPct}가 구조적으로 null이다("뉴스가 나쁜 것"인지
+     * "뉴스 나는 종목이 나쁜 것"인지 미판정). 수급처럼 <b>소급</b>으로 해결하려면 과거 날짜를 조회할 수 있어야 하는데,
+     * 실측상 <b>1콜 40건이 활발한 종목은 하루치도 안 된다</b>(005930·000660: 40건 전부 8/21).
+     * → {@code FID_INPUT_DATE_1}(날짜)·{@code FID_INPUT_SRNO}(일련번호)로 과거로 넘어갈 수 있는지가 관건이다.</p>
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Object> probeNews(String stockCode, String date, String hour, String srno) {
+        return get(
+                uriBuilder -> uriBuilder
+                        .path("/uapi/domestic-stock/v1/quotations/news-title")
+                        .queryParam("FID_NEWS_OFER_ENTP_CODE", "")
+                        .queryParam("FID_COND_MRKT_CLS_CODE", "")
+                        .queryParam("FID_INPUT_ISCD", stockCode)
+                        .queryParam("FID_TITL_CNTT", "")
+                        .queryParam("FID_INPUT_DATE_1", date == null ? "" : date)
+                        .queryParam("FID_INPUT_HOUR_1", hour == null ? "" : hour)
+                        .queryParam("FID_RANK_SORT_CLS_CODE", "")
+                        .queryParam("FID_INPUT_SRNO", srno == null ? "" : srno)
+                        .build(),
+                "FHKST01011800", java.util.Map.class, stockCode);
+    }
+
+    /**
      * ⚠️ <b>검증 전용(2026-08-22)</b> — 종목별 투자자매매동향(FHKST01010900) raw 조회.
      *
      * <p>외국인·기관 수급을 feature로 붙일지 판단하려면 <b>실응답부터</b> 봐야 한다 — 필드명, 일자 해상도,
