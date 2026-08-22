@@ -29,6 +29,7 @@ import com.stockadvisor.service.BacktestService;
 import com.stockadvisor.service.RegimeBacktagService;
 import com.stockadvisor.service.FlowBacktagService;
 import com.stockadvisor.service.InvestorFlowBacktagService;
+import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
 import com.stockadvisor.service.OrderCancelService;
@@ -117,6 +118,8 @@ public class SignalAdminController {
     private final RegimeBacktagService regimeBacktagService;
     private final FlowBacktagService flowBacktagService;
     private final InvestorFlowBacktagService investorFlowBacktagService;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private NewsBacktagService newsBacktagService;   // 뉴스 소급 — 필드주입(생성자 무churn)
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -221,6 +224,19 @@ public class SignalAdminController {
     public InvestorFlowBacktagService.BacktagReport backfillInvestorFlow(
             @RequestParam(required = false) Integer lookbackDays) {
         return investorFlowBacktagService.backfill(lookbackDays);
+    }
+
+    /**
+     * 뉴스 feature 소급 태깅 — 대조군 커버리지 0%(=8/21 "뉴스가 나쁜 건지 뉴스 나는 종목이 나쁜 건지" 미판정)를 해소한다.
+     *
+     * <p>{@code force=true}(기본)면 기존 라이브 태깅분도 다시 덮는다 — 진입군 77.4% / 대조군 0%인
+     * <b>비대칭 커버리지는 비교 자체를 편향</b>시키므로 양쪽을 같은 방법으로 맞춘다.</p>
+     */
+    @PostMapping("/backfill-news")
+    public NewsBacktagService.BacktagReport backfillNews(
+            @RequestParam(required = false) Integer lookbackDays,
+            @RequestParam(defaultValue = "true") boolean force) {
+        return newsBacktagService.backfill(lookbackDays, force);
     }
 
     /** 장중흐름(mom30/60) 소급 태깅 — 저장된 entry_market_change로 각 날 지수경로 재구성·보간(근사, mom10 제외). */

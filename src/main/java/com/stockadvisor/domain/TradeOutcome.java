@@ -112,7 +112,12 @@ public class TradeOutcome {
     // 시장 폭(breadth) — 진입 시점(직전 스캔) 상승종목 비율%. 지수(수준)·mom(흐름)과 다른 "참여 넓이" 축.
     @Column(name = "entry_breadth_pct")        private Double entryBreadthPct;        // 전체 워치리스트 상승비율%
 
-    /** 진입 시점 최근 1시간 뉴스 건수(KIS 종목뉴스) — 뉴스 촉매 여부 검증용(forward-only). */
+    // ⚠️ 소급 태깅 완료 표시(2026-08-22). 뉴스 feature는 <b>"뉴스 없음"도 정상값(null)</b>이라
+    // 값만 봐서는 미태깅과 구분되지 않는다 → 태깅 여부의 유일한 판정 근거가 이 컬럼이다.
+    @Column(name = "entry_news_basis_date", length = 8)
+    private String entryNewsBasisDate;
+
+    /** 진입 시점 최근 1시간 뉴스 건수(KIS 종목뉴스) — 뉴스 촉매 여부 검증용. 소급 가능(날짜·시각 페이징). */
     @Column(name = "entry_news_cnt_1h")
     private Integer entryNewsCnt1h;
 
@@ -253,6 +258,8 @@ public class TradeOutcome {
     }
 
     /** 진입 시점 뉴스 feature(측정 먼저) — 최근 1시간 뉴스 건수 + 최신 뉴스 경과분. 조회 실패 시 null 유지. */
+    /** 뉴스 소급 기준일(yyyyMMdd) — 태깅 완료 표시. null이면 미태깅(값이 null인 것과 "뉴스 없음"을 구분). */
+    public void setEntryNewsBasisDate(String d) { this.entryNewsBasisDate = d; }
     public void setEntryNews(Integer cnt1h, Integer ageMin) {
         this.entryNewsCnt1h = cnt1h;
         this.entryNewsAgeMin = ageMin;

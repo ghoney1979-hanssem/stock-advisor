@@ -224,6 +224,34 @@ public class KisApiClient {
      * 종목 뉴스/공시 제목 조회 (종합 시황·공시 FHKST01011800, 최신순).
      * 진입 시점 뉴스 feature 태깅용 — 진입 건당 1콜(비캐시, 신선도가 목적). 전역 rateGate 공유.
      */
+    /**
+     * 종목 뉴스 제목 — <b>기준 일자·시각 지정</b>(소급용). {@code date}/{@code hour}가 빈값이면 현재 기준(라이브와 동일).
+     *
+     * <p>⚠️ {@code hour}(HHmmss)를 주면 <b>그 시각 이전</b> 뉴스만 온다(실측 093000 → 06:00~09:30). 소급 태깅에서
+     * look-ahead를 막는 장치가 바로 이것이다 — 진입 시각을 넘겨 그 시점 뷰를 그대로 재구성한다.</p>
+     *
+     * <p>⚠️ 1콜 <b>40건 상한</b>이라 활발한 종목은 하루치도 안 된다(실측 005930은 09:35~11:47 2시간에 40건).
+     * 호출측이 반환 구간을 보고 추가 페이징 여부를 판단해야 한다.</p>
+     *
+     * <p>실패/무효면 null(소급은 매매 경로가 아니라 실패해도 무해).</p>
+     */
+    public KisNewsResponse fetchNewsTitles(String stockCode, String date, String hour) {
+        KisNewsResponse response = get(
+                uriBuilder -> uriBuilder
+                        .path("/uapi/domestic-stock/v1/quotations/news-title")
+                        .queryParam("FID_NEWS_OFER_ENTP_CODE", "")
+                        .queryParam("FID_COND_MRKT_CLS_CODE", "")
+                        .queryParam("FID_INPUT_ISCD", stockCode)
+                        .queryParam("FID_TITL_CNTT", "")
+                        .queryParam("FID_INPUT_DATE_1", date == null ? "" : date)
+                        .queryParam("FID_INPUT_HOUR_1", hour == null ? "" : hour)
+                        .queryParam("FID_RANK_SORT_CLS_CODE", "")
+                        .queryParam("FID_INPUT_SRNO", "")
+                        .build(),
+                "FHKST01011800", KisNewsResponse.class, stockCode);
+        return (response == null || !response.isSuccess()) ? null : response;
+    }
+
     public KisNewsResponse fetchNewsTitles(String stockCode) {
         KisNewsResponse response = get(
                 uriBuilder -> uriBuilder
