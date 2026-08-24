@@ -165,6 +165,9 @@ public class StrategyEvaluator {
     private double maxEntryVolumeRatio = 15.0;      // 거래량배수 ≥ 이값이면 진입 보류(VOLUME_EXTREME)
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.min-entry-market-cap-eok:1000}")
     private long minEntryMarketCapEok = 1000;       // 시총(억) < 이값이면 진입 보류(MICRO_CAP)
+    // ④ 뉴스 과다(2026-08-24) — 진입 직전 1시간 내 뉴스 건수 ≥ 이값이면 보류(NEWS_HEAVY). 0=비활성.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-news-cnt-1h:0}")
+    private int maxEntryNewsCnt1h = 0;
 
     // 하루 재진입 사이클 상한(2026-08-18) — 왕복마다 비용 0.22%를 지불하므로 사이클이 늘수록 방향이 맞아도 진다.
     // 실측: 8/18 KOSDAQ −3.52%일에 251340이 10차까지 재진입해 7왕복 −4,521원(같은 시간 인버스 자체는 +1%).
@@ -536,6 +539,34 @@ public class StrategyEvaluator {
                     reject = "MICRO_CAP";
                     log.info("[{}] 전역 초소형주 보류 [{}] — 시총 {}억", strategy.name(), stockCode, marketCap);
                 }
+                // ④ 뉴스 과다(2026-08-24): 뉴스1h건수 축이 진입·대조군·edge 셋 다 단조 악화다.
+                //    진입 net <1건 −0.64 / 1~3 −1.00 / ≥3 −1.40, 대조군도 같은 방향(−0.78/−0.89/−0.96 =
+                //    뉴스 나는 종목 자체가 나쁘다), 그 위에 edge가 추가로 −0.44까지 벌어진다(그 구간에선
+                //    우리 선택이 더 나쁘다). base rate 열위와 선택 열위가 더해지는 구간.
+                //    ⚠️ 원안(≥1건 차단, 진입의 38% 제외)이 아니라 ≥3건만 차단한다 — 40일 창 재측정에서
+                //    ≥1건 구간의 edge가 −0.01로 사실상 0이 됐고(8/22엔 −0.11), 기대 개선이 0.1%p 미만이라
+                //    38%를 버리는 비용을 정당화 못 했다. ≥3은 진입의 ~9%(n=351)뿐이고 edge −0.20으로 유지된다.
+                //    ⚠️ 기존 FRESH_BAD_NEWS(C/D/J·악재 키워드)와 다른 층위 — 이건 전 전략·뉴스 유무(내용 무관).
+                //    ⚠️ 추가 KIS 호출 ≈ 0 — 어차피 진입 시 태깅으로 종목당 1콜을 하던 것을 앞당길 뿐이다
+                //       (진입했을 후보에만 걸리는 위치라 대조군 전체로 번지지 않는다).
+                else if (maxEntryNewsCnt1h > 0) {
+                    if (!newsFetched) {
+                        newsFetched = true;
+                        try {
+                            newsItems = kisApiClient.fetchNewsTitles(stockCode).output();
+                            var nf = com.stockadvisor.market.dto.KisNewsResponse.features(newsItems, ZonedDateTime.now(SEOUL), 60);
+                            newsCnt1h = nf.recentCount();
+                            newsAgeMin = nf.latestAgeMin();
+                        } catch (Exception ex) {
+                            log.debug("뉴스 조회 실패(가드 생략) stockCode={}: {}", stockCode, ex.getMessage());
+                        }
+                    }
+                    // 조회 실패(null)면 미적용 — degrade open(데이터 실패로 매매를 막지 않는다).
+                    if (newsCnt1h != null && newsCnt1h >= maxEntryNewsCnt1h) {
+                        reject = "NEWS_HEAVY";
+                        log.info("[{}] 전역 뉴스 과다 보류 [{}] — 최근 1시간 뉴스 {}건", strategy.name(), stockCode, newsCnt1h);
+                    }
+                }
             }
             // 대조군 기록: 전역 controlTracking + 전략별 tracksControl + 집중(검증승자 제외) 모두 충족해야.
             // REBOUND_DAY 차단분은 전략의 대조군 설정(tracksControl/집중)과 무관하게 기록(2026-07-23) —
@@ -554,7 +585,7 @@ public class StrategyEvaluator {
                         // 전역 필터 3종도 강제 기록 — 전 전략에 걸리는데 F/H/K 등 control-off 전략은 흔적이 안 남아
                         // "차단이 옳았나"를 검증할 수 없다. 진입 직전 후보에만 걸리므로 표본 부담은 작다.
                         || "CHANGE_OVERHEAT".equals(reject) || "VOLUME_EXTREME".equals(reject)
-                        || "MICRO_CAP".equals(reject)
+                        || "MICRO_CAP".equals(reject) || "NEWS_HEAVY".equals(reject)
                         // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
                         // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
                         || "NOT_FADING".equals(reject)

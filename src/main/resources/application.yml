@@ -80,6 +80,7 @@ stockadvisor:
     volume-multiplier: ${SIGNAL_VOLUME_MULTIPLIER:2.0}   # 당일 거래량 ≥ 시간보정 평균 × 2배
     min-change-rate: ${SIGNAL_MIN_CHANGE_RATE:1.5}       # 당일 등락률 ≥ +1.5% (조기 포착)
     min-opinion-score: ${SIGNAL_MIN_OPINION_SCORE:40.0}  # 추천 점수 ≥ 40 (중립 이상)
+    momentum-require-rising-flow: ${SIGNAL_A_REQUIRE_RISING_FLOW:false}   # [전략A] 진입 시점 지수 mom30<0(흐름↓)이면 보류(FLOW_DOWN). 흐름↓ -1.85% vs 흐름↑ -0.35%(n=41)
     # 공시 감지 후 이 시간 안에서만 진입 신호를 재평가(진입은 공시 직후가 현실적, 호출량도 절감)
     observation-window: ${SIGNAL_OBSERVATION_WINDOW:1h}
     # 분봉 신선도/활성도 필터 — "이미 끝난 움직임" 배제
@@ -116,6 +117,7 @@ stockadvisor:
     max-entry-change-pct: ${SIGNAL_MAX_ENTRY_CHANGE_PCT:10.0}        # 당일 등락률 ≥이값% 진입 보류(CHANGE_OVERHEAT). 진입 -1.89%(n306) vs 대조군 +0.25%
     max-entry-volume-ratio: ${SIGNAL_MAX_ENTRY_VOLUME_RATIO:15.0}    # 거래량배수 ≥이값 진입 보류(VOLUME_EXTREME). ≥15배 진입 -2.56%(n152)
     min-entry-market-cap-eok: ${SIGNAL_MIN_ENTRY_MARKET_CAP_EOK:1000}  # 시총(억) <이값 진입 보류(MICRO_CAP). <1000억 진입 -1.89%(n163)
+    max-entry-news-cnt-1h: ${SIGNAL_MAX_ENTRY_NEWS_CNT_1H:0}   # 전역: 진입 직전 1시간 뉴스 건수 >= 이값이면 보류(NEWS_HEAVY). 0=비활성
     # 반등일 순추세 보류 가드 — 당일 지수 ≥ surge% 급등 AND 기저(MA3) 라벨 비강세면 H/F/E/K 신규진입 보류(REBOUND_DAY). 2사이클 실측(7/15·7/22) 근거.
     rebound-day-guard-enabled: ${SIGNAL_REBOUND_DAY_GUARD_ENABLED:true}
     rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}
@@ -157,6 +159,7 @@ stockadvisor:
     index-relative-min-score: ${SIGNAL_D_MIN_SCORE:40.0}   # [D] 진입 최소 추천 점수(건전성)
     index-relative-require-rebound: ${SIGNAL_D_REQUIRE_REBOUND:true} # [D] 절대하락(≤-minDrop) 후보면 분봉 반등확인 요구(떨어지는 칼날 회피)
     index-relative-require-rising-flow: ${SIGNAL_D_REQUIRE_RISING_FLOW:false} # [D] 진입시점 지수 흐름(mom30)<0(흐름↓)이면 보류(FLOW_DOWN). flow-analysis 흐름↑+0.22 vs 흐름↓-0.82 근거
+    index-relative-allowed-regimes: ${SIGNAL_D_ALLOWED_REGIMES:BULL,NEUTRAL,BEAR}   # [전략D] 진입 허용 국면(csv). 빈값=제약 없음. BEAR edge -0.48%p(대조군 n=1,712)
     # [G/J] 동일 필터 — 반등 계열은 흐름↓에서 일관 열위(2026-08-21, lag30·60 양쪽): G 흐름↓ -0.90/-0.88 vs 흐름↑ -0.08/-0.05, J -0.90 vs -0.17/-0.15
     rsi-reversal-require-rising-flow: ${SIGNAL_G_REQUIRE_RISING_FLOW:false}
     value-reversal-require-rising-flow: ${SIGNAL_J_REQUIRE_RISING_FLOW:false}

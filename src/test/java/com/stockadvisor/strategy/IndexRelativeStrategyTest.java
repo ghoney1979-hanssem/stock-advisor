@@ -15,8 +15,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class IndexRelativeStrategyTest {
 
-    private final IndexRelativeStrategy strategy = new IndexRelativeStrategy(props(false));
-    private final IndexRelativeStrategy flowStrategy = new IndexRelativeStrategy(props(true));
+    private static final String ALL_REGIMES = "BULL,NEUTRAL,BEAR";   // 종전 동작(제약 없음)
+
+    private final IndexRelativeStrategy strategy = new IndexRelativeStrategy(props(false), ALL_REGIMES);
+    private final IndexRelativeStrategy flowStrategy = new IndexRelativeStrategy(props(true), ALL_REGIMES);
+    /** prod 설정 — BEAR 제외(2026-08-24). */
+    private final IndexRelativeStrategy regimeStrategy = new IndexRelativeStrategy(props(false), "BULL,NEUTRAL");
 
     /** D 관련 값만 의미, 나머지는 임의 유효값. requireRisingFlow만 변주. */
     private static SignalProperties props(boolean requireRisingFlow) {
@@ -107,5 +111,44 @@ class IndexRelativeStrategyTest {
     void 흐름필터_꺼짐이_기본_흐름하락이어도_진입() {
         // requireRisingFlow=false(기본)면 흐름↓여도 FLOW_DOWN 미적용(현행 유지)
         assertThat(strategy.rejectReason(ctxFlow(0.5, 3.0, 50, -0.5))).isNull();
+    }
+
+    // ── 국면 제한(2026-08-24) — BEAR edge -0.48%p(대조군 n=1,712) vs BULL +0.62 / NEUTRAL +1.51 ──
+
+    private StrategyContext ctxRegime(String entryTrend) {
+        return new StrategyContext("005930", signal(0.5, false), 50, RecommendationType.HOLD,
+                3.0, false, false, entryTrend, null);
+    }
+
+    @Test
+    void 허용국면_밖이면_REGIME_국면으로_보류() {
+        assertThat(regimeStrategy.rejectReason(ctxRegime("BEAR"))).isEqualTo("REGIME_BEAR");
+    }
+
+    @Test
+    void 허용국면_안이면_진입() {
+        assertThat(regimeStrategy.rejectReason(ctxRegime("BULL"))).isNull();
+        assertThat(regimeStrategy.rejectReason(ctxRegime("NEUTRAL"))).isNull();
+    }
+
+    @Test
+    void 국면_미상이면_degrade_open으로_진입() {
+        // 국면 산출 실패(null)로 매매를 막지 않는다 — K와 동일 원칙
+        assertThat(regimeStrategy.rejectReason(ctxRegime(null))).isNull();
+    }
+
+    @Test
+    void 허용국면_목록이_전체면_종전동작() {
+        // 코드 기본값(BULL,NEUTRAL,BEAR) = 제약 없음 → BEAR도 통과(원복 경로 보장)
+        assertThat(strategy.rejectReason(ctxRegime("BEAR"))).isNull();
+    }
+
+    @Test
+    void 국면판정은_다른_D조건을_다_통과한_뒤에_걸린다() {
+        // 판정 위치 검증: 잔차 부족(GAP)으로 어차피 탈락할 후보는 REGIME_이 아니라 GAP으로 남아야
+        // 기존 사유 통계가 오염되지 않고, REGIME_BEAR 대조군이 "D 조건 다 만족했으나 BEAR"가 된다.
+        StrategyContext weakGap = new StrategyContext("005930", signal(2.5, false), 50,
+                RecommendationType.HOLD, 3.0, false, false, "BEAR", null);
+        assertThat(regimeStrategy.rejectReason(weakGap)).isEqualTo("GAP");
     }
 }
