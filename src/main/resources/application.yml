@@ -118,6 +118,7 @@ stockadvisor:
     max-entry-volume-ratio: ${SIGNAL_MAX_ENTRY_VOLUME_RATIO:15.0}    # 거래량배수 ≥이값 진입 보류(VOLUME_EXTREME). ≥15배 진입 -2.56%(n152)
     min-entry-market-cap-eok: ${SIGNAL_MIN_ENTRY_MARKET_CAP_EOK:1000}  # 시총(억) <이값 진입 보류(MICRO_CAP). <1000억 진입 -1.89%(n163)
     max-entry-news-cnt-1h: ${SIGNAL_MAX_ENTRY_NEWS_CNT_1H:0}   # 전역: 진입 직전 1시간 뉴스 건수 >= 이값이면 보류(NEWS_HEAVY). 0=비활성
+    collect-exec-strength-all: ${SIGNAL_COLLECT_EXEC_STRENGTH_ALL:false}   # 체결강도를 후보 전원에 수집(대조군 커버리지 확보). 후보당 KIS 1콜 증가
     # 반등일 순추세 보류 가드 — 당일 지수 ≥ surge% 급등 AND 기저(MA3) 라벨 비강세면 H/F/E/K 신규진입 보류(REBOUND_DAY). 2사이클 실측(7/15·7/22) 근거.
     rebound-day-guard-enabled: ${SIGNAL_REBOUND_DAY_GUARD_ENABLED:true}
     rebound-day-min-surge-pct: ${SIGNAL_REBOUND_DAY_MIN_SURGE_PCT:2.0}

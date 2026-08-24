@@ -123,6 +123,18 @@ public class FeatureMiningService {
             return (f == null || g == null) ? null : f + g;
         }, new double[]{-3, 0, 3}));
         d.add(new NumDef("지수mom30", TradeOutcome::getEntryIndexMom30, new double[]{0}));
+        // 시장폭%(2026-08-24): 진입 시점 해당 시장 상승종목 비율. 지수(시총가중 수준)·mom30(흐름)이 못 보는
+        // <b>참여 넓이</b> 축이고, 진입 시 이미 태깅돼 있어(entry_market_breadth_pct) 비용 0·소급 즉시 적용된다.
+        // 계기(2026-08-24 실측): KOSPI −1.62%(삼성전자 −8.7%) / KOSDAQ +1.51%인데 <b>양 시장 다 BEAR 라벨</b>이었고
+        // breadth는 58% 상승·중앙 +0.47%였다 — 즉 "BEAR 라벨 아래에서 종목 다수가 오른" 날이다. 그날 게이트는
+        // BEAR 버킷으로 대부분 닫혔고 섀도우는 +0.68%였다(기회 상실). 국면 라벨이 <b>종목 단위 승률</b>과 얼마나
+        // 상관하는지를 직접 잰 적이 없어 이 괴리를 물을 수가 없었다.
+        // ⚠️ 이 축의 진가는 <b>국면과의 교차</b>다 — 별도 교차 축을 만들지 않고 기존 {@code ?regime=} 파라미터와
+        //    조합해 본다(예 regime=BEAR & 시장폭 ≥50 구간). 축을 늘리지 않아 다중검정 비용이 안 붙는다.
+        // ⚠️ 경계 30/50/70은 breadth 리스크오프 문턱(15%)보다 훨씬 위 — 리스크오프는 '붕괴' 판정이고
+        //    이 축은 '평상시 참여 넓이'를 가르는 것이라 목적이 다르다.
+        // ⚠️ 전체(overall) breadth는 <b>일부러 뺐다</b> — 시장별 값과 강상관이라 축만 늘고 정보가 안 는다.
+        d.add(new NumDef("시장폭%", TradeOutcome::getEntryMarketBreadthPct, new double[]{30, 50, 70}));
         d.add(new NumDef("종목갭%", TradeOutcome::getEntryGapPct, new double[]{2, 4, 7}));        // K 갭 구간별 성과
         d.add(new NumDef("지수갭%", TradeOutcome::getEntryIndexGapPct, new double[]{0, 1, 2}));   // 지수 통째 갭업일 여부
         d.add(new NumDef("뉴스1h건수", o -> o.getEntryNewsCnt1h() == null ? null : o.getEntryNewsCnt1h().doubleValue(),
@@ -131,8 +143,12 @@ public class FeatureMiningService {
         // 승자의 최신 뉴스가 더 최근이다(E 1,153 vs 2,204 / G 2,005 vs 3,697 / A 1,168 vs 3,027 / F 1,934 vs 2,439 / J 3,053 vs 4,823).
         // 전략별 조건이 아니라 <b>전 전략 공통</b>으로 나온 첫 신호라 bin별 net을 볼 가치가 있다.
         // 첫 경계 60분은 FRESH_BAD_NEWS 가드의 fresh-news-window-minutes와 같은 기준(해석 정합).
-        // ⚠️ <b>대조군은 뉴스 태깅이 0%</b>(진입 시에만 종목당 1콜 lazy) → 이 축은 <b>진입군 랭킹 전용</b>이고
-        //    edgeVsControlPct는 구조적으로 null이다(커버리지 0%). 반사실 비교를 하려면 대조군 태깅이 선행돼야 한다.
+        // ⚠️ <b>2026-08-22 소급으로 해소됨</b> — 도입 당시엔 대조군 태깅이 0%라 edgeVsControlPct가 구조적 null이었으나,
+        //    NewsBacktagService(날짜·시각 페이징)로 진입·대조군 양쪽을 같은 방법으로 채워 커버리지가 대칭이 됐다
+        //    (2026-08-24 실측 진입 90.7% / 대조군 92.9% — 남은 결손은 KIS 이력 ~30거래일 창 밖의 구표본).
+        // 🔴 그리고 그 반사실 비교가 <b>가설을 반증했다</b>: "신선한 뉴스가 이긴다"는 틀렸고 방향이 반대다
+        //    (bin별 net이 신선할수록 나쁘다). 승자/패자 <b>평균</b> 비교가 왜도 큰 분포에서 정반대 결론을 낸 사례 —
+        //    이 축은 <b>중앙값·bin별 net</b>으로만 읽을 것.
         d.add(new NumDef("뉴스경과분", o -> o.getEntryNewsAgeMin() == null ? null : o.getEntryNewsAgeMin().doubleValue(),
                 new double[]{60, 240, 720, 2880}));
         // 개장후경과분(2026-08-21): "아침 진입만 지는" 패턴이 2회 연속 실측됐는데 시각 축이 없어 물을 수가 없었다 —

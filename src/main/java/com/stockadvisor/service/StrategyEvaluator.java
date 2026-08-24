@@ -169,6 +169,14 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-news-cnt-1h:0}")
     private int maxEntryNewsCnt1h = 0;
 
+    // 체결강도 전(全)후보 수집(2026-08-24) — 대조군 커버리지 0%를 메우려고 수집 지점을 '진입 시 lazy'에서
+    // '후보 전원'으로 옮긴다. ⚠️ 이 축은 fetchCcnl이 당일치만 줘서 **소급이 불가능**한 유일한 축이라,
+    // 지금 안 모으면 그 기간은 영영 반사실을 못 만든다(뉴스·수급은 소급으로 해결됐다).
+    // ⚠️ 대가는 **후보당 KIS 1콜 증가**다(호가 조회와 같은 자리). 스캔 부하가 문제되면 false로 되돌리면
+    //    종전의 진입-시-lazy 경로가 그대로 살아 있어 진입군 태깅은 유지된다(대조군만 다시 비게 된다).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.collect-exec-strength-all:false}")
+    private boolean collectExecStrengthAll = false;
+
     // 하루 재진입 사이클 상한(2026-08-18) — 왕복마다 비용 0.22%를 지불하므로 사이클이 늘수록 방향이 맞아도 진다.
     // 실측: 8/18 KOSDAQ −3.52%일에 251340이 10차까지 재진입해 7왕복 −4,521원(같은 시간 인버스 자체는 +1%).
     // 청산 로직 수정(저점 대비 회복 요건)이 주된 처방이고 이건 안전망 — 정상 동작 시 이 상한에 걸릴 일은 드물다.
@@ -386,6 +394,20 @@ public class StrategyEvaluator {
             return 0;
         }
 
+        // 체결강도 — 후보 전원 수집(활성 시). 위치가 요점이다: 유동성 필터·SELL 제외를 통과해
+        // **행(진입 or 대조군)이 될 수 있는 후보**에만 걸어 낭비를 줄이면서도 대조군을 빠짐없이 덮는다.
+        // 여기서 채워두면 아래 과열 가드(OVERHEAT_FAMILY)와 진입 태깅이 strengthFetched로 재사용해 중복 호출이 없다.
+        Double execStrength = null;
+        boolean strengthFetched = false;
+        if (collectExecStrengthAll) {
+            strengthFetched = true;
+            try {
+                execStrength = kisApiClient.fetchCcnl(stockCode).latestStrength();
+            } catch (Exception ex) {
+                log.debug("체결강도 조회 실패(태깅 생략) stockCode={}: {}", stockCode, ex.getMessage());
+            }
+        }
+
         // 진입 시점 feature (분석용)
         double per = parseDouble(quote.per());
         double pbr = parseDouble(quote.pbr());
@@ -453,9 +475,9 @@ public class StrategyEvaluator {
         int alerts = 0;
         // 뉴스·체결강도 feature(진입 시 태깅) — 종목당 각 1콜 lazy(첫 진입 때만 조회, 대조군은 부하상 미태깅)
         Integer newsCnt1h = null, newsAgeMin = null;
-        Double execStrength = null;
         boolean newsFetched = false;
-        boolean strengthFetched = false;   // 체결강도 lazy 1콜 — 과열 가드와 진입 태깅이 공유
+        // execStrength/strengthFetched 는 위(후보 전원 수집 지점)에서 선언·초기화됨 —
+        // collectExecStrengthAll=false면 여기서도 종전처럼 과열 가드·진입 태깅이 lazy로 채운다.
         java.util.List<com.stockadvisor.market.dto.KisNewsResponse.NewsItem> newsItems = null;
 
         for (TradingStrategy strategy : pending) {
@@ -630,6 +652,16 @@ public class StrategyEvaluator {
             outcome.setEntrySetupFeatures(signal.atrPct(), signal.distFromHighPct(), signal.ret5dPct());   // 셋업(종목 상태) feature
             outcome.setEntryGapFeatures(signal.gapPct(), indexGapPct);   // 개장 갭 축(K 갭 상한 튜닝의 전제) — 추가 KIS 0
             outcome.setEntryBreadth(breadthService.overallBreadthPct(), breadthService.breadthPct(market));   // 진입 시점 시장폭(직전 스캔)
+            // 체결강도 — 대조군 행도 함께 태깅(2026-08-24). ⚠️ 이 값이 이미 손에 있을 때만 붙는다:
+            // 과열 가드(EXEC_OVERHEAT)가 OVERHEAT_FAMILY(H/G/J) 후보에 대해 이미 1콜을 했을 때뿐이다.
+            // 지금까지는 이 태깅이 '진입 분기 뒤'에 있어 **대조군 커버리지가 0%**였고, 그래서
+            // "체결강도가 나쁜 것인지, 체결강도 높은 종목이 나쁜 것인지"를 반사실로 가를 수 없었다
+            // (뉴스 축이 8/21에 겪은 것과 같은 상태 — 다만 체결강도는 fetchCcnl이 당일치만 줘서 **소급이 불가**하다).
+            // 위치만 옮기면 **추가 KIS 호출 0**으로 그 가드가 실제로 판정하는 모집단(= 다른 조건을 다 통과하고
+            // 강도만으로 갈린 후보)에 대조군이 생긴다 → EXEC_OVERHEAT 차단이 옳았는지를 직접 검증할 수 있다.
+            // ⚠️ 전체 커버리지는 여전히 부분적이다(가드 경로를 지난 후보만). 전 후보 커버리지는 수집 지점을
+            //    호가 조회 옆으로 옮겨야 하고 그건 후보당 1콜이 늘어난다 — 별건.
+            outcome.setEntryExecStrength(execStrength);
 
             if (reject != null) {
                 // 대조군(미진입): 알림·주문 없이 수익률 horizon만 추적 → 필터 검증/개선용
@@ -660,6 +692,7 @@ public class StrategyEvaluator {
                 }
             }
             outcome.setEntryNews(newsCnt1h, newsAgeMin);
+            // 진입 경로에서 처음 조회된 경우를 덮어쓴다(위 대조군 공통 태깅 시점엔 아직 null일 수 있다).
             outcome.setEntryExecStrength(execStrength);
             tradeOutcomeRepository.save(outcome);
             log.info("[{}] {} [{}] 매수가={} 등락률={}% 거래량배수={}",
