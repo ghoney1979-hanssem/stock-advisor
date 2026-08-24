@@ -52,8 +52,24 @@ public class InverseIndexStrategy implements TradingStrategy {
     // 함께 요구한다(8/20 실측: 고점 +2.4% vs 진입 시 +1.84% = 0.56%p차 → 차단됐을 후보). 0=비활성(종전 동작).
     @Value("${stockadvisor.signal.inverse-fade-confirm-pct:1.0}")
     private double fadeConfirmPct = 1.0;
+    // 진입-청산 겹침 차단(2026-08-24, 251340 3사이클 전패 계기). 인버스 레벨-청산은 "지수 당일 등락률 >
+    // -recovery-pct(0.5%)"면 발사하는데, 반등일 fade 확대창은 진입 상한을 +2.0%까지 올린다 → 구간
+    // (-0.5%, +2.0%]은 **사는 즉시 파는** 왕복비용 루프다. 8/20에 넣은 fade 확인(고점 대비 1.0%p)은
+    // '고점 대비 거리'를, 청산은 '절대 레벨'을 보므로 둘이 동시에 참이 될 수 있어 루프를 못 막았다
+    // (8/24 실측 KOSDAQ: 고점 +2.37% / 진입 +1.05~1.45% → fade 0.9~1.3%p로 확인 통과 → 1~2분 뒤
+    //  "지수회복(+1.05~1.45% > -0.5%)"으로 전량 청산, 3전패 -913원. 사이클 상한 3이 아니었으면 더 갔다).
+    // ⚠️ 평상일엔 사실상 no-op — 평상 상한 -minDrop(-1%)이 이미 -recovery(-0.5%)보다 낮아 통과분이 자동 충족.
+    //    실질 효과는 **반등일 확대창을 [-maxDrop, -recovery]로 좁히는 것**이라 7/22 fade 확대의 유효 폭이 크게 준다
+    //    (그 확대창은 청산 규칙과 논리적으로 양립 불가였다 — 열어둬도 다음 틱에 팔린다).
+    // ⚠️ 임계는 청산과 **같은 프로퍼티**를 읽는다 — 한쪽만 바꾸면 겹침이 되살아난다.
+    @Value("${stockadvisor.trading.inverse-exit.recovery-pct:0.5}")
+    private double exitRecoveryPct = 0.5;
+    @Value("${stockadvisor.signal.inverse-block-when-exit-active:true}")
+    private boolean blockWhenExitActive = true;
     void setReboundFadeMaxPct(double v) { this.reboundFadeMaxPct = v; }   // 테스트용
     void setFadeConfirmPct(double v) { this.fadeConfirmPct = v; }         // 테스트용
+    void setExitRecoveryPct(double v) { this.exitRecoveryPct = v; }       // 테스트용
+    void setBlockWhenExitActive(boolean b) { this.blockWhenExitActive = b; }   // 테스트용
     // 필드주입(생성자 무churn) — 미주입/흐름 미가용(장초 분봉 부족)이면 판정 생략(degrade open, 기존 동작).
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.MarketRegimeService regimeService;
@@ -139,7 +155,23 @@ public class InverseIndexStrategy implements TradingStrategy {
             }
             // 흐름 미가용(장초 분봉 부족/조회 실패) → 기존 동작(당일 약세만으로 진입)
         }
+        // 마지막 게이트 — 진입 시점에 이미 레벨-청산이 참이면 진입 거부(사는 즉시 파는 왕복비용 루프 차단).
+        // ⚠️ 판정 위치가 설계다: 전략 고유 조건을 다 통과한 후보에만 걸어야 EXIT_ACTIVE 대조군이
+        //    "조건은 다 맞았는데 청산선 위" = ENTERED와 직접 비교 가능한 표본이 된다(FLOW_DOWN과 동일).
+        if (blockWhenExitActive && exitAlreadyActive(chg, exitRecoveryPct)) {
+            return "EXIT_ACTIVE";
+        }
         return null;                                              // 지수 약세 + 아직 하락/보합 중 → 인버스 롱
+    }
+
+    /**
+     * 진입 시점에 인버스 <b>레벨-청산</b>이 이미 참인가(순수) — 참이면 다음 청산 틱에 그대로 팔린다.
+     *
+     * <p>{@code PositionExitService.inverseExitReason} 의 레벨 분기({@code chg > -recoveryPct} → "지수회복")와
+     * 부호·부등호를 정확히 맞춘다. 경계({@code chg == -recoveryPct})는 청산이 발사되지 않으므로 진입 허용.</p>
+     */
+    static boolean exitAlreadyActive(double indexChangePct, double exitRecoveryPct) {
+        return exitRecoveryPct > 0 && indexChangePct > -exitRecoveryPct;
     }
 
     // 당일 지수 등락률 고점 추적 — 지수코드별, 날짜 바뀌면 리셋. 관측 시점 기반(스캔 주기 호출로 충분).

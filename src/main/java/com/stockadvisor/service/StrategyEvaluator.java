@@ -564,7 +564,11 @@ public class StrategyEvaluator {
                         || "REGIME_NEUTRAL".equals(reject)
                         // FLOW_DOWN(G/J 흐름↓ 스킵, 2026-08-21)도 강제 기록 — 둘 다 control-off라
                         // 흔적이 없으면 "흐름↓를 막은 게 옳았나"를 forward 검증할 수 없다. D는 tracksControl=true라 원래 기록됨.
-                        || "FLOW_DOWN".equals(reject));
+                        || "FLOW_DOWN".equals(reject)
+                        // EXIT_ACTIVE(I 진입-청산 겹침 차단, 2026-08-24)도 강제 기록 — 반등일 fade 확대창을
+                        // 좁히는 변경이라 "막은 게 옳았나"를 차단분 net vs 진입분 net으로 봐야 한다.
+                        // 반등일 × 인버스 한정이라 표본 부담은 NOT_FADING과 같은 수준.
+                        || "EXIT_ACTIVE".equals(reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }

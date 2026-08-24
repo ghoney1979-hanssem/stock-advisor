@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,9 @@ public class MultidayExitAnalysisService {
     private static final double[] TRAIL_PCT = {5, 8, 10, 12};
     private static final int[] MA_PERIOD = {5, 10};
     private static final double[] STOP_PCT = {8, 12};
+    // 단일일 클러스터 가드 — ControlAnalysisService/StrategyPerformanceGate 와 같은 기준.
+    private static final double MAX_DAY_SHARE_PCT = 80.0;
+    private static final int MIN_DISTINCT_DAYS = 3;
 
     private final OutcomeDailyMarkRepository dailyMarkRepository;
     private final double roundTripPct;
@@ -46,10 +50,30 @@ public class MultidayExitAnalysisService {
         this.minSamples = minSamples;
     }
 
-    /** 매수가 대비 일봉 종가 경로(거래일 오름차순). complete=D+maxHoldDays 도달(완주). */
-    public record Path(long buy, int[] days, long[] closes, boolean complete) { }
+    /**
+     * 매수가 대비 일봉 종가 경로(거래일 오름차순). complete=D+maxHoldDays 도달(완주).
+     *
+     * @param entryDate 진입일(yyyyMMdd) — 단일일 클러스터 판정용. 미상이면 null(그 표본은 일자 집계에서만 빠진다).
+     */
+    public record Path(long buy, int[] days, long[] closes, boolean complete, String entryDate) {
+        /** 진입일 없는 호환 생성자 — 순수 시뮬 코어 테스트는 일자가 필요 없다. */
+        public Path(long buy, int[] days, long[] closes, boolean complete) {
+            this(buy, days, closes, complete, null);
+        }
+    }
 
-    public record MethodResult(String method, double param, double avgNetPct, double winRatePct, int samples) { }
+    /**
+     * 방식별 시뮬 결과 + <b>단일일 클러스터 진단</b>.
+     *
+     * @param distinctDays   이 방식이 해결한 표본이 걸친 서로 다른 진입일 수(0=진입일 미상)
+     * @param maxDaySharePct 단일 진입일이 차지하는 최대 건수 비중(%)
+     * @param topDay         net 합 기여 절대값이 가장 큰 진입일(yyyyMMdd)
+     * @param netExTopDayPct 그 하루를 뺀 나머지 net 평균(%) — 남는 표본이 없으면 null
+     * @param clustered      건수 편중 <b>또는</b> LOO 부호 반전 → 이 수치는 하루가 만든 허수
+     */
+    public record MethodResult(String method, double param, double avgNetPct, double winRatePct, int samples,
+                               int distinctDays, Double maxDaySharePct, String topDay,
+                               Double netExTopDayPct, boolean clustered) { }
 
     public record MultidayExitComparison(String strategy, int outcomes, int fullPaths,
                                          List<MethodResult> methods, String recommended,
@@ -77,7 +101,13 @@ public class MultidayExitAnalysisService {
     }
 
     private MultidayExitComparison compareStrategy(String strategy, boolean fullPathsOnly) {
-        List<Path> all = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy));
+        Map<Long, String> entryDates = new LinkedHashMap<>();
+        for (Object[] row : dailyMarkRepository.findEntryDatesByStrategy(strategy)) {
+            if (row != null && row.length >= 2 && row[0] != null) {
+                entryDates.put(((Number) row[0]).longValue(), (String) row[1]);
+            }
+        }
+        List<Path> all = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy), entryDates);
         int fullPaths = (int) all.stream().filter(Path::complete).count();
         List<Path> paths = fullPathsOnly ? all.stream().filter(Path::complete).toList() : all;
 
@@ -87,19 +117,28 @@ public class MultidayExitAnalysisService {
         for (int p : MA_PERIOD) methods.add(agg("MA" + p + " 이탈", p, paths, path -> maExit(path, p, roundTripPct)));
         for (double s : STOP_PCT) methods.add(agg("손절 -" + (int) s + "%", s, paths, path -> stopExit(path, s, roundTripPct)));
 
-        // 권장 = 표본 충분(≥minSamples) 방식 중 평균 net 최대
+        // 권장 = 표본 충분(≥minSamples) + 비클러스터 방식 중 평균 net 최대.
+        // 클러스터 제외가 이 가드의 요점이다(2026-08-24 실측): D 완주 코호트 313건 중 139건(44%)이 20260731
+        // 하루라 "보유 D+5 +3.53%"가 나왔는데, 그 하루를 빼면 −2.42%로 부호가 뒤집힌다(전 horizon 동일).
+        // 건수 비중 44%는 문턱(80%)을 통과하므로 LOO 부호 반전 없이는 못 잡는다 — ControlAnalysisService가
+        // 2026-08-21에 받은 것과 같은 가드이며 여기엔 전파되지 않았었다.
         MethodResult best = methods.stream()
-                .filter(m -> m.samples() >= minSamples)
-                .max((a, b) -> Double.compare(a.avgNetPct(), b.avgNetPct()))
+                .filter(m -> m.samples() >= minSamples && !m.clustered())
+                .max(Comparator.comparingDouble(MethodResult::avgNetPct))
                 .orElse(null);
 
         return new MultidayExitComparison(strategy, all.size(), fullPaths, methods,
-                best == null ? "표본부족" : best.method(),
+                best == null ? "표본부족·클러스터" : best.method(),
                 best == null ? 0.0 : best.avgNetPct());
     }
 
-    /** outcomeId별 일봉 마크를 (거래일 오름차순) 경로로 묶는다. */
+    /** outcomeId별 일봉 마크를 (거래일 오름차순) 경로로 묶는다(진입일 미상). */
     List<Path> buildPaths(List<OutcomeDailyMark> marks) {
+        return buildPaths(marks, Map.of());
+    }
+
+    /** outcomeId별 일봉 마크를 경로로 묶는다. entryDates는 클러스터 판정용(없으면 진입일 null). */
+    List<Path> buildPaths(List<OutcomeDailyMark> marks, Map<Long, String> entryDates) {
         Map<Long, List<OutcomeDailyMark>> byOutcome = new LinkedHashMap<>();
         for (OutcomeDailyMark m : marks) {
             byOutcome.computeIfAbsent(m.getOutcomeId(), k -> new ArrayList<>()).add(m);
@@ -115,7 +154,8 @@ public class MultidayExitAnalysisService {
                 closes[i] = g.get(i).getClosePrice();
                 if (days[i] >= maxHoldDays) complete = true;
             }
-            paths.add(new Path(g.get(0).getBuyPrice(), days, closes, complete));
+            paths.add(new Path(g.get(0).getBuyPrice(), days, closes, complete,
+                    entryDates.get(g.get(0).getOutcomeId())));
         }
         return paths;
     }
@@ -124,14 +164,52 @@ public class MultidayExitAnalysisService {
 
     private MethodResult agg(String method, double param, List<Path> paths, Sim sim) {
         List<Double> nets = new ArrayList<>();
+        Map<String, int[]> cntByDay = new LinkedHashMap<>();
+        Map<String, double[]> sumByDay = new LinkedHashMap<>();
         for (Path p : paths) {
             OptionalDouble r = sim.netPct(p);
-            if (r.isPresent()) nets.add(r.getAsDouble());
+            if (r.isEmpty()) continue;               // 미해결(데이터 소진) → 표본 제외
+            double net = r.getAsDouble();
+            nets.add(net);
+            if (p.entryDate() == null) continue;     // 진입일 미상 → 일자 집계에서만 빠짐(net 평균엔 포함)
+            cntByDay.computeIfAbsent(p.entryDate(), k -> new int[1])[0]++;
+            sumByDay.computeIfAbsent(p.entryDate(), k -> new double[1])[0] += net;
         }
-        if (nets.isEmpty()) return new MethodResult(method, param, 0.0, 0.0, 0);
+        if (nets.isEmpty()) return new MethodResult(method, param, 0.0, 0.0, 0, 0, null, null, null, false);
+        int n = nets.size();
         double avg = nets.stream().mapToDouble(Double::doubleValue).average().orElse(0);
         long wins = nets.stream().filter(x -> x > 0).count();
-        return new MethodResult(method, param, round2(avg), round2(100.0 * wins / nets.size()), nets.size());
+        Cluster c = cluster(n, avg, cntByDay, sumByDay);
+        return new MethodResult(method, param, round2(avg), round2(100.0 * wins / n), n,
+                c.distinctDays(), round2n(c.maxDaySharePct()), c.topDay(), round2n(c.netExTopDayPct()), c.clustered());
+    }
+
+    record Cluster(int distinctDays, Double maxDaySharePct, String topDay,
+                   Double netExTopDayPct, boolean clustered) { }
+
+    /**
+     * 단일일 클러스터 판정(순수) — {@code ControlAnalysisService.toStat} 과 같은 규칙:
+     * 건수 편중(비중&gt;80% 또는 거래일&lt;3) <b>또는</b> 최대기여일 제외(LOO) 시 net 부호 반전.
+     *
+     * <p>진입일이 하나도 안 붙은 표본(구 백필·조인 실패)은 일자 집계가 비어 판정을 생략한다(clustered=false).
+     * 진단 부재를 "클러스터 아님"으로 오해하지 않도록 {@code distinctDays=0} 이 함께 노출된다.</p>
+     */
+    static Cluster cluster(int n, double net, Map<String, int[]> cntByDay, Map<String, double[]> sumByDay) {
+        if (cntByDay.isEmpty()) return new Cluster(0, null, null, null, false);
+        int days = cntByDay.size();
+        double share = 100.0 * cntByDay.values().stream().mapToInt(c -> c[0]).max().orElse(0) / n;
+        String topDay = sumByDay.entrySet().stream()
+                .max(Comparator.comparingDouble(e -> Math.abs(e.getValue()[0])))
+                .map(Map.Entry::getKey).orElse(null);
+        Double netExTop = null;
+        if (topDay != null && days > 1) {
+            int restN = n - cntByDay.get(topDay)[0];
+            if (restN > 0) netExTop = (net * n - sumByDay.get(topDay)[0]) / restN;
+        }
+        boolean clustered = share > MAX_DAY_SHARE_PCT
+                || days < MIN_DISTINCT_DAYS
+                || (netExTop != null && Math.signum(net) != Math.signum(netExTop));
+        return new Cluster(days, share, topDay, netExTop, clustered);
     }
 
     // ── 순수 시뮬 코어 (단위테스트 대상) ──────────────────────────────
@@ -191,5 +269,9 @@ public class MultidayExitAnalysisService {
 
     private static double round2(double v) {
         return Math.round(v * 100) / 100.0;
+    }
+
+    private static Double round2n(Double v) {
+        return v == null ? null : round2(v);
     }
 }

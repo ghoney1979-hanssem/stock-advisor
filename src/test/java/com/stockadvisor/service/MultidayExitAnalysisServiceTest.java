@@ -6,7 +6,9 @@ import com.stockadvisor.service.MultidayExitAnalysisService.Path;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -114,6 +116,92 @@ class MultidayExitAnalysisServiceTest {
         // outcomes/fullPaths는 두 모드에서 동일하게 '전체 기준'으로 보고돼 표본 축소를 알아볼 수 있다
         assertThat(fixed.outcomes()).isEqualTo(50);
         assertThat(fixed.fullPaths()).isEqualTo(25);
+    }
+
+    @Test
+    void 단일일_클러스터는_LOO_부호반전으로_잡아_권장에서_제외한다() {
+        // 2026-08-24 실측 구조 재현: 완주 코호트의 44%가 하루(20260731)인데 그날이 크게 이겨서 전체 net이 양수로
+        // 보이지만, 그 하루를 빼면 부호가 뒤집힌다. 건수 비중 44%는 문턱(80%)을 통과하므로 LOO 없이는 못 잡는다.
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        long id = 1;
+        for (int i = 0; i < 12; i++) {   // 20260731 — 하루에 12건, +10%
+            marks.addAll(fullPathOn(id++, "20260731", new long[]{10_000, 11_000, 11_000, 11_000}));
+        }
+        String[] others = {"20260801", "20260804", "20260805", "20260806", "20260807"};
+        for (String d : others) {        // 나머지 5거래일 — 각 3건, -2%
+            for (int i = 0; i < 3; i++) marks.addAll(fullPathOn(id++, d, new long[]{10_000, 9_800, 9_800, 9_800}));
+        }
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
+        MultidayExitAnalysisService.MethodResult h1 = hold(c, 1);
+
+        assertThat(h1.samples()).isEqualTo(27);
+        assertThat(h1.avgNetPct()).isGreaterThan(0);              // 전체는 양수(12건×+10% 가 끌어올림)
+        assertThat(h1.distinctDays()).isEqualTo(6);
+        assertThat(h1.maxDaySharePct()).isCloseTo(44.44, within(0.01));   // 문턱 80% 통과 = 비중만으론 못 잡음
+        assertThat(h1.topDay()).isEqualTo("20260731");
+        assertThat(h1.netExTopDayPct()).isCloseTo(-2.0, within(1e-6));    // 그 하루 빼면 음수 = 부호 반전
+        assertThat(h1.clustered()).isTrue();
+        // 클러스터 방식은 권장 후보에서 빠진다 — 남는 비클러스터 방식이 없으면 그렇게 보고한다.
+        assertThat(c.recommended()).isNotEqualTo("보유 D+1");
+    }
+
+    @Test
+    void 여러_거래일에_고르게_퍼진_표본은_클러스터가_아니다() {
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        long id = 1;
+        String[] days = {"20260801", "20260804", "20260805", "20260806", "20260807", "20260810"};
+        for (String d : days) {
+            for (int i = 0; i < 4; i++) marks.addAll(fullPathOn(id++, d, new long[]{10_000, 10_200, 10_200, 10_200}));
+        }
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
+        MultidayExitAnalysisService.MethodResult h1 = hold(c, 1);
+
+        assertThat(h1.distinctDays()).isEqualTo(6);
+        assertThat(h1.clustered()).isFalse();
+        assertThat(c.recommended()).isEqualTo("보유 D+1");   // 비클러스터라 권장으로 채택됨
+    }
+
+    @Test
+    void 진입일_미상이면_클러스터_판정을_생략한다() {
+        // 구 백필분(조인 실패)은 일자 집계가 비어 판정 불가 — degrade open(clustered=false)이되
+        // distinctDays=0 으로 "진단 없음"임이 드러나야 한다.
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        for (long id = 1; id <= 6; id++) marks.addAll(fullPath(id, new long[]{10_000, 9_900, 9_800, 9_700}));
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        // findEntryDatesByStrategy 는 Mockito 기본값(빈 리스트) — 진입일 미상 상황
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+
+        MultidayExitAnalysisService.MethodResult h1 = hold(d(svc.compare(true)), 1);
+        assertThat(h1.samples()).isEqualTo(6);
+        assertThat(h1.distinctDays()).isZero();
+        assertThat(h1.clustered()).isFalse();
+    }
+
+    private List<Object[]> entryDateRows(List<OutcomeDailyMark> marks) {
+        Map<Long, String> byOutcome = new LinkedHashMap<>();
+        for (OutcomeDailyMark m : marks) byOutcome.putIfAbsent(m.getOutcomeId(), entryDates.get(m.getOutcomeId()));
+        List<Object[]> rows = new ArrayList<>();
+        byOutcome.forEach((k, v) -> rows.add(new Object[]{k, v}));
+        return rows;
+    }
+
+    private final Map<Long, String> entryDates = new LinkedHashMap<>();
+
+    /** 진입일을 붙인 완주 경로(클러스터 판정 테스트용). */
+    private List<OutcomeDailyMark> fullPathOn(long id, String entryDate, long[] closes) {
+        entryDates.put(id, entryDate);
+        return fullPath(id, closes);
     }
 
     private List<OutcomeDailyMark> fullPath(long id, long[] closes) {

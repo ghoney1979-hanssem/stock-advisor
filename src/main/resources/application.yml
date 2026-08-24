@@ -98,6 +98,7 @@ stockadvisor:
     inverse-index-max-drop: ${SIGNAL_INVERSE_INDEX_MAX_DROP:4.0}    # 낙폭 상한 — 지수 당일 -이값% 초과 진행 후엔 진입 보류(고점매수 방지, 2026-07-20 4전패 실측). 0=비활성
     inverse-rebound-fade-max-pct: ${SIGNAL_INVERSE_REBOUND_FADE_MAX_PCT:2.0}  # 반등일(REBOUND_DAY) 한정 진입 상한 확대 — -1% → +이값%(fade 포착). 평상일 불변. 0=비활성(2026-07-22)
     inverse-fade-confirm-pct: ${SIGNAL_INVERSE_FADE_CONFIRM_PCT:1.0}  # 위 확대창을 열 조건 — 당일 지수 고점 대비 이값%p 이상 실제로 밀렸을 것(fade 진행 확인). 0=비활성(2026-08-20)
+    inverse-block-when-exit-active: ${SIGNAL_INVERSE_BLOCK_WHEN_EXIT_ACTIVE:true}   # 진입 시점에 인버스 레벨-청산(지수 > -inverse-exit.recovery-pct)이 이미 참이면 진입 거부(EXIT_ACTIVE)
     inverse-index-map: ${SIGNAL_INVERSE_INDEX_MAP:114800:0001,251340:1001}  # 인버스코드:지수코드(0001 코스피/1001 코스닥)
     inverse-index-require-falling: ${SIGNAL_INVERSE_INDEX_REQUIRE_FALLING:true}  # 지수 흐름 확인 — 최근 모멘텀(mom10/30)>0(회복 중)이면 진입 보류(인버스 고점매수 회피). 흐름 미가용 시 생략
     inverse-reentry-minutes: ${SIGNAL_INVERSE_REENTRY_MINUTES:20}  # 인버스 재진입 쿨다운(분) — 청산 후 재붕괴 재포착(활성 포지션 0 + 마지막 진입 후 이 시간 경과 시 같은 날 재평가). 0=비활성(하루 1회)

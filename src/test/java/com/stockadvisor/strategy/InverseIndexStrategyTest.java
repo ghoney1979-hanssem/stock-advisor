@@ -72,11 +72,12 @@ class InverseIndexStrategyTest {
     }
 
     @Test
-    void 반등일이면_플러스권_fade_진입_허용() {
-        // 2026-07-22 확대: REBOUND_DAY 성립일(당일 고점 +2%↑ & 기저 비강세)엔 상한 -1% → +2%.
-        // 아침 +2.8% 찍고 +1.5%로 꺾여 내려오는 중(고점 대비 -1.3%p = fade 확인) + mom10/30 동시 하락 → fade 진입.
+    void 반등일_fade가_청산선_아래까지_내려오면_진입() {
+        // 2026-07-22 확대창(상한 -1% → +2%)은 살아 있다 — 단 2026-08-24부터 청산선(-recovery 0.5%)이 하한이다.
+        // 아침 +2.8% 찍고 -0.8%까지 밀림: 평상일 상한(-1%) 위라 확대창이 있어야 통과하고, 청산선(-0.5%) 아래라
+        // 사자마자 팔리지 않는다 = 확대창이 실제로 열어주는 유효 구간.
         KisApiClient kis = mock(KisApiClient.class);
-        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.8, 1.5);   // 스캔 1회차 고점 → 2회차 fade
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.8, -0.8);   // 스캔 1회차 고점 → 2회차 fade
         com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
         when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
         when(regime.intradayFlow("KOSDAQ")).thenReturn(
@@ -87,6 +88,51 @@ class InverseIndexStrategyTest {
 
         s.rejectReason(ctx("251340", true));   // 1회차(+2.8%) — 당일 고점 기록
         assertThat(s.rejectReason(ctx("251340", true))).isNull();
+    }
+
+    @Test
+    void 반등일_fade_확인을_통과해도_지수가_청산선_위면_EXIT_ACTIVE() {
+        // 2026-08-24 실측 재현(251340 3사이클 1~2분 보유 전패): 코스닥 고점 +2.37% → 진입 +1.28%.
+        // 고점 대비 1.09%p라 fade 확인(1.0%p)은 통과하지만, 그 레벨은 이미 청산 트리거(지수 > -0.5%)라
+        // 다음 청산 틱에 "지수회복"으로 팔린다 = 왕복비용만 내는 진입. 진입 단계에서 막아야 한다.
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.37, 1.28);
+        com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
+        when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
+        when(regime.intradayFlow("KOSDAQ")).thenReturn(
+                new com.stockadvisor.service.MarketRegimeService.IntradayFlow(-0.3, -0.6, null, true));
+        InverseIndexStrategy s = strategy(kis);
+        s.setRegimeService(regime);
+
+        s.rejectReason(ctx("251340", true));   // 1회차(+2.37%) — 당일 고점 기록
+        assertThat(s.rejectReason(ctx("251340", true))).isEqualTo("EXIT_ACTIVE");
+    }
+
+    @Test
+    void 겹침차단_비활성이면_종전대로_플러스권_fade_진입() {
+        // SIGNAL_INVERSE_BLOCK_WHEN_EXIT_ACTIVE=false → 2026-07-22~08-20 동작 그대로(원복 경로 보장).
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(2.8, 1.5);
+        com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
+        when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
+        when(regime.intradayFlow("KOSDAQ")).thenReturn(
+                new com.stockadvisor.service.MarketRegimeService.IntradayFlow(-0.3, -0.6, null, true));
+        InverseIndexStrategy s = strategy(kis);
+        s.setRegimeService(regime);
+        s.setBlockWhenExitActive(false);
+
+        s.rejectReason(ctx("251340", true));
+        assertThat(s.rejectReason(ctx("251340", true))).isNull();
+    }
+
+    @Test
+    void 겹침판정은_청산_레벨분기와_부등호가_같다() {
+        // PositionExitService.inverseExitReason 의 레벨 분기(chg > -recovery → 청산)와 정확히 대칭.
+        // 경계(chg == -recovery)는 청산이 발사되지 않으므로 진입 허용이어야 한다.
+        assertThat(InverseIndexStrategy.exitAlreadyActive(-0.49, 0.5)).isTrue();
+        assertThat(InverseIndexStrategy.exitAlreadyActive(-0.50, 0.5)).isFalse();   // 경계 = 허용
+        assertThat(InverseIndexStrategy.exitAlreadyActive(-0.51, 0.5)).isFalse();
+        assertThat(InverseIndexStrategy.exitAlreadyActive(1.28, 0)).isFalse();      // 0=비활성
     }
 
     @Test
@@ -121,9 +167,11 @@ class InverseIndexStrategyTest {
 
     @Test
     void fade_확인_비활성이면_종전동작() {
-        // fadeConfirmPct=0 → 2026-07-22 도입분 그대로(반등일이면 고점 근처여도 확대창 통과)
+        // fadeConfirmPct=0 → 2026-07-22 도입분 그대로(반등일이면 고점 근처여도 확대창 통과).
+        // ⚠️ 값이 -0.8%인 이유: 확대창 통과만 보려는 테스트라 청산선(-0.5%) 겹침 가드에 걸리지 않는 구간을 쓴다
+        //    (평상일 상한 -1% 위 = 확대창 없이는 못 통과, 청산선 아래 = EXIT_ACTIVE 아님).
         KisApiClient kis = mock(KisApiClient.class);
-        when(kis.fetchIndexChangeRate("1001")).thenReturn(1.84);
+        when(kis.fetchIndexChangeRate("1001")).thenReturn(-0.8);
         com.stockadvisor.service.MarketRegimeService regime = mock(com.stockadvisor.service.MarketRegimeService.class);
         when(regime.isReboundDay("KOSDAQ", 2.0)).thenReturn(true);
         InverseIndexStrategy s = strategy(kis);
