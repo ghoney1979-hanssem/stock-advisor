@@ -125,6 +125,25 @@ public class StrategyEvaluator {
             java.util.Set.of("SQUEEZE_BREAKOUT_H", "RSI_REVERSAL_G", "VALUE_REVERSAL_J");
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.exec-overheat-min-strength:200.0}")
     private double execOverheatMinStrength = 200.0;   // 0=비활성
+    // ⚠️ 체결강도 가드 대상은 별도 csv로 분리(2026-08-25) — RET5D_OVERHEAT은 종전대로 OVERHEAT_FAMILY 전체.
+    // 근거: `control-analysis`(close, 25거래일)에서 가드가 전략별로 갈린다 —
+    //   H: EXEC_OVERHEAT 차단분 −0.07%(n=103) > 진입분 −0.74%(n=758) → 차단이 더 나은 후보를 버리고 있다(+0.67%p).
+    //   J: 차단분 −1.57% < 진입분 −0.28% → 가드가 옳다(2026-08-24 확인). G도 차단분이 진입분보다 낫지 않다.
+    // → prod는 H를 뺀 `RSI_REVERSAL_G,VALUE_REVERSAL_J`. 코드 기본값은 종전 동작(H 포함) 유지.
+    // ⚠️ 도입 근거(2026-07-24)는 3거래일 표본이었다 — 표본이 20배 쌓이자 H에서만 부호가 뒤집혔다.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.exec-overheat-strategies:SQUEEZE_BREAKOUT_H,RSI_REVERSAL_G,VALUE_REVERSAL_J}")
+    private String execOverheatStrategiesCsv = "SQUEEZE_BREAKOUT_H,RSI_REVERSAL_G,VALUE_REVERSAL_J";
+    private volatile java.util.Set<String> execOverheatStrategies;
+
+    /** 체결강도 과열 가드 대상 전략 — csv 지연 파싱(빈값=가드 전면 비활성). */
+    private boolean execOverheatApplies(String strategy) {
+        java.util.Set<String> set = execOverheatStrategies;
+        if (set == null) {
+            set = PolicyGate.parseCsv(execOverheatStrategiesCsv);
+            execOverheatStrategies = set;
+        }
+        return set.contains(strategy);
+    }
     // 다일 과열 가드(2026-07-29): 흐름↑ 진입 분석(n1,419)에서 ret5d 단조 관계 실측 — 5일 −5% 이하 +0.17%/48승률 vs
     // +10% 초과 −1.21%. 반등 계열만 깨끗하게 갈림(H +0.17 vs −1.23, G +0.46 vs −0.87) → "5일 급등 후 반등 매수" 보류.
     // 체결강도(당일 과열)의 다일 버전 — 추격 금지가 시간축 양쪽에서 완성. K/B는 방향 반대라 미적용(전략 조건부 원칙).
@@ -494,7 +513,7 @@ public class StrategyEvaluator {
                 log.info("[{}] 반등일 순추세 보류 [{}] — 당일 {} 급등 + 기저 비강세(V자 초입)", strategy.name(), stockCode, market);
             }
             // 과열 추격 가드 — 반등 계열(H/G/J) 진입 직전 후보만 체결강도 1콜(진입 태깅과 공유). 실패 시 생략(degrade open).
-            if (reject == null && execOverheatMinStrength > 0 && OVERHEAT_FAMILY.contains(strategy.name())) {
+            if (reject == null && execOverheatMinStrength > 0 && execOverheatApplies(strategy.name())) {
                 if (!strengthFetched) {
                     strengthFetched = true;
                     try {

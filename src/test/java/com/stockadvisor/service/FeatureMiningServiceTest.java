@@ -177,4 +177,22 @@ class FeatureMiningServiceTest {
                 .buckets().stream().filter(b -> b.range().equals("8~15")).findFirst().orElseThrow()
                 .netAvgPct();
     }
+
+    @Test
+    void 겹치는_거래일_구간만_edge에_쓴다() {
+        // 진입군은 20260701~20260825, 대조군은 20260825 하루만 태깅된 축(체결강도가 실제로 이 상태였다)
+        assertThat(FeatureMiningService.overlapWindow(
+                List.of("20260701", "20260825"), List.of("20260825")))
+                .containsExactly("20260825", "20260825");
+        // 완전히 겹치면 그대로
+        assertThat(FeatureMiningService.overlapWindow(
+                List.of("20260701", "20260825"), List.of("20260702", "20260820")))
+                .containsExactly("20260702", "20260820");
+        // 구간이 어긋나 겹치지 않으면 null(=edge 산출 불가)
+        assertThat(FeatureMiningService.overlapWindow(
+                List.of("20260701", "20260710"), List.of("20260801"))).isNull();
+        // 한쪽이 비면 null
+        assertThat(FeatureMiningService.overlapWindow(List.of(), List.of("20260825"))).isNull();
+        assertThat(FeatureMiningService.overlapWindow(List.of("20260825"), List.of())).isNull();
+    }
 }

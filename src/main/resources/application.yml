@@ -109,6 +109,8 @@ stockadvisor:
     fresh-news-window-minutes: ${SIGNAL_FRESH_NEWS_WINDOW_MINUTES:60}
     # 과열 추격 필터 — 반등계열(H/G/J) 진입 시 체결강도 ≥ 임계면 보류(EXEC_OVERHEAT). 2026-07-24 HLB 계열 실손실 계기, 근거는 7/16~20 강도별 성과. 0=비활성
     exec-overheat-min-strength: ${SIGNAL_EXEC_OVERHEAT_MIN_STRENGTH:200.0}
+    # [체결강도 가드 대상] 전략별로 갈려 csv 분리(2026-08-25): H는 차단분 -0.07%(n=103) > 진입분 -0.74% 라 가드가 역효과 → prod는 G,J만.
+    exec-overheat-strategies: ${SIGNAL_EXEC_OVERHEAT_STRATEGIES:SQUEEZE_BREAKOUT_H,RSI_REVERSAL_G,VALUE_REVERSAL_J}
     # 다일 과열 필터 — 반등계열(H/G/J) 진입 시 최근 5일 수익률 > 이값%면 보류(RET5D_OVERHEAT). 흐름↑ 손실 분석(2026-07-29) 근거. 0=비활성
     ret5d-overheat-max-pct: ${SIGNAL_RET5D_OVERHEAT_MAX_PCT:10.0}
     # 전역(전략 무관) 진입 필터 — feature-mining 27거래일·비클러스터 표본에서 진입-대조군 edge가 음수인 구간.

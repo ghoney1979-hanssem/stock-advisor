@@ -73,11 +73,15 @@ public class FeatureMiningService {
      * @param controlCoveragePct                            controlN/controlTotalN×100. 이 값이 낮으면 대조군이 <b>편향된 부분집합</b>
      * @param edgeVsControlPct                              진입net − 대조군net(양수면 진입이 이 조건에서 가치 추가).
      *                                                      ⚠️ <b>커버리지 미달이면 null</b>(아래 MIN_CONTROL_COVERAGE_PCT 참조)
+     * @param edgeFrom/edgeTo/edgeEnteredN/edgeEnteredNetPct edge 계산에 실제로 쓰인 <b>겹치는 거래일 구간</b>과 그 구간의 진입 표본·net.
+     *                                                      ⚠️ 축마다 태깅 시작일이 달라(뉴스 8/22·호가불균형 8/22·체결강도 8/25 등)
+     *                                                      정렬 없이 빼면 edge가 "조건 차이"가 아니라 <b>기간 차이</b>를 잰다 — 아래 {@link #overlapWindow} 참조
      */
     public record Bucket(String feature, String range, int n, int distinctDays, double maxDaySharePct,
                          double netAvgPct, double winRatePct, boolean clustered, String topStrategy,
                          int controlN, Double controlNetPct, Double edgeVsControlPct,
-                         int controlTotalN, double controlCoveragePct) {}
+                         int controlTotalN, double controlCoveragePct,
+                         String edgeFrom, String edgeTo, int edgeEnteredN, Double edgeEnteredNetPct) {}
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
@@ -299,20 +303,81 @@ public class FeatureMiningService {
         String top = strat.entrySet().stream().max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey).orElse("?");
         // 같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나".
+        // ⚠️ 기간 정렬이 먼저다(2026-08-25): 축마다 대조군 태깅 시작일이 달라(체결강도는 2026-08-25부터)
+        // 그냥 빼면 27거래일 진입군 vs 1거래일 대조군을 비교해 edge가 "그날 시장이 좋았다"를 잰다(실측 −1.89~−6.37 전부 허수).
+        // → 두 군이 겹치는 거래일 구간으로 양쪽을 자른 뒤에만 edge를 낸다.
+        String[] win = overlapWindow(datesOf(g), datesOf(controlG));
+        List<TradeOutcome> gw = inWindow(g, win);
+        List<TradeOutcome> cw = inWindow(controlG, win);
         // 커버리지(=해당 horizon 가격 보유 대조군 / 전체 대조군)가 낮으면 편향 부분집합이라 net·edge를 내지 않는다.
         double cs = 0; int resolved = 0;
-        for (TradeOutcome o : controlG) {
+        for (TradeOutcome o : cw) {
             Double net = netByOutcome.get(o.getId());
             if (net == null) continue;
             cs += net; resolved++;
         }
-        double coverage = controlG.isEmpty() ? 0 : 100.0 * resolved / controlG.size();
+        double coverage = cw.isEmpty() ? 0 : 100.0 * resolved / cw.size();
         boolean trustworthy = resolved > 0 && coverage >= MIN_CONTROL_COVERAGE_PCT;
         Double controlNet = trustworthy ? round2(cs / resolved) : null;
-        Double edge = controlNet == null ? null : round2(enteredNet - controlNet);
+        // 구간 내 진입 net — edge의 왼쪽 항. 전체 netAvgPct(pocket 랭킹용)는 그대로 두고 여기만 정렬한다.
+        Double alignedNet = null;
+        if (!gw.isEmpty()) {
+            double as = 0;
+            for (TradeOutcome o : gw) as += netByOutcome.get(o.getId());
+            alignedNet = round2(as / gw.size());
+        }
+        Double edge = (controlNet == null || alignedNet == null) ? null : round2(alignedNet - controlNet);
         return new Bucket(feature, range, n, days.size(), round2(maxShare),
                 enteredNet, round2(100.0 * wins / n), clustered, top,
-                resolved, controlNet, edge, controlG.size(), round2(coverage));
+                resolved, controlNet, edge, cw.size(), round2(coverage),
+                win == null ? null : win[0], win == null ? null : win[1], gw.size(), alignedNet);
+    }
+
+    private static List<String> datesOf(List<TradeOutcome> rows) {
+        List<String> out = new ArrayList<>();
+        for (TradeOutcome o : rows) if (o.getAlertDate() != null) out.add(o.getAlertDate());
+        return out;
+    }
+
+    private static List<TradeOutcome> inWindow(List<TradeOutcome> rows, String[] win) {
+        if (win == null) return List.of();
+        List<TradeOutcome> out = new ArrayList<>();
+        for (TradeOutcome o : rows) {
+            String d = o.getAlertDate();
+            if (d != null && d.compareTo(win[0]) >= 0 && d.compareTo(win[1]) <= 0) out.add(o);
+        }
+        return out;
+    }
+
+    /**
+     * 진입군·대조군이 <b>겹치는 거래일 구간</b> {@code [from,to]}(yyyyMMdd) — 없으면 null.
+     *
+     * <p><b>왜 필요한가</b>: feature 축마다 태깅 시작일이 다르다(수급·뉴스는 소급돼 전 구간, 호가불균형은 2026-08-22~,
+     * 체결강도 대조군은 2026-08-25~). 정렬 없이 진입net−대조군net을 빼면 <b>조건 차이가 아니라 기간 차이</b>를 재게 된다 —
+     * 실측 2026-08-25: 체결강도 축의 edge가 −1.89~−6.37로 나왔는데 진입군은 27거래일, 대조군은 <b>그날 하루</b>뿐이었고
+     * 그날이 강세 반등일이라 대조군 net만 부풀었다(전부 허수).</p>
+     *
+     * <p>날짜가 yyyyMMdd 고정폭이라 <b>사전식 비교가 곧 시간순 비교</b>다.</p>
+     */
+    static String[] overlapWindow(List<String> entryDates, List<String> controlDates) {
+        if (entryDates.isEmpty() || controlDates.isEmpty()) return null;
+        String eFrom = minOf(entryDates), eTo = maxOf(entryDates);
+        String cFrom = minOf(controlDates), cTo = maxOf(controlDates);
+        String from = eFrom.compareTo(cFrom) >= 0 ? eFrom : cFrom;   // 늦게 시작한 쪽
+        String to = eTo.compareTo(cTo) <= 0 ? eTo : cTo;             // 먼저 끝난 쪽
+        return from.compareTo(to) <= 0 ? new String[]{from, to} : null;
+    }
+
+    private static String minOf(List<String> v) {
+        String m = v.get(0);
+        for (String x : v) if (x.compareTo(m) < 0) m = x;
+        return m;
+    }
+
+    private static String maxOf(List<String> v) {
+        String m = v.get(0);
+        for (String x : v) if (x.compareTo(m) > 0) m = x;
+        return m;
     }
 
     private double netPct(TradeOutcome o, long price) {
