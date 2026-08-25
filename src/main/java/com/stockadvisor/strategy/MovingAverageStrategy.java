@@ -24,14 +24,18 @@ public class MovingAverageStrategy implements TradingStrategy {
     private final boolean requireFresh;
     /** [보완 필터②] 돌파 강도 버퍼(%) — 현재가가 MA20보다 이 %p 이상 위일 때만 진입(간신히 넘은 whipsaw 제외). 0=off. */
     private final double breakoutBufferPct;
+    /** [보완 필터③] 진입시점 지수흐름(mom30)&lt;0이면 보류. 기본 off. */
+    private final boolean requireRisingFlow;
 
     public MovingAverageStrategy(
             @Value("${stockadvisor.signal.ma-trend-enabled:true}") boolean enabled,
             @Value("${stockadvisor.signal.ma-trend-require-fresh:false}") boolean requireFresh,
-            @Value("${stockadvisor.signal.ma-trend-breakout-buffer-pct:0.0}") double breakoutBufferPct) {
+            @Value("${stockadvisor.signal.ma-trend-breakout-buffer-pct:0.0}") double breakoutBufferPct,
+            @Value("${stockadvisor.signal.ma-trend-require-rising-flow:false}") boolean requireRisingFlow) {
         this.enabled = enabled;
         this.requireFresh = requireFresh;
         this.breakoutBufferPct = breakoutBufferPct;
+        this.requireRisingFlow = requireRisingFlow;
     }
 
     @Override
@@ -58,7 +62,27 @@ public class MovingAverageStrategy implements TradingStrategy {
         if (breakoutBufferPct > 0 && ctx.signal().maDistPct() < breakoutBufferPct) return "WEAK_BREAKOUT";
         // [보완 필터①] 분봉 신선도 — 돌파가 이미 식었으면(모멘텀↓·거래 위축) 제외(MFE 3.33 vs MAE -4.34 되돌림 회피). off면 미적용.
         if (requireFresh && !ctx.signal().maBreakoutFresh()) return "NOT_FRESH";
+        // [보완 필터③] 흐름↓ 스킵(마지막 게이트) — F 조건을 다 통과한 후보만 흐름으로 최종 판정.
+        // 그래야 FLOW_DOWN 대조군 = "F 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
+        String flow = flowReject(ctx.indexMom30(), requireRisingFlow);
+        if (flow != null) return flow;
         return null;                                      // 건전성·유동성은 상위 evaluateStock에서 이미 필터됨
+    }
+
+    /**
+     * 흐름↓ 스킵 판정(순수) — 진입 시점 지수 mom30 &lt; 0이면 {@code "FLOW_DOWN"}.
+     *
+     * <p>근거(2026-08-25 {@code flow-analysis}, <b>lag30·lag60 양쪽 일관</b>): F는 흐름↓ net <b>−0.95%(n=387)/−0.95%(n=388)</b>
+     * vs 흐름↑ <b>−0.47%(n=572)/−0.46%(n=572)</b> — 추세추종이라 지수가 내리는 중의 MA20 상향돌파는 대체로 가짜 돌파(false breakout)다.
+     * A·G·J에 같은 기준(양 lag 일관 + 표본 충분)으로 적용한 필터와 동일 형태.</p>
+     *
+     * <p>⚠️ <b>흐름 미산출(null)이면 미적용</b>(degrade open — 개장 ~30분·조회실패).
+     * ⚠️ 흐름 방향의 유불리는 <b>전략마다 반대</b>다(B는 딥바잉이라 흐름↓ 우위) — 전역 게이트로 만들지 말 것.
+     * ⚠️ F는 LIVE 화이트리스트 제외 상태(2026-08-21)라 <b>즉시 손익 효과는 0</b>이고, 재편입 판단용 섀도우 품질 개선이 목적.</p>
+     */
+    static String flowReject(Double indexMom30, boolean require) {
+        if (!require || indexMom30 == null) return null;
+        return indexMom30 < 0.0 ? "FLOW_DOWN" : null;
     }
 
     @Override

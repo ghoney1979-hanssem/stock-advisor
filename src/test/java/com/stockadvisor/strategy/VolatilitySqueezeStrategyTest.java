@@ -12,8 +12,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class VolatilitySqueezeStrategyTest {
 
-    private final VolatilitySqueezeStrategy strategy = new VolatilitySqueezeStrategy(true, false);
-    private final VolatilitySqueezeStrategy confirm = new VolatilitySqueezeStrategy(true, true);
+    private final VolatilitySqueezeStrategy strategy = new VolatilitySqueezeStrategy(true, false, false);
+    private final VolatilitySqueezeStrategy confirm = new VolatilitySqueezeStrategy(true, true, false);
 
     private SignalResult signal(boolean squeeze) {
         return new SignalResult(1.0, 0.0, 10_000, 1_000_000, false, false, false, 0, false, false, squeeze);
@@ -70,5 +70,33 @@ class VolatilitySqueezeStrategyTest {
     @Test
     void 확인필터_on_신선도_충족이면_진입() {
         assertThat(confirm.rejectReason(ctxFull(signalFull(true, true)))).isNull();
+    }
+
+    @Test
+    void 흐름필터_켜면_흐름하락에서_FLOW_DOWN_이고_미산출은_통과() {
+        VolatilitySqueezeStrategy flowOn = new VolatilitySqueezeStrategy(true, false, true);
+        // 흐름↓(mom30 < 0) → 보류
+        assertThat(flowOn.rejectReason(flowCtx(-0.5))).isEqualTo("FLOW_DOWN");
+        // 흐름↑(mom30 ≥ 0) → 진입
+        assertThat(flowOn.rejectReason(flowCtx(0.0))).isNull();
+        // 흐름 미산출(개장 ~30분·조회실패) → degrade open(필터 미적용)
+        assertThat(flowOn.rejectReason(flowCtx(null))).isNull();
+        // 기본(off)이면 흐름↓여도 종전대로 진입
+        assertThat(strategy.rejectReason(flowCtx(-0.5))).isNull();
+    }
+
+    @Test
+    void 흐름필터는_마지막_게이트라_H고유_사유가_우선한다() {
+        VolatilitySqueezeStrategy flowOn = new VolatilitySqueezeStrategy(true, false, true);
+        // 스퀴즈 돌파가 아니면 흐름↓여도 NO_SQUEEZE(기존 사유 통계 오염 방지)
+        StrategyContext noSqueeze = new StrategyContext("005930", signal(false), 50, RecommendationType.HOLD,
+                null, false, false, null, -0.5);
+        assertThat(flowOn.rejectReason(noSqueeze)).isEqualTo("NO_SQUEEZE");
+    }
+
+    /** 다른 조건은 모두 통과시키고 흐름만 바꾼 ctx(흐름이 마지막 게이트임을 확인). */
+    private StrategyContext flowCtx(Double indexMom30) {
+        return new StrategyContext("005930", signal(true), 50, RecommendationType.HOLD,
+                null, false, false, null, indexMom30);
     }
 }

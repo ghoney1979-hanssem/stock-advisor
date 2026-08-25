@@ -164,6 +164,10 @@ stockadvisor:
     # [G/J] 동일 필터 — 반등 계열은 흐름↓에서 일관 열위(2026-08-21, lag30·60 양쪽): G 흐름↓ -0.90/-0.88 vs 흐름↑ -0.08/-0.05, J -0.90 vs -0.17/-0.15
     rsi-reversal-require-rising-flow: ${SIGNAL_G_REQUIRE_RISING_FLOW:false}
     value-reversal-require-rising-flow: ${SIGNAL_J_REQUIRE_RISING_FLOW:false}
+    # [F/H] 동일 필터 — 추세 계열도 흐름↓에서 일관 열위(2026-08-25, lag30·60 양쪽): F 흐름↓ -0.95/-0.95(n=387/388) vs 흐름↑ -0.47/-0.46(n=572),
+    # H 흐름↓ -0.78/-0.77(n=314/315) vs 흐름↑ -0.38/-0.35(n=428/427). 둘 다 LIVE 제외 상태라 즉시 손익 효과 0 — 재편입 판단용 섀도우 품질 개선.
+    ma-trend-require-rising-flow: ${SIGNAL_F_REQUIRE_RISING_FLOW:false}
+    squeeze-require-rising-flow: ${SIGNAL_H_REQUIRE_RISING_FLOW:false}
     # [L] 눌림 반전(2026-08-21 신설, 섀도우) — 기존 전략들이 사는 것의 거울상.
     # 근거: 유니버스 lift(급증 -0.20%p / MA아래·저거래량 양수) + 거래량배수 단조 역방향 + B의 WEAK_VOLUME 대조군 + 전역 필터 3종.
     reversal-enabled: ${SIGNAL_REVERSAL_ENABLED:true}
