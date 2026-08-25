@@ -69,6 +69,20 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
             + "com.stockadvisor.domain.OrderStatus.FILLED)")
     long countActivePositionsByStockCode(@Param("stockCode") String stockCode);
 
+    /**
+     * 특정 <b>전략</b>의 활성(미청산) 매수 포지션 수 — 전략별 포지션 상한 검증용(2026-08-25).
+     * 상태 조건은 {@link #countActivePositionsByStockCode}와 동일(승인대기/접수/체결 포함, 죽은 주문 제외).
+     */
+    @Query("select count(o) from Order o where o.side = com.stockadvisor.domain.OrderSide.BUY "
+            + "and o.closed = false and o.strategy = :strategy "
+            + "and o.status in (com.stockadvisor.domain.OrderStatus.PENDING_APPROVAL, "
+            + "com.stockadvisor.domain.OrderStatus.NEW, "
+            + "com.stockadvisor.domain.OrderStatus.DRY_RUN, "
+            + "com.stockadvisor.domain.OrderStatus.SUBMITTED, "
+            + "com.stockadvisor.domain.OrderStatus.PARTIALLY_FILLED, "
+            + "com.stockadvisor.domain.OrderStatus.FILLED)")
+    long countActivePositionsByStrategy(@Param("strategy") String strategy);
+
     /** 미청산 매수 포지션 (청산 대상). REJECTED/FAILED/CANCELLED 제외. */
     @Query("select o from Order o where o.side = com.stockadvisor.domain.OrderSide.BUY and o.closed = false "
             + "and o.status in (com.stockadvisor.domain.OrderStatus.DRY_RUN, "

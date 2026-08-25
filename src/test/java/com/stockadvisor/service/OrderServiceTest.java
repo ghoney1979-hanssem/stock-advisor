@@ -247,6 +247,51 @@ class OrderServiceTest {
     }
 
     @Test
+    void submitEntry_전략별_보유상한_도달하면_스킵() {
+        PolicyGate gate = mock(PolicyGate.class);
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        when(repo.countActivePositionsByStrategy("REVERSAL_L")).thenReturn(5L);   // 이미 5종목 보유
+        OrderService svc = new OrderService(policy(TradingMode.DRY_RUN), gate, repo, kis,
+                mock(DiscordNotifier.class), mock(StrategyPerformanceGate.class), riskGuard(), sizer(kis), mock(StrategyHoldTimeProvider.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(svc, "maxPositionsPerStrategyCsv", "REVERSAL_L:5");
+
+        OrderService.OrderResult r = svc.submitEntry("REVERSAL_L", "005930", "전기·전자", "KOSPI", 30_000, "k1");
+
+        assertThat(r.status()).isEqualTo(OrderService.ResultStatus.REJECTED);
+        assertThat(r.message()).contains("전략별 동시 보유 상한");
+        verify(kis, never()).fetchBalance();   // 잔고조회 전에 끊긴다(KIS 호출 절약)
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void submitEntry_상한_미지정_전략은_무제한() {
+        PolicyGate gate = mock(PolicyGate.class);
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        when(repo.countActivePositionsByStrategy("VOLUME_LEADING_B")).thenReturn(99L);
+        when(kis.fetchBalance()).thenReturn(balance(10_000_000));
+        when(gate.evaluate(any(), any())).thenReturn(PolicyGate.PolicyDecision.allow());
+        OrderService svc = new OrderService(policy(TradingMode.DRY_RUN), gate, repo, kis,
+                mock(DiscordNotifier.class), mock(StrategyPerformanceGate.class), riskGuard(), sizer(kis), mock(StrategyHoldTimeProvider.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(svc, "maxPositionsPerStrategyCsv", "REVERSAL_L:5");
+
+        OrderService.OrderResult r = svc.submitEntry("VOLUME_LEADING_B", "005930", "전기·전자", "KOSPI", 30_000, "k1");
+
+        assertThat(r.status()).isNotEqualTo(OrderService.ResultStatus.REJECTED);   // B는 목록에 없어 무제한
+    }
+
+    @Test
+    void 전략별_상한_csv_파싱() {
+        assertThat(OrderService.parsePositionCaps("REVERSAL_L:5,MA_TREND_F:3"))
+                .containsEntry("REVERSAL_L", 5L).containsEntry("MA_TREND_F", 3L);
+        // 오타·0·음수는 조용히 무시(설정 실수로 진입이 전면 차단되지 않게)
+        assertThat(OrderService.parsePositionCaps("REVERSAL_L:abc,X:0,Y:-1,Z")).isEmpty();
+        assertThat(OrderService.parsePositionCaps("")).isEmpty();
+        assertThat(OrderService.parsePositionCaps(null)).isEmpty();
+    }
+
+    @Test
     void submitEntry_가격이_한도초과면_수량0_스킵() {
         PolicyGate gate = mock(PolicyGate.class);
         OrderRepository repo = mock(OrderRepository.class);

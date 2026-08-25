@@ -53,6 +53,42 @@ public class OrderService {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.max-positions-per-group:1}")
     private long maxPositionsPerGroup = 1;   // 같은 계열(그룹 키) 최대 활성 포지션. 0=비활성
 
+    // 전략별 동시 보유 상한(csv "STRATEGY:N", 2026-08-25) — 슬롯이 선착순이라 신호가 많은 전략이 리스크 예산을 독점한다.
+    // 계기: L(눌림 반전)이 하루 84~89건을 내는데 거래량 급증을 요구하지 않아 개장 직후부터 신호가 쏟아진다.
+    // 순자산 1,054만·부트스트랩 ×0.5(종목당 2.5%)·BEAR 노출상한 30% 기준으로 L 혼자 ~12종목 = 예산 전액을 채울 수 있어
+    // D·G·J·K가 사실상 밀려난다(인버스는 노출가드 면제라 생존). 미지정 전략은 무제한(종전 동작).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.max-positions-per-strategy:}")
+    private String maxPositionsPerStrategyCsv = "";
+    private volatile java.util.Map<String, Long> maxPositionsPerStrategy;
+
+    /** "STRATEGY:N,STRATEGY2:M" 파싱(지연). 값이 숫자가 아니거나 ≤0이면 그 항목은 무시(=무제한). */
+    static java.util.Map<String, Long> parsePositionCaps(String csv) {
+        java.util.Map<String, Long> m = new java.util.HashMap<>();
+        if (csv == null) return m;
+        for (String part : csv.split(",")) {
+            String[] kv = part.split(":");
+            if (kv.length != 2) continue;
+            String k = kv[0].trim();
+            if (k.isEmpty()) continue;
+            try {
+                long v = Long.parseLong(kv[1].trim());
+                if (v > 0) m.put(k, v);
+            } catch (NumberFormatException ignored) {
+                // 잘못된 값은 조용히 무시 — 설정 오타로 진입이 전면 차단되는 것보다 낫다(degrade open)
+            }
+        }
+        return m;
+    }
+
+    private long positionCapFor(String strategy) {
+        java.util.Map<String, Long> m = maxPositionsPerStrategy;
+        if (m == null) {
+            m = parsePositionCaps(maxPositionsPerStrategyCsv);
+            maxPositionsPerStrategy = m;
+        }
+        return m.getOrDefault(strategy, 0L);   // 0 = 상한 없음
+    }
+
     private String companyName(String stockCode) {
         if (companyRepository == null || stockCode == null) return null;
         try {
@@ -179,6 +215,16 @@ public class OrderService {
                     log.info("[주문] 같은 계열({}) 기보유 {}건 — 계열 중복 진입 스킵 [{}] {}", group, held, strategy, stockCode);
                     return OrderResult.rejected("같은 계열(" + group + ") 활성 포지션 존재 — 동반 급등락 집중 방지");
                 }
+            }
+        }
+        // 전략별 동시 보유 상한 — 신호가 많은 전략이 선착순으로 예산을 독점하는 것 방지(미지정이면 무제한).
+        // ⚠️ 위치는 잔고조회 앞 — 어차피 막힐 진입에 KIS 호출을 쓰지 않는다(같은-종목/계열 가드와 동일).
+        long posCap = positionCapFor(strategy);
+        if (posCap > 0) {
+            long held = orderRepository.countActivePositionsByStrategy(strategy);
+            if (held >= posCap) {
+                log.info("[주문] 전략별 보유 상한 도달({}/{}) — 진입 스킵 [{}] {}", held, posCap, strategy, stockCode);
+                return OrderResult.rejected("전략별 동시 보유 상한 도달(" + held + "/" + posCap + ")");
             }
         }
         long netAssets = fetchNetAssets();

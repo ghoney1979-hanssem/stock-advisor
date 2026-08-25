@@ -253,6 +253,8 @@ stockadvisor:
     daily-loss-limit-pct: ${TRADING_DAILY_LOSS_LIMIT_PCT:0}  # 일일 손실 한도 순자산 대비 %(>0이면 절대액 대신 사용, 2026-07-24). 인버스는 면제
     max-positions: ${TRADING_MAX_POSITIONS:20}
     max-positions-per-group: ${TRADING_MAX_POSITIONS_PER_GROUP:1}   # 같은 계열주(그룹 키 일치) 최대 활성 포지션 — HLB 동반붕괴(7/24) 방지. 0=비활성              # 최대 동시 보유 종목 수 (10→20, 2026-07-13 — 종목당 비중은 자동 5%)
+    max-positions-per-strategy: ${TRADING_MAX_POSITIONS_PER_STRATEGY:}   # 전략별 동시 보유 상한 csv "STRATEGY:N". 미지정 전략은 무제한.
+    # 신호량이 많은 전략(L=84건/일)이 선착순으로 리스크 예산을 독점하는 것 방지. 예: REVERSAL_L:5
     session-end: ${TRADING_SESSION_END:15:20}              # 연속매매 종료 — 시간기반 청산이 이 시각 넘기면 진입 금지
     time-exit-hold-minutes: ${TRADING_TIME_EXIT_HOLD_MINUTES:60}  # 시간기반 청산 보유시간(분). 진입시각+이값 ≤ session-end 일 때만 진입
     limit-up-lock-pct: ${TRADING_LIMIT_UP_LOCK_PCT:29.0}    # 상한가 조기청산 — 당일 등락률 ≥ 이값(+30% 근접)이면 전 종목 즉시 익절(상방 천장+갭리스크). 0=비활성
