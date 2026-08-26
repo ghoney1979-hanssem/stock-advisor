@@ -146,6 +146,75 @@ class StrategyHoldTimeProviderTest {
     }
 
     @Test
+    void 먼_마크의_스파이크가_이웃으로_둔갑하지_않는다() {
+        // 🐞 회귀: 클러스터 마크를 목록에서 빼버리면 남은 목록이 성겨져 평활이 '리스트 이웃'을 평균한다.
+        // 실측 REVERSAL_L에서 110분의 이웃이 35분과 300분(265분 떨어짐)이 되어, 단발 스파이크를 막으려던
+        // 평활이 오히려 300분의 +2.28을 실어 날랐다(110분 평활 1.07).
+        // 여기선 40분과 210분 사이가 전부 클러스터라, 종전 코드였다면 둘이 '이웃'이 됐을 배치를 만든다.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(20, 100, 0.0), mark(30, 100, 0.0),
+                mark(40, 100, 0.10),                        // 종전엔 이웃이 30분과 210분(9.0)이 돼 평활 3.03
+                clusteredMark(50, 100, 0.0), clusteredMark(60, 100, 0.0),
+                clusteredMark(70, 100, 0.0), clusteredMark(80, 100, 0.0),
+                mark(210, 100, 9.0), mark(220, 100, 0.0));  // 먼 스파이크
+
+        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
+
+        // 40분은 210분과 시간축 이웃이 아니므로 그 9.0을 받아선 안 된다.
+        assertThat(best.markMinutes()).isNotEqualTo(40);
+        assertThat(best.clustered()).isFalse();
+    }
+
+    @Test
+    void 클러스터_마크의_값은_이웃_평활에_섞이지_않는다() {
+        // 창의 '위치'는 클러스터 마크가 채우되 '값'은 빠져야 한다 — 안 그러면 고를 수 없는 허수 마크가
+        // 옆 마크를 대신 뽑게 만든다(간접적으로 선택을 좌우).
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(10, 100, 0.20), mark(20, 100, 0.20), mark(30, 100, 0.20),
+                mark(40, 100, 0.0),
+                clusteredMark(50, 100, 9.0),   // 허수 스파이크
+                mark(60, 100, 0.0), mark(70, 100, 0.0));
+
+        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
+
+        // 40·60분이 9.0을 이웃값으로 받으면 그쪽이 뽑힌다. 값을 빼면 20분 구간(0.20)이 이긴다.
+        assertThat(best.markMinutes()).isEqualTo(20);
+    }
+
+    @Test
+    void 종가_EOD는_평활에서_맨_뒤로_정렬된다() {
+        // 종전엔 raw 정렬이라 EOD(-1)가 맨 앞에 와 '5분 마크의 이웃이 종가 보유'가 됐다.
+        // EOD는 가장 긴 보유이므로 맨 뒤여야 한다.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                new ExitTimingService.MarkStat("종가(EOD)", -1, 100, 9.0, 60.0, 5, 20.0, "20260801", 9.0, false),
+                mark(5, 100, 0.0), mark(10, 100, 0.0), mark(15, 100, 0.0),
+                mark(20, 100, 0.30), mark(25, 100, 0.30));
+
+        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
+
+        // EOD가 맨 앞이면 5분이 EOD(9.0)를 이웃으로 받아 뽑혔을 것이다.
+        // 맨 뒤로 가면 EOD와 인접한 25분이 이긴다 — 이건 실제 시간축 이웃이라 정당하다.
+        assertThat(best.markMinutes()).isNotEqualTo(5);
+        assertThat(best.markMinutes()).isEqualTo(25);
+    }
+
+    @Test
+    void 자격마크가_경계에만_있으면_maxpick으로_내려간다() {
+        // 비클러스터가 양 끝(half개)에만 있어 평활로는 못 고르는 경우 — null이 아니라 max-pick으로 회수.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(10, 100, 0.50),
+                clusteredMark(20, 100, 9.0), clusteredMark(30, 100, 9.0),
+                clusteredMark(40, 100, 9.0), clusteredMark(50, 100, 9.0),
+                mark(60, 100, 0.80));
+
+        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
+
+        assertThat(best).isNotNull();
+        assertThat(best.clustered()).isFalse();
+        assertThat(best.markMinutes()).isEqualTo(60);
+    }
+
+    @Test
     void 자격마크가_전부_클러스터면_fallback() {
         List<ExitTimingService.MarkStat> curve = List.of(
                 clusteredMark(90, 100, 1.0), clusteredMark(300, 100, 2.0));

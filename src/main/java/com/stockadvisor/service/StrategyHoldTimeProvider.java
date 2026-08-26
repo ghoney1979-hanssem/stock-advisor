@@ -112,42 +112,69 @@ public class StrategyHoldTimeProvider {
      * <p>평활은 <b>선택에만</b> 쓰고 보고값(samples/avgReturnPct)은 원시 마크 그대로 노출한다 —
      * 가시화에서 "그 마크의 실제 표본·수익"이 바뀌면 진단이 어려워진다. smoothWindow ≤ 1이면 종전 max-pick.</p>
      *
-     * <p>2026-08-26: 자격 조건에 <b>비클러스터</b>가 추가됐다({@code MarkStat.clustered}). 평활은 <i>이웃 마크
+     * <p>2026-08-26: <b>비클러스터</b>가 선택 자격에 추가됐다({@code MarkStat.clustered}). 평활은 <i>이웃 마크
      * 사이</i>의 노이즈를 걸러주지만 <b>곡선 전체가 하루로 만들어진 경우</b>엔 무력하다 — 실측 REVERSAL_L은
      * 5분→300분이 매끄럽게 단조 상승해 평활을 그대로 통과했는데, 그 상승이 통째로 8/25 하루였다.
      * 즉 두 가드는 서로 다른 축(마크 간 노이즈 vs 거래일 편중)을 막는다.</p>
+     *
+     * <p>🐞 <b>같은 날 회귀 수정 — 평활 창은 "시간축 이웃"이어야 한다</b>: 클러스터 마크를 <b>목록에서
+     * 빼버리자</b> 남은 목록이 성겨지면서(REVERSAL_L 실측 61개 → <b>8개</b>: 5·10·15·25·35·110·300·EOD)
+     * 평활이 <i>리스트 인덱스</i> 이웃을 평균하게 됐다 — 110분의 "이웃"이 35분과 <b>300분</b>(265분 떨어짐)이
+     * 되어, 단발 스파이크를 막으려던 장치가 오히려 <b>스파이크를 실어 날랐다</b>(110분 평활 1.07 = 300분의
+     * +2.28이 섞인 값). → <b>평활은 클러스터 마크까지 포함한 전체 곡선의 시간축 이웃</b>으로 계산하고,
+     * <b>선택 자격만</b> 비클러스터로 제한한다. 평활은 <i>국소 노이즈 제거</i>라 진짜 시간축 이웃이 필요하고,
+     * 클러스터는 <i>그 마크를 골라도 되는가</i>라는 자격 문제라 서로 다른 축이다.</p>
+     *
+     * <p>⚠️ 단 <b>창의 위치는 클러스터 마크가 채우되 값은 빼고 평균한다</b> — 허수 마크를 평균에 넣으면
+     * 그 하루짜리 수익이 <b>이웃의 평활값으로 새어나가</b> 옆 마크를 대신 뽑게 만든다(고를 수 없는 마크가
+     * 간접적으로 선택을 좌우하는 셈). 창 안에 성한 이웃이 하나도 없으면 평활값은 자기 값으로 수렴하는데,
+     * 이는 "이 구간엔 믿을 이웃이 없다 → 평활 불가"의 정직한 표현이다.</p>
+     *
+     * <p>정렬은 {@code ExitTimingService}의 곡선과 동일하게 <b>종가(EOD, markMinutes&lt;0)를 맨 뒤</b>로 둔다.
+     * 종전엔 raw 정렬이라 EOD(−1)가 맨 앞에 와 <b>5분 마크의 이웃이 "종가 보유"</b>가 됐다(이건 클러스터
+     * 가드 이전부터 있던 잠재 결함인데, 자격 마크가 촘촘할 땐 드러나지 않았다).</p>
      */
     static ExitTimingService.MarkStat pickBest(List<ExitTimingService.MarkStat> curve,
                                                int minSamples, int smoothWindow) {
-        List<ExitTimingService.MarkStat> qualified = curve.stream()
+        // 평활의 모집단 — 표본만 채우면 클러스터 마크도 '이웃'으로 남긴다(곡선의 연속성 보존).
+        // 종가(EOD)는 가장 긴 보유라 맨 뒤로: ExitTimingService의 곡선 정렬과 동일하게 맞춘다.
+        List<ExitTimingService.MarkStat> ordered = curve.stream()
                 .filter(m -> m.samples() >= minSamples)
-                // 단일일 클러스터 마크 제외(2026-08-26) — 표본 수는 채웠지만 그 수익이 하루로 설명되는 마크다.
-                // 이 값은 실제 청산 시점이자 게이트 채점 horizon이라, 허수 마크를 고르면 둘 다 같이 오염된다.
-                .filter(m -> !m.clustered())
-                .sorted(Comparator.comparingInt(ExitTimingService.MarkStat::markMinutes))
+                .sorted(Comparator.comparingInt(m -> m.markMinutes() < 0 ? Integer.MAX_VALUE : m.markMinutes()))
                 .toList();
-        if (qualified.isEmpty()) return null;
+        // 선택 자격 — 단일일 클러스터 마크는 고르지 않는다. 표본 수는 채웠지만 그 수익이 하루로 설명되는
+        // 마크이고, 이 값은 실제 청산 시점이자 게이트 채점 horizon이라 고르면 둘 다 같이 오염된다.
+        boolean anyEligible = ordered.stream().anyMatch(m -> !m.clustered());
+        if (!anyEligible) return null;
         int half = Math.max(1, smoothWindow / 2);
         // 창을 온전히 채우는 마크만 후보로 둔다(양 끝 half개 제외) — 잘린 창으로 평균을 내면 이웃이 한쪽뿐인
         // 경계 마크가 구조적으로 유리해져(분모가 작아 스파이크가 덜 희석됨) 평활의 취지가 무너진다.
-        // 자격 마크가 창보다 적으면 평활 자체가 무의미 → 종전 max-pick.
-        if (smoothWindow <= 1 || qualified.size() < smoothWindow + 2) {
-            return qualified.stream()
-                    .max(Comparator.comparingDouble(ExitTimingService.MarkStat::avgReturnPct))
-                    .orElse(null);
-        }
-        ExitTimingService.MarkStat best = null;
-        double bestSmoothed = Double.NEGATIVE_INFINITY;
-        for (int i = half; i < qualified.size() - half; i++) {
-            double sum = 0;
-            for (int j = i - half; j <= i + half; j++) sum += qualified.get(j).avgReturnPct();
-            double smoothed = sum / (2 * half + 1);
-            if (smoothed > bestSmoothed) {
-                bestSmoothed = smoothed;
-                best = qualified.get(i);
+        // 마크가 창보다 적으면 평활 자체가 무의미 → 종전 max-pick.
+        if (smoothWindow > 1 && ordered.size() >= smoothWindow + 2) {
+            ExitTimingService.MarkStat best = null;
+            double bestSmoothed = Double.NEGATIVE_INFINITY;
+            for (int i = half; i < ordered.size() - half; i++) {
+                if (ordered.get(i).clustered()) continue;   // 창의 위치는 채우되 고르지는 않는다
+                double sum = 0;
+                int cnt = 0;
+                for (int j = i - half; j <= i + half; j++) {
+                    if (ordered.get(j).clustered()) continue;   // 허수 값이 이웃의 평활값으로 새는 것을 막는다
+                    sum += ordered.get(j).avgReturnPct();
+                    cnt++;
+                }
+                double smoothed = sum / cnt;   // cnt ≥ 1 — 중심(i)이 비클러스터임이 위에서 보장된다
+                if (smoothed > bestSmoothed) {
+                    bestSmoothed = smoothed;
+                    best = ordered.get(i);
+                }
             }
+            if (best != null) return best;
+            // 자격 마크가 전부 경계(양 끝 half개)에만 있는 경우 — 평활로는 못 고르니 아래 max-pick으로 내려간다.
         }
-        return best;
+        return ordered.stream()
+                .filter(m -> !m.clustered())
+                .max(Comparator.comparingDouble(ExitTimingService.MarkStat::avgReturnPct))
+                .orElse(null);
     }
 
     private synchronized void refreshIfStale() {
