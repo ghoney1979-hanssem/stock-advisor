@@ -22,7 +22,7 @@ import java.util.function.Function;
  * "어떤 조건 구간의 진입이 수익이었나"를 스캔한다 — 아직 전략화 안 된 수익 pocket을 surface(사람이 코딩하기 전에
  * 데이터가 먼저 제안). 전 전략 진입을 pool하므로 전략 교차 패턴이 드러난다.</p>
  *
- * <p><b>허수 방지</b>: 각 bucket에 교차거래일 가드(한 거래일 점유율 ≤ maxDaySharePct)를 적용 — 단일일 클러스터
+ * <p><b>허수 방지</b>: 각 bucket에 교차거래일 가드(점유율 ≤ maxDaySharePct <b>+ 거래일 ≥ 3 + LOO 부호 유지</b>)를 적용 — 단일일 클러스터
  * pocket(예: 반등일 하루가 만든 가짜 +net)을 highlights에서 제외한다({@link StrategyPerformanceGate}와 동일 사상).
  * net = (종가−매수)/매수×100 − 왕복비용 − 슬리피지(close horizon). ⚠️ 전략 교차 pool이라 같은 종목·일자가
  * 여러 전략 행으로 중복 가능(v1 수용, includeControl=true면 미진입 후보까지 포함해 반사실 확대).</p>
@@ -50,6 +50,9 @@ public class FeatureMiningService {
      */
     static final double MIN_CONTROL_COVERAGE_PCT = 70.0;
 
+    /** 교차거래일 최소 요건 — ControlAnalysisService/MultidayExitAnalysisService와 동일 규칙. */
+    private static final int MIN_DISTINCT_DAYS = 3;
+
     private final TradeOutcomeRepository tradeOutcomeRepository;
     private final ExecutionCostModel executionCostModel;
     private final ExitHorizonPriceResolver exitResolver;   // horizon="exit"(게이트 동일 청산시점) 지원
@@ -67,6 +70,14 @@ public class FeatureMiningService {
 
     /**
      * @param n/netAvgPct/winRatePct/clustered/topStrategy  진입(entered) 기준 pocket 통계
+     * @param topDay/netExTopDayPct                         net 합 기여가 가장 큰 진입일과, 그날을 뺀 나머지 net 평균(LOO).
+     *                                                      🐞 2026-08-26 추가 — 종전 {@code clustered}는 <b>건수 점유율</b>만 봐서
+     *                                                      점유율이 문턱 아래인데 net은 하루가 만든 pocket을 못 걸렀다. 실측: highlights
+     *                                                      1위였던 {@code 전략=REVERSAL_L}이 점유율 45.9%(&lt;80)로 통과했지만
+     *                                                      net +1.44% → <b>최대기여일 제외 −0.08%</b>로 부호가 뒤집힌다. 같은 데이터를
+     *                                                      {@code control-analysis}는 이미 {@code clustered=true}로 판정하고 있어
+     *                                                      <b>엔드포인트끼리 정반대 결론</b>을 내던 상태였다
+     *                                                      ({@code control-diagnosis} 8/21 · {@code multiday-exit} 8/24와 같은 유형의 재발)
      * @param controlN/controlNetPct                        같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나" 비교.
      *                                                      controlN은 <b>해당 horizon 가격이 실제로 있는</b> 대조군 수
      * @param controlTotalN                                 pocket의 전체 대조군 수(가격 유무 무관) — 커버리지 분모
@@ -78,6 +89,7 @@ public class FeatureMiningService {
      *                                                      정렬 없이 빼면 edge가 "조건 차이"가 아니라 <b>기간 차이</b>를 잰다 — 아래 {@link #overlapWindow} 참조
      */
     public record Bucket(String feature, String range, int n, int distinctDays, double maxDaySharePct,
+                         String topDay, Double netExTopDayPct,
                          double netAvgPct, double winRatePct, boolean clustered, String topStrategy,
                          int controlN, Double controlNetPct, Double edgeVsControlPct,
                          int controlTotalN, double controlCoveragePct,
@@ -288,18 +300,32 @@ public class FeatureMiningService {
                           double maxDaySharePct, Map<Long, Double> netByOutcome) {
         double sum = 0; int wins = 0;
         Map<String, Integer> days = new LinkedHashMap<>();
+        Map<String, Double> netByDay = new LinkedHashMap<>();   // LOO(최대기여일 제외) 판정용
         Map<String, Integer> strat = new LinkedHashMap<>();
         for (TradeOutcome o : g) {
             double net = netByOutcome.get(o.getId());
             sum += net;
             if (net > 0) wins++;
-            days.merge(o.getAlertDate() == null ? "?" : o.getAlertDate(), 1, Integer::sum);
+            String day = o.getAlertDate() == null ? "?" : o.getAlertDate();
+            days.merge(day, 1, Integer::sum);
+            netByDay.merge(day, net, Double::sum);
             strat.merge(o.getStrategy() == null ? "?" : o.getStrategy(), 1, Integer::sum);
         }
         int n = g.size();
         double enteredNet = round2(sum / n);
         double maxShare = maxSharePct(days, n);
-        boolean clustered = maxDaySharePct > 0 && maxShare > maxDaySharePct;
+        // 최대기여일(net 합 절대값 최대) 제외 net — 점유율만으로는 "net이 하루로 설명되는" pocket을 못 잡는다.
+        String topDay = netByDay.entrySet().stream()
+                .max(Comparator.comparingDouble(e -> Math.abs(e.getValue())))
+                .map(Map.Entry::getKey).orElse(null);
+        Double netExTop = null;
+        if (topDay != null && days.size() > 1) {
+            int restN = n - days.get(topDay);
+            if (restN > 0) netExTop = round2((sum - netByDay.get(topDay)) / restN);
+        }
+        boolean clustered = (maxDaySharePct > 0 && maxShare > maxDaySharePct)
+                || days.size() < MIN_DISTINCT_DAYS
+                || (netExTop != null && Math.signum(enteredNet) != Math.signum(netExTop));
         String top = strat.entrySet().stream().max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey).orElse("?");
         // 같은 pocket의 대조군(미진입 후보) net — "진입이 미진입보다 나았나".
@@ -327,7 +353,7 @@ public class FeatureMiningService {
             alignedNet = round2(as / gw.size());
         }
         Double edge = (controlNet == null || alignedNet == null) ? null : round2(alignedNet - controlNet);
-        return new Bucket(feature, range, n, days.size(), round2(maxShare),
+        return new Bucket(feature, range, n, days.size(), round2(maxShare), topDay, netExTop,
                 enteredNet, round2(100.0 * wins / n), clustered, top,
                 resolved, controlNet, edge, cw.size(), round2(coverage),
                 win == null ? null : win[0], win == null ? null : win[1], gw.size(), alignedNet);

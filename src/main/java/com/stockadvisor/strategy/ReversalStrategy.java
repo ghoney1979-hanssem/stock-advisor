@@ -23,10 +23,21 @@ import org.springframework.stereotype.Component;
  * 즉 기존 파이프라인이 사는 것의 <b>거울상</b>이다. 이 전략이 이기면 스크리닝 방향 자체를 재검토해야 하고,
  * 지면 "반전 우세"라는 위 네 증거가 무조건 매수 평균의 착시였다는 뜻이라 그것대로 결론이 선다.</p>
  *
- * <p><b>⚠️ 검증 설계</b>: {@code alerts()=false} 섀도우 + 화이트리스트 미포함 → <b>실주문 0</b>.
- * {@code tracksControl()=false}인데, 이 전략은 대조군이 따로 필요 없다 — <b>{@code UniverseSnapshot}이
- * 이미 전 종목 분모</b>라 {@code /universe-analysis}로 같은 조건 구간의 base rate와 직접 비교된다
- * (오늘 발굴 세션의 교훈: 반사실은 lift가 아니라 대조군/분모로만 잰다).</p>
+ * <p><b>⚠️ 검증 설계</b>: 코드 기본값은 {@code alerts()=false} 섀도우 + 화이트리스트 미포함 → 실주문 0.
+ * ⚠️ <b>현행 prod는 다르다</b> — 2026-08-25부터 {@code TRADING_LIVE_STRATEGIES}에 편입 + 부트스트랩
+ * 축소사이징(×0.5)으로 실주문 중이다.</p>
+ *
+ * <p><b>대조군 정책 전환(2026-08-26)</b>: 도입 당시엔 {@code tracksControl()=false}로 두고 "{@code UniverseSnapshot}이
+ * 전 종목 분모라 {@code /universe-analysis}로 base rate와 비교하면 된다"고 봤다. <b>LIVE 편입으로 질문이 바뀌면서
+ * 그 근거가 더는 충분하지 않다</b> — 유니버스 lift는 "MA20 아래가 좋은가"를 재지만, 지금 물어야 할 건
+ * <b>"L이 고른 MA20 아래가 L이 거른 MA20 아래보다 나은가"</b>이고 그건 대조군으로만 잰다
+ * (발굴 세션의 교훈: lift는 반사실이 아니다). 대조군이 없으면 B·C·E·F·H를 제외할 때 쓴 것과
+ * <b>같은 기준으로 L을 판정할 수단이 없다</b>.</p>
+ *
+ * <p>다만 {@code tracksControl()}은 <b>false로 유지</b>하고, 대신 {@code StrategyEvaluator.reversalControl} 이
+ * L의 <b>판별</b> 사유({@code NOT_WEAK}/{@code CHASING}/{@code TOO_DEEP}/{@code BROKEN_TREND}/{@code SCORE})만
+ * 강제 기록한다 — 정체성 사유인 {@code VOLUME_UP}까지 남기면 급증 종목 전량이 대조군이 돼 하루 ~700행이
+ * 늘지만, "거래량이 급증해서 안 샀다"는 L의 후보 풀 자체가 아니라 비교로서 무의미하다. 상세는 그 메서드 주석 참조.</p>
  *
  * <p>⚠️ <b>과적합 경계</b>: 유니버스 lift는 4거래일 표본이고 하락 편향 구간이라 저베타 효과와 완전히
  * 분리되지 않았다. 그래서 그중 <b>ATR(저변동성) 조건은 일부러 넣지 않았다</b> — 저ATR lift가 폭락일에
@@ -118,11 +129,15 @@ public class ReversalStrategy implements TradingStrategy {
 
     @Override
     public boolean alerts() {
-        return false;   // v1 섀도우(실주문 0, Discord 미발송) — 측정 먼저
+        // Discord 미발송 — 단 prod는 LIVE 편입 상태라, 실주문이 접수되면
+        // "alerts() OR 주문 SUBMITTED" 규칙에 따라 신호 알림이 강제 발송된다.
+        return false;
     }
 
     @Override
     public boolean tracksControl() {
-        return false;   // 대조군 불요 — UniverseSnapshot이 전 종목 분모라 /universe-analysis로 반사실 비교
+        // false 유지 — 일괄 기록은 VOLUME_UP(정체성 사유)까지 남겨 대조군을 배로 불린다.
+        // 대신 판별 사유만 StrategyEvaluator.reversalControl 이 강제 기록한다(위 클래스 주석 참조).
+        return false;
     }
 }

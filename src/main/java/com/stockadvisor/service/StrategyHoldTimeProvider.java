@@ -48,8 +48,22 @@ public class StrategyHoldTimeProvider {
         this.props = props;
     }
 
-    /** @param auto true=분석 기반 자동, false=고정값 fallback. samples/avgReturnPct는 자동일 때만 의미. */
-    public record HoldInfo(String strategy, int holdMinutes, boolean auto, int samples, Double avgReturnPct) {}
+    /**
+     * @param holdMinutes    실제 적용 보유시간(분) — maxHoldMinutes 캡 <b>적용 후</b> 값
+     * @param auto           true=분석 기반 자동, false=고정값 fallback. samples/avgReturnPct는 자동일 때만 의미
+     * @param samples        {@code rawMarkMinutes} 마크의 표본 수(원시 마크 기준 — 캡 전)
+     * @param avgReturnPct   {@code rawMarkMinutes} 마크의 평균 net 수익(%)(원시 마크 기준 — 캡 전)
+     * @param rawMarkMinutes 분석이 고른 마크(분). 종가(EOD) 권장이면 -1. 자동이 아니면 null
+     * @param capped         maxHoldMinutes 캡으로 holdMinutes가 rawMarkMinutes보다 <b>짧아졌는지</b>
+     *
+     * <p>🐞 2026-08-26 추가(rawMarkMinutes/capped): 종전엔 {@code holdMinutes}만 캡된 값이고
+     * {@code samples}/{@code avgReturnPct}는 <b>캡 전 마크</b>의 값을 그대로 실어, 조회 결과가
+     * "90분 마크가 n=89·+1.46%"인 것처럼 읽혔다 — 실측 2026-08-26 REVERSAL_L은 분석이 295분(n=89, +1.46%)을
+     * 골랐고 prod {@code max-hold-minutes=90} 캡에 걸려 90분으로 잘린 것인데(실제 90분 마크는 n=104, +0.31%),
+     * <b>캡이 걸렸다는 사실 자체가 어디에도 안 보였다</b>. 캡은 정상 동작이지만 진단이 불가능했다.</p>
+     */
+    public record HoldInfo(String strategy, int holdMinutes, boolean auto, int samples, Double avgReturnPct,
+                           Integer rawMarkMinutes, boolean capped) {}
 
     /** 해당 전략의 청산 보유시간(분). 적응형 비활성/표본부족이면 고정값. */
     public int holdMinutes(String strategy) {
@@ -72,7 +86,7 @@ public class StrategyHoldTimeProvider {
         for (String s : knownStrategies()) {
             HoldInfo info = props.enabled() ? cache.get(s) : null;
             out.add(info != null ? info
-                    : new HoldInfo(s, policy.timeExitHoldMinutes(), false, 0, null));
+                    : new HoldInfo(s, policy.timeExitHoldMinutes(), false, 0, null, null, false));
         }
         return out;
     }
@@ -97,11 +111,19 @@ public class StrategyHoldTimeProvider {
      *
      * <p>평활은 <b>선택에만</b> 쓰고 보고값(samples/avgReturnPct)은 원시 마크 그대로 노출한다 —
      * 가시화에서 "그 마크의 실제 표본·수익"이 바뀌면 진단이 어려워진다. smoothWindow ≤ 1이면 종전 max-pick.</p>
+     *
+     * <p>2026-08-26: 자격 조건에 <b>비클러스터</b>가 추가됐다({@code MarkStat.clustered}). 평활은 <i>이웃 마크
+     * 사이</i>의 노이즈를 걸러주지만 <b>곡선 전체가 하루로 만들어진 경우</b>엔 무력하다 — 실측 REVERSAL_L은
+     * 5분→300분이 매끄럽게 단조 상승해 평활을 그대로 통과했는데, 그 상승이 통째로 8/25 하루였다.
+     * 즉 두 가드는 서로 다른 축(마크 간 노이즈 vs 거래일 편중)을 막는다.</p>
      */
     static ExitTimingService.MarkStat pickBest(List<ExitTimingService.MarkStat> curve,
                                                int minSamples, int smoothWindow) {
         List<ExitTimingService.MarkStat> qualified = curve.stream()
                 .filter(m -> m.samples() >= minSamples)
+                // 단일일 클러스터 마크 제외(2026-08-26) — 표본 수는 채웠지만 그 수익이 하루로 설명되는 마크다.
+                // 이 값은 실제 청산 시점이자 게이트 채점 horizon이라, 허수 마크를 고르면 둘 다 같이 오염된다.
+                .filter(m -> !m.clustered())
                 .sorted(Comparator.comparingInt(ExitTimingService.MarkStat::markMinutes))
                 .toList();
         if (qualified.isEmpty()) return null;
@@ -146,13 +168,17 @@ public class StrategyHoldTimeProvider {
             int mins = best.markMinutes() < 0
                     ? props.maxHoldMinutes()
                     : Math.min(best.markMinutes(), props.maxHoldMinutes());
-            map.put(t.strategy(), new HoldInfo(t.strategy(), mins, true, best.samples(), best.avgReturnPct()));
+            // 캡이 실제로 잘랐는지 노출 — EOD(-1) 권장은 정의상 '캡으로 잘린 것'이다(장마감까지 보유가 원 권장).
+            boolean capped = best.markMinutes() < 0 || best.markMinutes() > props.maxHoldMinutes();
+            map.put(t.strategy(), new HoldInfo(t.strategy(), mins, true, best.samples(), best.avgReturnPct(),
+                    best.markMinutes(), capped));
         }
         cache = map;
         lastRefresh = Instant.now();
         if (!map.isEmpty()) {
             log.info("적응형 청산 보유시간 갱신: {}", map.values().stream()
-                    .map(h -> h.strategy() + "=" + h.holdMinutes() + "분(n=" + h.samples() + ")").toList());
+                    .map(h -> h.strategy() + "=" + h.holdMinutes() + "분(n=" + h.samples()
+                            + (h.capped() ? ", 권장 " + h.rawMarkMinutes() + "분에서 캡" : "") + ")").toList());
         }
     }
 }

@@ -410,7 +410,7 @@ public class StrategyPerformanceGate {
             if (mutateHyst) openState.put(keyF, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
-                            flowTag, allow ? "통과" : "성과 미달", avgF, avgF >= effMinNetF ? "≥" : "<", effMinNetF, nF,
+                            flowTag, verdictLabel(allow, avgF >= effMinNetF), avgF, avgF >= effMinNetF ? "≥" : "<", effMinNetF, nF,
                             looF == null ? "" : looF.tag(), wasOpenF ? HYST_TAG : ""),
                     nF, avgF, regimeName, market, false);
         }
@@ -429,7 +429,7 @@ public class StrategyPerformanceGate {
             if (mutateHyst) openState.put(keyR, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
-                            regimeTag, allow ? "통과" : "성과 미달", avg, avg >= effMinNetR ? "≥" : "<", effMinNetR, n,
+                            regimeTag, verdictLabel(allow, avg >= effMinNetR), avg, avg >= effMinNetR ? "≥" : "<", effMinNetR, n,
                             looR == null ? "" : looR.tag(), wasOpenR ? HYST_TAG : ""),
                     n, avg, regimeName, market, false);
         }
@@ -466,10 +466,17 @@ public class StrategyPerformanceGate {
             //    → 부트스트랩 지정 전략은 여기서 끝내지 말고 아래 재검증 다리로 흘려보낸다.
             //    (fallback '통과'는 전국면 pool로 검증된 더 강한 근거라 위에서 먼저 잡히므로 우선순위는 그대로.)
             if (!bootstrapStrategies.contains(strategy)) {
+                // 이 분기의 차단 사유는 셋이다: ① 표본부족 ② net 미달 ③ LOO 미달.
+                // ③만 걸린 경우를 "fallback미달"로 뭉뚱그리면 원인을 오독하게 된다 — net 미달은 전략 문제지만
+                // LOO 미달은 "표본이 사실상 하루"라 시간이 처방이다. ①②는 종전 문구를 그대로 둔다.
+                boolean sampleOkAll = nAll >= props.fallbackMinSamples() && avgAll != null;
+                boolean netOkAll = sampleOkAll && avgAll >= props.fallbackMinNetAvgPct();
                 return new GateDecision(strategy, false,
-                        String.format("%s국면표본부족(%d/%d)+fallback미달(전국면 net %s, n=%d/%d)",
+                        String.format("%s국면표본부족(%d/%d)+%s(전국면 net %s, n=%d/%d)%s",
                                 regimeTag, n, minSamples,
-                                avgAll == null ? "N/A" : String.format("%.2f%%", avgAll), nAll, props.fallbackMinSamples()),
+                                netOkAll ? "전국면 단일일 편중(LOO 미달)" : "fallback미달",
+                                avgAll == null ? "N/A" : String.format("%.2f%%", avgAll), nAll, props.fallbackMinSamples(),
+                                looAll == null ? "" : looAll.tag()),
                         n, avg, regimeName, market, false);
             }
         }
@@ -569,6 +576,25 @@ public class StrategyPerformanceGate {
      *
      * <p>거래일이 하나뿐이거나 남는 표본이 없으면 null(판정 생략) — 그 경우는 점유율 가드가 처리한다.</p>
      */
+    /**
+     * 차단 사유 라벨 — <b>net 미달</b>과 <b>LOO(단일일 편중) 미달</b>을 구분한다.
+     *
+     * <p>🐞 2026-08-26 수정: 종전엔 둘 다 {@code "성과 미달"}로 찍으면서 바로 뒤 부등호는 net 조건만 반영해,
+     * LOO만 걸린 경우 <b>"성과 미달(net 0.61% ≥ 기준 0.30%)"</b>라는 자기모순 문장이 나왔다(실측 2026-08-26
+     * REVERSAL_L — 그날 L 후보 8건이 이 문장으로 차단됐고, 읽는 사람은 게이트 오작동으로 오해하게 된다).
+     * 차단 자체는 정상이었고 진짜 원인은 뒤에 붙는 {@code ·최대기여일(...) 제외 net} 태그에만 있었다.</p>
+     *
+     * <p>원인 구분이 중요한 이유: <b>net 미달은 전략 문제</b>(임계·필터를 손봐야 한다)지만
+     * <b>LOO 미달은 표본 문제</b>(다른 날 표본이 쌓이면 저절로 풀린다)라 처방이 정반대다.</p>
+     *
+     * @param allow 최종 허용 여부(net AND LOO)
+     * @param netOk net 조건만 봤을 때의 통과 여부 — allow=false인데 netOk=true면 LOO가 단독 차단 사유
+     */
+    static String verdictLabel(boolean allow, boolean netOk) {
+        if (allow) return "통과";
+        return netOk ? "단일일 편중(LOO 미달)" : "성과 미달";
+    }
+
     private static LooNet looExcludingTopDay(java.util.Map<String, double[]> days, double sum, int n) {
         if (days.size() < 2 || n <= 0) return null;
         String top = null;

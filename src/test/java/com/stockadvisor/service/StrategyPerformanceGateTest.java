@@ -1151,4 +1151,18 @@ class StrategyPerformanceGateTest {
 
         assertThat(d.reason()).doesNotContain("재필터");
     }
+
+    // ── 차단 사유 라벨: net 미달 vs LOO(단일일 편중) 미달 구분 (2026-08-26) ──────────────
+
+    @Test
+    void 라벨은_net미달과_LOO미달을_구분한다() {
+        // 통과
+        assertThat(StrategyPerformanceGate.verdictLabel(true, true)).isEqualTo("통과");
+        // net 자체가 미달 → 전략 문제
+        assertThat(StrategyPerformanceGate.verdictLabel(false, false)).isEqualTo("성과 미달");
+        // net은 넘겼는데 차단 = LOO 단독 차단 → 표본 문제.
+        // 종전엔 이 경우도 "성과 미달"로 찍혀 "성과 미달(net 0.61% ≥ 기준 0.30%)"라는
+        // 자기모순 문장이 나왔다(실측 2026-08-26 REVERSAL_L 8건).
+        assertThat(StrategyPerformanceGate.verdictLabel(false, true)).isEqualTo("단일일 편중(LOO 미달)");
+    }
 }

@@ -268,6 +268,41 @@ public class StrategyEvaluator {
      * 이 전략에 대조군을 수집할지 — 검증된 승자(perf-gate 통과)면 불필요(false), 손실·미검증이면 수집(true).
      * 성과게이트 결과를 TTL 캐시(전략당 종목 스캔마다 DB조회 방지). 성과 저하로 게이트가 막히면 자동 재개.
      */
+    /** L(눌림 반전)의 <b>판별</b> 탈락 사유 — 이 사유로 막힌 후보만 대조군으로 남긴다. */
+    private static final java.util.Set<String> REVERSAL_CONTROL_REASONS =
+            java.util.Set.of("NOT_WEAK", "CHASING", "TOO_DEEP", "BROKEN_TREND", "SCORE");
+
+    /**
+     * L(눌림 반전) 대조군 강제 기록 판정(순수, 2026-08-26).
+     *
+     * <p><b>왜 필요한가</b>: L은 도입 당시 {@code tracksControl()=false}였고 근거는 "{@code UniverseSnapshot}이
+     * 전 종목 분모라 {@code /universe-analysis}로 base rate와 비교하면 된다"였다. 그런데 그 사이 L이 LIVE로
+     * 편입되면서 물어야 할 질문이 바뀌었다 — 유니버스 lift는 <b>"MA20 아래가 좋은가"</b>를 재지만,
+     * 지금 필요한 건 <b>"L이 고른 MA20 아래가 L이 거른 MA20 아래보다 나은가"</b>다. 후자는 대조군으로만 잰다
+     * (2026-08-21 발굴 세션의 교훈 2: lift는 반사실이 아니다). 대조군이 없으면 B·C·E·F·H를 제외할 때 쓴
+     * 것과 <b>같은 기준으로 L을 판정할 수단이 없다</b>.</p>
+     *
+     * <p><b>왜 {@code tracksControl()=true}가 아니라 사유 화이트리스트인가</b>: L은
+     * {@code requiresVolumeSpike()=false}라 <b>거래량이 급증한 종목 전부</b>에 대해서도 평가되고, 그때는
+     * 정체성 조건에 걸려 {@code VOLUME_UP}으로 탈락한다. 그 행까지 남기면 대조군이 하루 ~700행 늘어
+     * 추적 부담이 배로 뛰는데, 정작 <b>비교로서는 무의미하다</b> — "거래량이 급증해서 안 샀다"는 L의
+     * 후보 풀 자체가 아니고, 그 질문은 이미 {@code /universe-analysis}(급증 lift)와 B의 {@code WEAK_VOLUME}
+     * 대조군이 답하고 있다. 같은 이유로 {@code NOT_PULLBACK}(20일선 근처·위)도 제외한다 — preScreen 경계라
+     * 급증 종목에서만 발생한다.</p>
+     *
+     * <p>남기는 사유는 <b>L의 후보 풀(눌림 + 저거래량) 안에서 L이 실제로 선별에 쓴 축</b>뿐이다:
+     * {@code NOT_WEAK}(ret5d 약세 요건) · {@code CHASING}/{@code TOO_DEEP}(당일 등락 밴드) ·
+     * {@code BROKEN_TREND}(이격 하한) · {@code SCORE}. 이 사유들의 net을 ENTERED와 직접 비교하면
+     * "L의 선별이 가치를 더하는가"가 그대로 나온다(C의 {@code DROP_RANGE}/{@code NO_REBOUND}가 C 제외 판단의
+     * 근거가 된 것과 같은 구조).</p>
+     *
+     * <p>⚠️ 전략명을 함께 보는 이유: {@code SCORE}·{@code TOO_DEEP}는 다른 전략도 쓰는 공용 사유라
+     * 사유 문자열만 매칭하면 전 전략의 대조군 정책이 조용히 바뀐다.</p>
+     */
+    static boolean reversalControl(String strategy, String reject) {
+        return "REVERSAL_L".equals(strategy) && reject != null && REVERSAL_CONTROL_REASONS.contains(reject);
+    }
+
     private boolean needsControl(String strategy) {
         if (!controlFocusEnabled) return true;   // 집중 비활성 → 기존대로 전부 수집
         java.time.Instant now = java.time.Instant.now();
@@ -640,7 +675,9 @@ public class StrategyEvaluator {
                         // EXIT_ACTIVE(I 진입-청산 겹침 차단, 2026-08-24)도 강제 기록 — 반등일 fade 확대창을
                         // 좁히는 변경이라 "막은 게 옳았나"를 차단분 net vs 진입분 net으로 봐야 한다.
                         // 반등일 × 인버스 한정이라 표본 부담은 NOT_FADING과 같은 수준.
-                        || "EXIT_ACTIVE".equals(reject));
+                        || "EXIT_ACTIVE".equals(reject)
+                        // L(눌림 반전)의 판별 사유 — 아래 reversalControl 참조(2026-08-26).
+                        || reversalControl(strategy.name(), reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }

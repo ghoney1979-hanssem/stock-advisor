@@ -30,8 +30,16 @@ class StrategyHoldTimeProviderTest {
         return new AdaptiveExitProperties(enabled, minSamples, 30, maxHold, 1);
     }
 
+    /** 비클러스터 마크(거래일 5·점유율 20%·LOO 부호 유지) — 클러스터 가드에 걸리지 않는 정상 마크. */
     private ExitTimingService.MarkStat mark(int minutes, int samples, double avgReturn) {
-        return new ExitTimingService.MarkStat(minutes + "분", minutes, samples, avgReturn, 50.0);
+        return new ExitTimingService.MarkStat(minutes + "분", minutes, samples, avgReturn, 50.0,
+                5, 20.0, "20260801", avgReturn, false);
+    }
+
+    /** 단일일 클러스터 마크 — 수익은 좋아 보이지만 하루가 만든 허수. */
+    private ExitTimingService.MarkStat clusteredMark(int minutes, int samples, double avgReturn) {
+        return new ExitTimingService.MarkStat(minutes + "분", minutes, samples, avgReturn, 50.0,
+                2, 90.0, "20260825", -avgReturn, true);
     }
 
     private ExitTimingService.StrategyExitTiming timing(String strategy, ExitTimingService.MarkStat... marks) {
@@ -69,7 +77,8 @@ class StrategyHoldTimeProviderTest {
         // EOD(markMinutes=-1)가 최대수익 → maxHold 200 으로 캡
         StrategyHoldTimeProvider p = provider(props(true, 20, 200), List.of(
                 timing("MOMENTUM_A", mark(45, 30, 1.0),
-                        new ExitTimingService.MarkStat("종가(EOD)", -1, 30, 4.0, 60.0))));
+                        new ExitTimingService.MarkStat("종가(EOD)", -1, 30, 4.0, 60.0,
+                                5, 20.0, "20260801", 4.0, false))));
 
         assertThat(p.holdMinutes("MOMENTUM_A")).isEqualTo(200);
     }
@@ -123,5 +132,53 @@ class StrategyHoldTimeProviderTest {
                 .filter(h -> h.strategy().equals("MOMENTUM_A")).findFirst().orElseThrow();
         assertThat(a.auto()).isFalse();
         assertThat(a.holdMinutes()).isEqualTo(FIXED_HOLD);
+    }
+
+    @Test
+    void 단일일_클러스터_마크는_권장에서_제외된다() {
+        // 300분이 net 2.28로 최고지만 그 수익이 하루가 만든 것(clustered) → 비클러스터 최선인 90분을 고른다.
+        // 실측 REVERSAL_L: 5분 −0.35 → 300분 +2.28 로 단조 상승했으나 상승분 전체가 8/25 하루였다.
+        List<ExitTimingService.MarkStat> curve = List.of(
+                mark(30, 100, 0.12), mark(90, 100, 0.31), mark(180, 100, 0.20),
+                clusteredMark(240, 100, 1.45), clusteredMark(300, 100, 2.28));
+
+        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1).markMinutes()).isEqualTo(90);
+    }
+
+    @Test
+    void 자격마크가_전부_클러스터면_fallback() {
+        List<ExitTimingService.MarkStat> curve = List.of(
+                clusteredMark(90, 100, 1.0), clusteredMark(300, 100, 2.0));
+
+        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1)).isNull();
+    }
+
+    @Test
+    void 캡이_걸리면_원시마크와_capped가_노출된다() {
+        // 분석은 295분(n=89)을 골랐는데 maxHold 90 → holdMinutes는 90으로 잘리고,
+        // samples/avgReturnPct는 원시 마크(295분) 값이다. 종전엔 이 캡 사실이 어디에도 안 보였다.
+        StrategyHoldTimeProvider p = provider(props(true, 20, 90), List.of(
+                timing("REVERSAL_L", mark(90, 104, 0.31), mark(295, 89, 1.46))));
+
+        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
+                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
+
+        assertThat(l.holdMinutes()).isEqualTo(90);
+        assertThat(l.rawMarkMinutes()).isEqualTo(295);
+        assertThat(l.capped()).isTrue();
+        assertThat(l.samples()).isEqualTo(89);
+    }
+
+    @Test
+    void 캡에_안_걸리면_capped는_false() {
+        StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(
+                timing("REVERSAL_L", mark(90, 104, 0.31))));
+
+        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
+                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
+
+        assertThat(l.holdMinutes()).isEqualTo(90);
+        assertThat(l.rawMarkMinutes()).isEqualTo(90);
+        assertThat(l.capped()).isFalse();
     }
 }
