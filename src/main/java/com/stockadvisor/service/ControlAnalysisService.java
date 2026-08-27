@@ -58,10 +58,25 @@ public class ControlAnalysisService {
      * @param topDay           net 합 기여가 가장 큰 거래일(yyyyMMdd)
      * @param netExTopDayPct   그 하루를 뺀 나머지 net 평균(%) — 표본이 그 날뿐이면 null
      * @param clustered        건수 편중(share/일수) <b>또는</b> LOO에서 net 부호가 뒤집히면 true
+     * @param alignedFrom/alignedTo         이 탈락 사유와 ENTERED가 <b>겹치는 거래일 구간</b>(yyyyMMdd). ENTERED 자신은 null
+     * @param alignedSamples/alignedNetPct  그 구간으로 자른 이 그룹의 표본·net
+     * @param alignedEnteredSamples/alignedEnteredNetPct  같은 구간으로 자른 ENTERED의 표본·net
+     * @param edgeVsEnteredPct  aligned(이 사유) − aligned(ENTERED). <b>양수면 "거른 게 더 나았다"</b>(필터 재검토 후보)
+     *
+     * <p>🐞 2026-08-27 추가(aligned*): 종전엔 <b>전체 구간</b> net끼리 비교했는데, 대조군 사유는 도입 시점이
+     * 제각각이라(강제 기록 사유는 특히) <b>진입군보다 늦게 시작</b>한다 — 그러면 비교가 "조건 차이"가 아니라
+     * <b>기간 차이</b>를 잰다. 실측 2026-08-27 REVERSAL_L: ENTERED n=209(4거래일, 8/25 급등일 포함) vs
+     * {@code NOT_WEAK} n=61(<b>1거래일</b>)을 그대로 빼서 edge를 +1.85%p로 보고했는데, 같은 날로 맞추면
+     * <b>+0.69%p</b>였다. {@code FeatureMiningService.overlapWindow}가 2026-08-25에 받은 것과 같은 수정이며,
+     * 새 대조군 사유가 추가될 때마다 도입 직후엔 <b>구조적으로 부풀려지므로</b> 이 정렬이 필수다.</p>
      */
     public record Stat(String group, int samples, Double avgNetReturnPct, Double winRatePct,
                        int distinctDays, Double maxDaySharePct, String topDay, Double netExTopDayPct,
-                       boolean clustered) {}
+                       boolean clustered,
+                       String alignedFrom, String alignedTo,
+                       Integer alignedSamples, Double alignedNetPct,
+                       Integer alignedEnteredSamples, Double alignedEnteredNetPct,
+                       Double edgeVsEnteredPct) {}
     public record StrategyControl(String strategy, String horizon, Stat entered, List<Stat> rejectedByReason,
                                   String hint) {}
 
@@ -98,9 +113,11 @@ public class ControlAnalysisService {
 
         List<StrategyControl> result = new ArrayList<>();
         agg.forEach((strategy, groups) -> {
-            Stat entered = toStat("ENTERED", groups.get("ENTERED"));
+            Acc enteredAcc = groups.get("ENTERED");
+            Stat entered = toStat("ENTERED", enteredAcc);
             List<Stat> rejected = new ArrayList<>();
-            groups.forEach((g, a) -> { if (g.startsWith("REJECT:")) rejected.add(toStat(g.substring(7), a)); });
+            // 각 탈락 사유는 ENTERED와 겹치는 거래일 구간으로 정렬해 edge를 함께 낸다(기간 차이를 조건 차이로 오독 방지).
+            groups.forEach((g, a) -> { if (g.startsWith("REJECT:")) rejected.add(toStat(g.substring(7), a, enteredAcc)); });
             rejected.sort((x, y) -> Integer.compare(y.samples(), x.samples()));
             result.add(new StrategyControl(strategy, horizon == null ? "close" : horizon, entered, rejected,
                     buildHint(entered, rejected)));
@@ -177,8 +194,12 @@ public class ControlAnalysisService {
         List<String> better = new ArrayList<>();
         for (Stat r : sc.rejectedByReason()) {
             // 클러스터된 탈락 버킷은 비교 대상에서 제외 — "하루 이벤트가 만든 net"으로 필터를 흔들지 않는다.
-            if (r.samples() >= MIN_SAMPLES && !r.clustered() && r.avgNetReturnPct() != null && r.avgNetReturnPct() > net) {
-                better.add(String.format("%s(%+.2f%%, n%d, %d일)", r.group(), r.avgNetReturnPct(), r.samples(), r.distinctDays()));
+            // 그리고 비교는 '겹치는 거래일 구간'으로 정렬된 edge로 한다(기간 차이 ≠ 조건 차이, 2026-08-27).
+            if (r.samples() >= MIN_SAMPLES && !r.clustered()
+                    && r.edgeVsEnteredPct() != null && r.edgeVsEnteredPct() > 0) {
+                better.add(String.format("%s(%+.2f%% vs 진입 %+.2f%%, n%d, %s~%s)", r.group(),
+                        r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(),
+                        r.alignedFrom(), r.alignedTo()));
             }
         }
         if (!better.isEmpty()) {
@@ -197,7 +218,18 @@ public class ControlAnalysisService {
     }
 
     private Stat toStat(String group, Acc a) {
-        if (a == null || a.count == 0) return new Stat(group, 0, null, null, 0, null, null, null, false);
+        return toStat(group, a, null);
+    }
+
+    /**
+     * @param entered ENTERED 누적기 — null이 아니면 <b>겹치는 거래일 구간</b>으로 양쪽을 잘라 edge를 함께 낸다.
+     *                ENTERED 자신을 만들 때는 null(자기 자신과 정렬할 대상이 없다).
+     */
+    private Stat toStat(String group, Acc a, Acc entered) {
+        if (a == null || a.count == 0) {
+            return new Stat(group, 0, null, null, 0, null, null, null, false,
+                    null, null, null, null, null, null, null);
+        }
         int n = a.count;
         int days = a.cntByDay.size();
         double net = a.sumNet / n;
@@ -218,8 +250,53 @@ public class ControlAnalysisService {
                 || days < MIN_DISTINCT_DAYS
                 || (netExTop != null && Math.signum(net) != Math.signum(netExTop));
 
+        // 기간 정렬 — 이 사유와 ENTERED가 겹치는 거래일 구간으로 양쪽을 자른 뒤에만 edge를 낸다.
+        String[] win = entered == null ? null : overlapWindow(a.cntByDay.keySet(), entered.cntByDay.keySet());
+        Integer aN = null, eN = null;
+        Double aNet = null, eNet = null, edge = null;
+        if (win != null) {
+            double[] mine = windowed(a, win[0], win[1]);
+            double[] theirs = windowed(entered, win[0], win[1]);
+            aN = (int) mine[0];
+            eN = (int) theirs[0];
+            if (mine[0] > 0) aNet = round2(mine[1] / mine[0]);
+            if (theirs[0] > 0) eNet = round2(theirs[1] / theirs[0]);
+            if (aNet != null && eNet != null) edge = round2(aNet - eNet);
+        }
+
         return new Stat(group, n, round2(net), round2(100.0 * a.wins / n),
-                days, round2(share), topDay, round2(netExTop), clustered);
+                days, round2(share), topDay, round2(netExTop), clustered,
+                win == null ? null : win[0], win == null ? null : win[1],
+                aN, aNet, eN, eNet, edge);
+    }
+
+    /**
+     * 두 그룹이 <b>겹치는 거래일 구간</b> [from,to] (순수) — 없으면 null.
+     *
+     * <p>yyyyMMdd는 고정폭이라 사전식 비교가 곧 시간순이다({@code FeatureMiningService.overlapWindow}와 동일 사상).
+     * 교집합이 아니라 <b>구간</b>을 쓰는 이유: 그룹마다 신호가 나는 날이 달라 교집합을 쓰면 표본이 과하게 깎인다 —
+     * 여기서 막으려는 건 "한쪽이 통째로 다른 기간"이지 "일부 날짜가 비는 것"이 아니다.</p>
+     */
+    static String[] overlapWindow(java.util.Set<String> daysA, java.util.Set<String> daysB) {
+        if (daysA.isEmpty() || daysB.isEmpty()) return null;
+        String loA = java.util.Collections.min(daysA), hiA = java.util.Collections.max(daysA);
+        String loB = java.util.Collections.min(daysB), hiB = java.util.Collections.max(daysB);
+        String from = loA.compareTo(loB) >= 0 ? loA : loB;
+        String to = hiA.compareTo(hiB) <= 0 ? hiA : hiB;
+        return from.compareTo(to) <= 0 ? new String[]{from, to} : null;   // 겹치는 구간 없음
+    }
+
+    /** 구간 [from,to] 안의 {건수, net합} (순수). 진입일 미상 표본은 집계에서 빠진다. */
+    private static double[] windowed(Acc a, String from, String to) {
+        double n = 0, sum = 0;
+        for (Map.Entry<String, int[]> e : a.cntByDay.entrySet()) {
+            String d = e.getKey();
+            if (d.compareTo(from) < 0 || d.compareTo(to) > 0) continue;
+            n += e.getValue()[0];
+            double[] sv = a.sumByDay.get(d);
+            if (sv != null) sum += sv[0];
+        }
+        return new double[]{n, sum};
     }
 
     /** 그룹별 누적기 — net 합·승수·건수 + <b>진입일별 건수</b>(클러스터 판정용). */
@@ -254,9 +331,11 @@ public class ControlAnalysisService {
         }
         List<String> better = new ArrayList<>();
         for (Stat r : rejected) {
-            if (r.samples() >= 10 && r.avgNetReturnPct() != null && r.avgNetReturnPct() > entered.avgNetReturnPct()) {
-                better.add(String.format("%s(%.2f%%>%.2f%%, n=%d)", r.group(), r.avgNetReturnPct(), entered.avgNetReturnPct(), r.samples()));
-            }
+            // ⚠️ 비교는 반드시 '겹치는 거래일 구간'으로 정렬된 값으로 — 전체 구간끼리 빼면 기간 차이를 조건 차이로 오독한다.
+            // 정렬값이 없으면(진입일 미상 등) 비교를 생략한다: 부풀려진 숫자로 필터를 흔드는 것보다 침묵이 낫다.
+            if (r.samples() < 10 || r.edgeVsEnteredPct() == null || r.edgeVsEnteredPct() <= 0) continue;
+            better.add(String.format("%s(%.2f%%>%.2f%%, n=%d, %s~%s)", r.group(),
+                    r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(), r.alignedFrom(), r.alignedTo()));
         }
         return better.isEmpty() ? "진입분이 우위 — 현 필터 유지"
                 : "⚠️ 미진입이 더 나음(필터 완화 검토): " + String.join(", ", better);

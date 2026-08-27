@@ -25,6 +25,7 @@ import com.stockadvisor.service.ExitMethodProvider;
 import com.stockadvisor.service.SectorValuationService;
 import com.stockadvisor.service.ControlAnalysisService;
 import com.stockadvisor.service.ExecutionQualityService;
+import com.stockadvisor.service.OrderChaseAnalysisService;
 import com.stockadvisor.service.BacktestService;
 import com.stockadvisor.service.RegimeBacktagService;
 import com.stockadvisor.service.FlowBacktagService;
@@ -114,6 +115,7 @@ public class SignalAdminController {
     private final SectorValuationService sectorValuationService;
     private final ControlAnalysisService controlAnalysisService;
     private final ExecutionQualityService executionQualityService;
+    private final OrderChaseAnalysisService orderChaseAnalysisService;
     private final BacktestService backtestService;
     private final RegimeBacktagService regimeBacktagService;
     private final FlowBacktagService flowBacktagService;
@@ -157,6 +159,7 @@ public class SignalAdminController {
                                  SectorValuationService sectorValuationService,
                                  ControlAnalysisService controlAnalysisService,
                                  ExecutionQualityService executionQualityService,
+                                 OrderChaseAnalysisService orderChaseAnalysisService,
                                  BacktestService backtestService,
                                  RegimeBacktagService regimeBacktagService,
                                  FlowBacktagService flowBacktagService,
@@ -197,6 +200,7 @@ public class SignalAdminController {
         this.sectorValuationService = sectorValuationService;
         this.controlAnalysisService = controlAnalysisService;
         this.executionQualityService = executionQualityService;
+        this.orderChaseAnalysisService = orderChaseAnalysisService;
         this.backtestService = backtestService;
         this.regimeBacktagService = regimeBacktagService;
         this.flowBacktagService = flowBacktagService;
@@ -699,6 +703,19 @@ public class SignalAdminController {
     @GetMapping("/execution-quality")
     public List<ExecutionQualityService.StrategyExecQuality> executionQuality() {
         return executionQualityService.analyze();
+    }
+
+    /**
+     * 주문 추격(취소→재주문) 비용 — 미체결 타임아웃 후 현재가로 재주문하며 호가를 따라가는 비용을 측정.
+     *
+     * <p>{@code adverseDriftPct}는 <b>음수가 불리</b>(매도=더 싸게 팔림 / 매수=더 비싸게 삼).
+     * 기존 {@code trade_order}만으로 소급 계산되므로 신규 태깅이 없다 — 같은 멱등키를 공유하는 행이 곧 한 체인.</p>
+     *
+     * @param since yyyyMMdd(포함). 생략하면 전체 기간.
+     */
+    @GetMapping("/order-chase")
+    public List<OrderChaseAnalysisService.Summary> orderChase(@RequestParam(required = false) String since) {
+        return orderChaseAnalysisService.analyze(since);
     }
 
     /**
