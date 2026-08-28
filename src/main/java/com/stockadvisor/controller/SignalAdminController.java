@@ -341,8 +341,10 @@ public class SignalAdminController {
             @RequestParam(required = false) String since,
             @RequestParam(required = false) String until,
             @RequestParam(required = false) Integer topN,
-            @RequestParam(required = false) Integer maxHoldMonths) {
-        return selectionSweepService.sweep(since, until, topN, maxHoldMonths);
+            @RequestParam(required = false) Integer maxHoldMonths,
+            @RequestParam(required = false) Long minPriceKrw,
+            @RequestParam(required = false) Long minTurnoverKrw) {
+        return selectionSweepService.sweep(since, until, topN, maxHoldMonths, minPriceKrw, minTurnoverKrw);
     }
 
     /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */

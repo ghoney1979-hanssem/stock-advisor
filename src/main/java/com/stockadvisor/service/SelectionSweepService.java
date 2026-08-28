@@ -71,8 +71,28 @@ public class SelectionSweepService {
      * @param topN        상위 N종목 동일가중(기본 30)
      */
     public SweepReport sweep(String since, String until, Integer topN, Integer maxHoldMonths) {
+        return sweep(since, until, topN, maxHoldMonths, null, null);
+    }
+
+    /**
+     * @param minPriceKrw    진입일 종가 하한(원). 0/null=제한 없음
+     * @param minTurnoverKrw 진입 직전 1개월 <b>일평균 거래대금</b> 하한(원). 0/null=제한 없음
+     *
+     * <p>⚠️ <b>이 두 필터가 없으면 결과가 거래 불가능한 종목으로 채워진다.</b> "많이 떨어진 30종목"을
+     * 3,320종목 전체에서 뽑으면 대부분 <b>동전주·거래 거의 없는 종목</b>이 되고, 종가 기반 수익률은
+     * <b>호가 단위 양자화와 호가 스프레드 튐(bid-ask bounce)</b>이 지배한다. 그건 단기 반전 신호로 위장하지만
+     * 실제로는 체결이 불가능하거나 스프레드(수 %)가 수익을 통째로 먹는다 —
+     * 백테스트는 왕복비용 0.22%만 빼므로 그 비용이 반영되지 않는다.</p>
+     *
+     * <p>⚠️ 라이브 시스템은 이미 같은 방어를 갖고 있다({@code min-price} 1,000원 ·
+     * {@code min-turnover-krw} 5억). <b>백테스트가 그걸 안 쓰면 실제로 못 하는 매매를 측정하는 것</b>이다.</p>
+     */
+    public SweepReport sweep(String since, String until, Integer topN, Integer maxHoldMonths,
+                             Long minPriceKrw, Long minTurnoverKrw) {
         int n = (topN == null || topN <= 0) ? 30 : topN;
         int hold = (maxHoldMonths == null || maxHoldMonths <= 0) ? 1 : maxHoldMonths;
+        long minPrice = minPriceKrw == null ? 0 : minPriceKrw;
+        long minTurnover = minTurnoverKrw == null ? 0 : minTurnoverKrw;
 
         Map<String, Series> prices = loadSeries();
         int[] calendar = tradingCalendar(prices);
@@ -103,11 +123,19 @@ public class SelectionSweepService {
                 int ei = idxOnOrAfter(s.dates(), entryDate);
                 int li = idxOnOrBefore(s.dates(), limitDate);
                 if (ei < 0 || li <= ei || s.close()[ei] <= 0) continue;
+                if (minPrice > 0 && s.close()[ei] < minPrice) continue;
+
+                int i1 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(1)));
+                if (minTurnover > 0) {
+                    // 진입 직전 1개월 일평균 거래대금 — 라이브의 유동성 필터와 같은 기준.
+                    Double turnover = SelectionAxis.TURNOVER.value(s.close(), s.high(), s.volume(), ei, i1, i1, i1, i1);
+                    if (turnover == null || turnover < minTurnover) continue;
+                }
+
                 double fwd = (double) (s.close()[li] - s.close()[ei]) / s.close()[ei] * 100 - roundTripCostPct;
                 uniSum += fwd;
                 uniN++;
 
-                int i1 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(1)));
                 int i3 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(3)));
                 int i6 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(6)));
                 int i12 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(12)));
