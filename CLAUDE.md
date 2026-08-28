@@ -169,6 +169,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ⚠️ **라이브 매매 경로는 종전대로 KIS**다 — 소스 이원화가 의도(네이버는 비공식 엔드포인트라 포맷·가용성 변동 위험이 있고, 연구 데이터는 부분 실패가 유효하다). 클라이언트도 공용 `RestClient.Builder`(read timeout 5s)를 안 쓰고 전용 팩토리(30s)를 둬 대량 잡 설정이 라이브로 새지 않게 했다.
 - env `DAILY_HISTORY_THROTTLE_MS`(기본 250, compose 패스스루). 테스트 `NaverDailyPriceParserTest` 5 + `DailyHistoryCoverageTest` 4.
 
+### 종목 선정력 측정 (F-Score 랭킹 스프레드, 2026-08-28)
+- **🔴 질문이 바뀐 계기(사용자 지적)**: "우상향한 종목에 물타기하면 당연히 +다 — 중요한 건 **우상향할 종목을 고를 수 있느냐**"다. 맞는 지적이고, 이게 백테스트 설계를 바꾼다 — 생존편향 유니버스에서 절대 수익률을 재면 **전략이 아니라 시장 드리프트**를 재게 된다. → 질문을 **"스코어 상위가 하위보다 나은가"**로 바꾼다.
+- ⚠️ **왜 스프레드는 생존편향에 강한가**: 유니버스가 "오늘 살아남아 시총 상위"라 전 구간이 통째로 들어올려지지만 그 효과는 **상·하위 버킷에 공통**으로 걸린다. 절대값은 못 믿어도 **차이는 유효**하다(이 시스템의 진입-대조군 edge와 같은 논리 — **lift는 반사실이 아니고 차이만 반사실이다**).
+- **왜 F-Score인가**: 유명해서가 아니라 **원 질문이 이 전략의 셋업과 같기 때문**이다 — "싸진(떨어진) 종목 중 재무적으로 건강해서 회복할 놈은 누구인가". 기준이 전부 **이진**이라 튜닝 여지가 거의 없어 과적합 저항이 좋다(ATR·업종 pocket을 다중검정으로 죽인 전례를 보면 중요한 성질).
+- 구성: `financial_fact`(종목×사업연도 원시 항목) + `DartAnnualFactExtractor`(순수) + `FinancialScore`(순수, 7개 기준) + `FinancialFactBackfillService` + `FinancialSpreadAnalysisService`. 엔드포인트 `POST /admin/backfill-financial-facts?years=10&limit=&maxCalls=` · `GET /admin/financial-facts-status` · `GET /admin/financial-spread?horizonMonths=12&minEvaluated=5&highMin=6&lowMax=2` · `GET /admin/financial-score?stockCode=&businessYear=`(진단).
+- ⚠️ **점수가 아니라 원시 항목을 저장한다** — DART는 일일 한도(~2만)라 재수집이 비싼데 점수 공식은 반드시 바뀐다(CFO 2개 추가). 원시값을 쥐면 공식 변경이 **재계산 0콜**로 끝난다. 비용: 사업보고서(11011)만 = 종목당 연도 1콜 = 10년×1,500 ≈ **15,000콜**(하루). ⚠️ 1콜이 **당기+전기**를 함께 줘 변화량 5개 기준을 추가 호출 없이 계산하지만, 연도별 점수를 내려면 **연도마다 1콜**이 필요하다(절약 불가).
+- ⚠️ **백필은 캐시 우회**(`fetchSingleCompanyFinancialsUncached`) — 소급은 키마다 한 번뿐이라 캐시가 히트할 일이 없는데, Redis에 15,000건(수십 MB)이 1시간 쌓인다. 그 Redis는 **다른 프로젝트와 공유하는 컨테이너**(redis-local)이고 VM은 e2-medium(4GB)이다.
+- ⚠️ **판정 불가를 미충족(0)으로 치지 않는 게 설계의 핵심** — 금융업은 유동자산/유동부채 항목이 아예 없는데 0으로 처리하면 업종 전체가 조용히 하위 버킷으로 밀려 **스코어가 업종 더미변수로 변질**된다. → `evaluated`(판정 가능 항목 수)를 함께 반환하고 분석이 `minEvaluated`(기본 5)로 거른다. 같은 이유로 레버리지는 부채비율(자본 분모)이 아니라 **부채/자산**을 쓴다(자본잠식에서 발산해 순위가 뒤집히는 것 방지).
+- ⚠️ **look-ahead 차단이 이 분석 유효성의 전부**: 사업보고서는 사업연도 종료 후 90일(3월 말) 제출이라 Y년 재무를 Y년 중에 쓰면 미래를 보는 것이다 → 기준일 = **(Y+1)년 5월 첫 거래일**(제출 지연 여유 포함), 그 **이후** 첫 거래일 종가로 진입. horizon 끝이 데이터 밖이면 **표본에서 제외**(추정하지 않는다). 수급 소급의 '직전 거래일' 규칙에 해당하는 장치가 여기선 이것이다.
+- ⚠️ **빠진 2개가 하필 중요하다** — `CFO>0`·`CFO>순이익`(발생액). 후자가 F-Score에서 **회계상 이익 부풀리기를 잡는 핵심**인데 주요계정엔 현금흐름표가 없다(`fnlttSinglAcntAll`로 바꾸면 가능). 즉 현 스코어는 **이익의 질을 못 본다** — 스프레드가 확인되면 그때 추가.
+- ⚠️ **배당 미반영** — 일봉 소스가 수정주가(가격 조정)라 배당 재투자가 빠진다. **고배당 우량주가 구조적으로 불리**하게 평가된다.
+- 🔴 **3종목 집중 계획과의 구조적 충돌(반드시 기억할 것)**: 재무 퀄리티 스크린의 문헌상 초과수익은 연 **3~5%p**인데 3종목 포트폴리오 변동성은 **~27%**(개별 35~45%, 상관 0.4 가정)다. **신호 4%p vs 잡음 27%** — 선정력이 진짜로 존재해도 실전에선 "어느 3종목을 뽑았느냐의 운"이 완전히 압도한다. **선정력은 20~30종목 분산에서만 실현**되는데 물타기는 종목당 자본을 키워 **집중을 요구**한다. → 스프레드가 나와도 선택지는 ① 종목 수를 늘리고 물타기 규모 축소(=사실상 퀄리티 팩터 포트폴리오) ② 인덱스로 전환 ③ 3종목 유지하되 "검증된 엣지가 아니라 판단"임을 인정하고 규모 제한, 셋뿐이다.
+- ⚠️ 판정은 **연도별 부호 유지**로 — 전체 스프레드가 양수여도 1~2년이 만든 것이면 채택 금지(클러스터 함정이 이 시스템에서 5회 재발했다). 응답의 `byYear`·`yearsPositive/yearsTotal`가 그 판정용이고 `caveats`가 해석 함정을 실어 보낸다.
+- env `FINANCIAL_HISTORY_THROTTLE_MS`(기본 60, compose 패스스루). 테스트 `FinancialScoreTest` 6 + `FinancialSpreadLookaheadTest` 4.
+
 ### 로컬 인프라
 - `docker-compose.yml` — PostgreSQL(`stockadvisor-postgres`, 5432) + Redis. **단, Redis는 기존에 떠 있던 공유 컨테이너 `redis-local`(6379)을 재사용** 중이므로, 캐시 키 정리 시 `FLUSHALL` 금지 — `kisQuote*`/`dartFinancials*` 패턴만 삭제할 것.
 - Company 시드: `scripts/seed-companies.sql` (`docker exec -i stockadvisor-postgres psql -U stockadvisor -d stockadvisor < scripts/seed-companies.sql`). 6종목 적재됨(005930 등).

@@ -42,6 +42,23 @@ public class DartApiClient {
             key = "#corpCode + ':' + #businessYear + ':' + #reportCode")
     public DartFinancialResponse fetchSingleCompanyFinancials(
             String corpCode, String businessYear, String reportCode) {
+        return callSingleCompanyFinancials(corpCode, businessYear, reportCode);
+    }
+
+    /**
+     * 주요계정 조회 — <b>캐시 우회</b>. 과거 연도 대량 소급(10년×1,500종목=15,000콜) 전용이다.
+     *
+     * <p>소급은 키마다 <b>정확히 한 번</b>만 조회하므로 캐시가 히트할 일이 없고, 대신 Redis에 15,000건(수십 MB)이
+     * 1시간 동안 쌓인다. ⚠️ 이 Redis는 다른 프로젝트와 <b>공유하는 컨테이너</b>(redis-local)이고 VM은 e2-medium(4GB)이라,
+     * 얻는 것 없이 메모리만 압박하는 거래다. 라이브 추천 경로는 종전대로 캐시본을 쓴다.</p>
+     */
+    public DartFinancialResponse fetchSingleCompanyFinancialsUncached(
+            String corpCode, String businessYear, String reportCode) {
+        return callSingleCompanyFinancials(corpCode, businessYear, reportCode);
+    }
+
+    private DartFinancialResponse callSingleCompanyFinancials(
+            String corpCode, String businessYear, String reportCode) {
 
         try {
             DartFinancialResponse response = restClient.get()

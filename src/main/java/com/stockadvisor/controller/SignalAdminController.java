@@ -31,6 +31,8 @@ import com.stockadvisor.service.RegimeBacktagService;
 import com.stockadvisor.service.FlowBacktagService;
 import com.stockadvisor.service.InvestorFlowBacktagService;
 import com.stockadvisor.service.DailyHistoryBackfillService;
+import com.stockadvisor.service.FinancialFactBackfillService;
+import com.stockadvisor.service.FinancialSpreadAnalysisService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -125,6 +127,10 @@ public class SignalAdminController {
     private NewsBacktagService newsBacktagService;   // 뉴스 소급 — 필드주입(생성자 무churn)
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private DailyHistoryBackfillService dailyHistoryBackfillService;   // 일봉 히스토리 적재 — 필드주입(생성자 무churn)
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private FinancialFactBackfillService financialFactBackfillService;       // DART 재무 소급 — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private FinancialSpreadAnalysisService financialSpreadAnalysisService;   // 선정력(랭킹 스프레드) — 필드주입
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -256,6 +262,48 @@ public class SignalAdminController {
     @GetMapping("/daily-history-status")
     public Map<String, Object> dailyHistoryStatus() {
         return dailyHistoryBackfillService.status();
+    }
+
+    /**
+     * DART 연간 재무 소급 수집 — 종목 <b>선정력</b> 측정(F-Score 랭킹 스프레드)의 전제 데이터.
+     *
+     * <p>⚠️ DART 일일 한도(~2만)를 쓰므로 {@code maxCalls}로 상한을 둔다(초과분은 다음 실행이 이어받는다 —
+     * 이미 가진 (종목,연도)는 조회조차 하지 않는다). 10년×1,500종목 ≈ 15,000콜.</p>
+     */
+    @PostMapping("/backfill-financial-facts")
+    public FinancialFactBackfillService.BackfillReport backfillFinancialFacts(
+            @RequestParam(required = false) Integer years,
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) Integer maxCalls) {
+        return financialFactBackfillService.backfill(years, limit, maxCalls);
+    }
+
+    /** 재무 소급 수집 현황(연도별 행 수). */
+    @GetMapping("/financial-facts-status")
+    public Map<String, Object> financialFactsStatus() {
+        return financialFactBackfillService.status();
+    }
+
+    /**
+     * <b>랭킹 스프레드</b> — "재무 스코어에 종목 선정력이 있는가"를 전략 구현 전에 답한다.
+     *
+     * <p>주지표는 절대 수익률이 아니라 <b>버킷 간 차이</b>(lift·스프레드)다 — 생존편향이 상·하위에 공통으로
+     * 걸리므로 차이만 유효하다. <b>연도별 부호 유지</b>를 반드시 함께 볼 것.</p>
+     */
+    @GetMapping("/financial-spread")
+    public FinancialSpreadAnalysisService.SpreadReport financialSpread(
+            @RequestParam(required = false) Integer horizonMonths,
+            @RequestParam(required = false) Integer minEvaluated,
+            @RequestParam(required = false) Integer highMin,
+            @RequestParam(required = false) Integer lowMax) {
+        return financialSpreadAnalysisService.analyze(horizonMonths, minEvaluated, highMin, lowMax);
+    }
+
+    /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */
+    @GetMapping("/financial-score")
+    public Map<String, Object> financialScore(@RequestParam String stockCode,
+                                              @RequestParam String businessYear) {
+        return financialSpreadAnalysisService.explain(stockCode, businessYear);
     }
 
     /**
