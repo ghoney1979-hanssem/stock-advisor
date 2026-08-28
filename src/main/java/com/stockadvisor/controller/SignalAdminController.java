@@ -34,6 +34,7 @@ import com.stockadvisor.service.DailyHistoryBackfillService;
 import com.stockadvisor.service.FinancialFactBackfillService;
 import com.stockadvisor.service.FinancialSpreadAnalysisService;
 import com.stockadvisor.service.MultidayBacktestService;
+import com.stockadvisor.service.SelectionSweepService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -134,6 +135,8 @@ public class SignalAdminController {
     private FinancialSpreadAnalysisService financialSpreadAnalysisService;   // 선정력(랭킹 스프레드) — 필드주입
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private MultidayBacktestService multidayBacktestService;                 // 멀티데이 백테스트 — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SelectionSweepService selectionSweepService;                     // 선정 축 탐색 — 필드주입
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -323,6 +326,22 @@ public class SignalAdminController {
             @RequestParam(required = false) Integer minEvaluated) {
         return multidayBacktestService.run(topN, scoreMin, armPct, dropPct,
                 maxHoldMonths, lookbackMonths, minEvaluated);
+    }
+
+    /**
+     * <b>종목 선정 축 탐색</b> — "무엇을 사야 하나"의 후보를 같은 규칙으로 한 번에 잰다.
+     *
+     * <p>⚠️ 축 8개 × 방향 2개 = 16개를 돌리므로 <b>하나는 우연히 통과한다.</b>
+     * {@code until}로 탐색 구간을 자르고, 거기서 통과한 축만 {@code since}로 holdout에서 <b>딱 한 번</b> 확인할 것.
+     * 탐색 구간 결과 자체를 채택 근거로 쓰면 2026-08-21 발굴 세션(통과 pocket 50개가 전부 허수)을 반복한다.</p>
+     */
+    @GetMapping("/selection-sweep")
+    public SelectionSweepService.SweepReport selectionSweep(
+            @RequestParam(required = false) String since,
+            @RequestParam(required = false) String until,
+            @RequestParam(required = false) Integer topN,
+            @RequestParam(required = false) Integer maxHoldMonths) {
+        return selectionSweepService.sweep(since, until, topN, maxHoldMonths);
     }
 
     /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */
