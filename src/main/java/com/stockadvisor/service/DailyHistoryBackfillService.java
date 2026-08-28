@@ -132,7 +132,8 @@ public class DailyHistoryBackfillService {
         String to = today.format(YYYYMMDD);
 
         boolean all = "ALL".equalsIgnoreCase(source);
-        List<String> codes = all ? allListedCodes() : companyRepository.findAllStockCodes();
+        boolean active = "ACTIVE".equalsIgnoreCase(source);
+        List<String> codes = active ? activeCodes() : all ? allListedCodes() : companyRepository.findAllStockCodes();
         int total = codes.size();
         if (limit != null && limit > 0 && limit < codes.size()) codes = codes.subList(0, limit);
 
@@ -189,7 +190,7 @@ public class DailyHistoryBackfillService {
         if (!refreshEnabled) return;
         try {
             String from = LocalDate.now(SEOUL).minusDays(20).format(YYYYMMDD);
-            BackfillReport r = backfill(null, null, from, true, "ALL");
+            BackfillReport r = backfill(null, null, from, true, "ACTIVE");
             log.info("[일봉적재] 증분 갱신 완료 — {}종목 조회 · {}행 추가", r.stocksFetched(), r.rowsInserted());
         } catch (Exception e) {
             log.warn("[일봉적재] 증분 갱신 실패(무시): {}", e.toString());
@@ -214,6 +215,22 @@ public class DailyHistoryBackfillService {
      * 네이버는 폐지 종목의 폐지 시점까지 가격을 주므로(000030 실측), 그 표본이 들어와야
      * "떨어지고 사라진 종목"이 유니버스에 복원된다.</p>
      */
+    /**
+     * <b>아직 거래되는</b> 종목만(최근 30일 내 거래일이 있는 것) — 매일 도는 증분 갱신 전용.
+     *
+     * <p>⚠️ 이 구분이 없으면 <b>폐지 종목 1,316개에 매일 헛호출</b>을 낸다(실측). 비공식 엔드포인트라
+     * 불필요한 일일 트래픽은 차단 위험을 키운다 — 무인으로 몇 달을 도는 잡이라 더 그렇다.
+     * 폐지 종목의 과거 가격은 이미 적재돼 있고 <b>더 늘어날 일이 없으므로</b> 갱신 대상이 아니다.</p>
+     */
+    private List<String> activeCodes() {
+        String cutoff = LocalDate.now(SEOUL).minusDays(30).format(YYYYMMDD);
+        List<String> codes = jdbcTemplate.queryForList(
+                "select stock_code from daily_price group by stock_code having max(business_date) >= ?",
+                String.class, cutoff);
+        log.info("[일봉적재] 활성 종목 {}개(최근 30일 내 거래)", codes.size());
+        return codes;
+    }
+
     private List<String> allListedCodes() {
         if (corpCodeService == null) {
             log.warn("[일봉적재] corpCodeService 미주입 — 워치리스트로 degrade");
