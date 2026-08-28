@@ -69,12 +69,16 @@ public class DailyHistoryBackfillService {
     private final JdbcTemplate jdbcTemplate;
     /** 소스 예의상 호출 간격(ms). 실측은 무지연 15콜/2초에도 차단이 없었지만 1,500콜은 얌전히 돈다. */
     private final long throttleMs;
+    /** 증분 갱신 스케줄 on/off. 슬리브를 쓰려면 반드시 켜야 한다(안 켜면 조용히 낡은 데이터로 선정한다). */
+    private final boolean refreshEnabled;
 
     public DailyHistoryBackfillService(CompanyRepository companyRepository,
                                        DailyPriceRepository dailyPriceRepository,
                                        NaverDailyPriceClient client,
                                        JdbcTemplate jdbcTemplate,
-                                       @Value("${stockadvisor.daily-history.throttle-ms:250}") long throttleMs) {
+                                       @Value("${stockadvisor.daily-history.throttle-ms:250}") long throttleMs,
+                                       @Value("${stockadvisor.daily-history.refresh-enabled:false}") boolean refreshEnabled) {
+        this.refreshEnabled = refreshEnabled;
         this.companyRepository = companyRepository;
         this.dailyPriceRepository = dailyPriceRepository;
         this.client = client;
@@ -167,6 +171,29 @@ public class DailyHistoryBackfillService {
                 fetched, skipped, empty, rowsInserted, elapsed);
         return new BackfillReport(total, fetched, skipped, empty, rowsFetched, rowsInserted,
                 from, maxDate, elapsed, note);
+    }
+
+    /**
+     * 평일 장 마감 후 <b>증분 갱신</b> — 최근 창만 다시 받아 전 종목의 최종 거래일을 맞춘다.
+     *
+     * <p>⚠️ <b>이게 없으면 슬리브가 조용히 낡은 데이터로 종목을 고른다.</b> 실제로 첫 적재(16시 전 실행,
+     * 오늘 부분봉 제외)와 ALL 적재(16시 후 실행)가 섞여 <b>종목마다 최종 거래일이 하루씩 달랐다</b> —
+     * 그 상태로 리밸런싱하면 진입가 기준일이 종목마다 어긋난다.</p>
+     *
+     * <p>⚠️ {@code force=true}로 커버리지 검사를 건너뛴다 — 폐지 종목은 최신 거래일에 영영 도달하지 못해
+     * 검사를 두면 매번 통째로 재조회되거나(느림) 영영 갱신되지 않는다(ALL 모드). 창이 짧아 응답이 작다.</p>
+     */
+    @org.springframework.scheduling.annotation.Scheduled(
+            cron = "${stockadvisor.daily-history.refresh-cron:0 40 16 * * MON-FRI}")
+    public void scheduledRefresh() {
+        if (!refreshEnabled) return;
+        try {
+            String from = LocalDate.now(SEOUL).minusDays(20).format(YYYYMMDD);
+            BackfillReport r = backfill(null, null, from, true, "ALL");
+            log.info("[일봉적재] 증분 갱신 완료 — {}종목 조회 · {}행 추가", r.stocksFetched(), r.rowsInserted());
+        } catch (Exception e) {
+            log.warn("[일봉적재] 증분 갱신 실패(무시): {}", e.toString());
+        }
     }
 
     /** 적재 현황 요약(조회 전용). */

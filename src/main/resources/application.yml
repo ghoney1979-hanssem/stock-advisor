@@ -407,7 +407,10 @@ stockadvisor:
   # 일봉 히스토리 적재(백테스트용, DailyHistoryBackfillService) — 소스는 네이버 금융(인증 불필요, 1콜 10년치).
   # ⚠️ 라이브 매매 경로는 종전대로 KIS다. 소스 이원화가 의도이며, 이 데이터는 연구 전용.
   daily-history:
-    throttle-ms: ${DAILY_HISTORY_THROTTLE_MS:250}   # 호출 간격(ms). 실측 무지연 15콜/2초에도 차단 없었으나 1,500콜은 얌전히
+    throttle-ms: ${DAILY_HISTORY_THROTTLE_MS:250}
+    # 증분 갱신(평일 마감 후) — 슬리브를 쓰려면 반드시 켤 것. 안 켜면 종목별 최종 거래일이 어긋난 채 선정된다.
+    refresh-enabled: ${DAILY_HISTORY_REFRESH_ENABLED:false}
+    refresh-cron: ${DAILY_HISTORY_REFRESH_CRON:0 40 16 * * MON-FRI}   # 호출 간격(ms). 실측 무지연 15콜/2초에도 차단 없었으나 1,500콜은 얌전히
 
   # 멀티데이 섀도우 슬리브(SleeveService) — 96조합 백테스트의 유일 생존자 HIGH_52W_HIGH를 실시간 기록.
   # 실주문 없음. holdout을 3회 소진해 백테스트로는 더 검증 불가 → 포워드 기록만이 오염되지 않은 증거다.
