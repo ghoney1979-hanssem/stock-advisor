@@ -30,6 +30,7 @@ import com.stockadvisor.service.BacktestService;
 import com.stockadvisor.service.RegimeBacktagService;
 import com.stockadvisor.service.FlowBacktagService;
 import com.stockadvisor.service.InvestorFlowBacktagService;
+import com.stockadvisor.service.DailyHistoryBackfillService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -122,6 +123,8 @@ public class SignalAdminController {
     private final InvestorFlowBacktagService investorFlowBacktagService;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private NewsBacktagService newsBacktagService;   // 뉴스 소급 — 필드주입(생성자 무churn)
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private DailyHistoryBackfillService dailyHistoryBackfillService;   // 일봉 히스토리 적재 — 필드주입(생성자 무churn)
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -228,6 +231,31 @@ public class SignalAdminController {
     public InvestorFlowBacktagService.BacktagReport backfillInvestorFlow(
             @RequestParam(required = false) Integer lookbackDays) {
         return investorFlowBacktagService.backfill(lookbackDays);
+    }
+
+    /**
+     * 일봉 히스토리 대량 적재 — <b>멀티데이 전략 백테스트의 전제 데이터</b>.
+     *
+     * <p>이 시스템이 지금까지 백테스트를 못 한 건 과거 <b>분봉</b>이 없어서였다. 멀티데이 전략은 일봉만으로
+     * 재현되므로 장기 일봉만 확보하면 파라미터 탐색·꼬리 손실 측정이 열린다. 소스가 1콜에 10년치를 줘서
+     * 종목당 1콜(워치리스트 1,500콜)로 끝난다.</p>
+     *
+     * <p>⚠️ 결과는 <b>낙관 상한</b>이다(생존편향 — 대상이 오늘 기준 시총 상위 1,500).
+     * ⚠️ 장중 실행은 권하지 않는다 — 라이브 매매와 CPU·네트워크를 경합한다.</p>
+     */
+    @PostMapping("/backfill-daily-history")
+    public DailyHistoryBackfillService.BackfillReport backfillDailyHistory(
+            @RequestParam(required = false) Integer years,
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) String startDate,
+            @RequestParam(defaultValue = "false") boolean force) {
+        return dailyHistoryBackfillService.backfill(years, limit, startDate, force);
+    }
+
+    /** 일봉 히스토리 적재 현황(종목 수·행 수·구간). */
+    @GetMapping("/daily-history-status")
+    public Map<String, Object> dailyHistoryStatus() {
+        return dailyHistoryBackfillService.status();
     }
 
     /**

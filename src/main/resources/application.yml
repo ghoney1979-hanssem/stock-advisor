@@ -404,6 +404,11 @@ stockadvisor:
     kospi-top: ${WATCHLIST_KOSPI_TOP:1000}
     kosdaq-top: ${WATCHLIST_KOSDAQ_TOP:500}
 
+  # 일봉 히스토리 적재(백테스트용, DailyHistoryBackfillService) — 소스는 네이버 금융(인증 불필요, 1콜 10년치).
+  # ⚠️ 라이브 매매 경로는 종전대로 KIS다. 소스 이원화가 의도이며, 이 데이터는 연구 전용.
+  daily-history:
+    throttle-ms: ${DAILY_HISTORY_THROTTLE_MS:250}   # 호출 간격(ms). 실측 무지연 15콜/2초에도 차단 없었으나 1,500콜은 얌전히
+
   # 매수가정 가격추적 후속알림 — 알림 후 경과 시점에 가격 샘플링
   followup:
     first-delay: ${FOLLOWUP_FIRST_DELAY:5m}    # +5분 가격 샘플(분석용)
