@@ -33,6 +33,7 @@ import com.stockadvisor.service.InvestorFlowBacktagService;
 import com.stockadvisor.service.DailyHistoryBackfillService;
 import com.stockadvisor.service.FinancialFactBackfillService;
 import com.stockadvisor.service.FinancialSpreadAnalysisService;
+import com.stockadvisor.service.MultidayBacktestService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -131,6 +132,8 @@ public class SignalAdminController {
     private FinancialFactBackfillService financialFactBackfillService;       // DART 재무 소급 — 필드주입
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private FinancialSpreadAnalysisService financialSpreadAnalysisService;   // 선정력(랭킹 스프레드) — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private MultidayBacktestService multidayBacktestService;                 // 멀티데이 백테스트 — 필드주입
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -299,6 +302,27 @@ public class SignalAdminController {
             @RequestParam(required = false) Integer topN,
             @RequestParam(required = false) Integer scoreMin) {
         return financialSpreadAnalysisService.analyze(horizonMonths, minEvaluated, highMin, lowMax, topN, scoreMin);
+    }
+
+    /**
+     * 멀티데이 백테스트 — <b>월별 진입 + 트레일링 청산</b> 경로 시뮬.
+     *
+     * <p>앞선 {@code /financial-spread}는 12개월 고정 보유라 <b>전략이 아니라 재무 갱신 주기</b>를 쟀고,
+     * 그 탓에 독립 관측이 연 단위 9개뿐이라 한 해가 결과를 지배했다. 여기선 진입을 매달로 늘려 관측을 ~110개로 만든다.</p>
+     *
+     * <p>판정은 응답의 {@code verdict}(사전 등록 기준)를 볼 것 — 수치를 보고 기준을 정하지 않기 위해 코드에 박아뒀다.</p>
+     */
+    @GetMapping("/multiday-backtest")
+    public MultidayBacktestService.BacktestReport multidayBacktest(
+            @RequestParam(required = false) Integer topN,
+            @RequestParam(required = false) Integer scoreMin,
+            @RequestParam(required = false) Double armPct,
+            @RequestParam(required = false) Double dropPct,
+            @RequestParam(required = false) Integer maxHoldMonths,
+            @RequestParam(required = false) Integer lookbackMonths,
+            @RequestParam(required = false) Integer minEvaluated) {
+        return multidayBacktestService.run(topN, scoreMin, armPct, dropPct,
+                maxHoldMonths, lookbackMonths, minEvaluated);
     }
 
     /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */
