@@ -260,8 +260,9 @@ public class SignalAdminController {
             @RequestParam(required = false) Integer years,
             @RequestParam(required = false) Integer limit,
             @RequestParam(required = false) String startDate,
-            @RequestParam(defaultValue = "false") boolean force) {
-        return dailyHistoryBackfillService.backfill(years, limit, startDate, force);
+            @RequestParam(defaultValue = "false") boolean force,
+            @RequestParam(required = false) String source) {
+        return dailyHistoryBackfillService.backfill(years, limit, startDate, force, source);
     }
 
     /** 일봉 히스토리 적재 현황(종목 수·행 수·구간). */

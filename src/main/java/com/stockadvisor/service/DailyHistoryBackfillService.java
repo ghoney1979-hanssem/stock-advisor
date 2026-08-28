@@ -63,6 +63,9 @@ public class DailyHistoryBackfillService {
     private final CompanyRepository companyRepository;
     private final DailyPriceRepository dailyPriceRepository;
     private final NaverDailyPriceClient client;
+    /** 전 상장이력(폐지 포함) 종목 목록 — 생존편향 제거용. 필드주입(생성자 무churn). */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.dart.DartCorpCodeService corpCodeService;
     private final JdbcTemplate jdbcTemplate;
     /** 소스 예의상 호출 간격(ms). 실측은 무지연 15콜/2초에도 차단이 없었지만 1,500콜은 얌전히 돈다. */
     private final long throttleMs;
@@ -97,6 +100,21 @@ public class DailyHistoryBackfillService {
      * @param force     true면 커버리지 검사 없이 전 종목 재조회(포맷 변경·결손 의심 시).
      */
     public BackfillReport backfill(Integer years, Integer limit, String startDate, boolean force) {
+        return backfill(years, limit, startDate, force, null);
+    }
+
+    /**
+     * @param source {@code "ALL"}이면 워치리스트가 아니라 <b>DART corpCode.xml의 전 상장 이력 종목</b>을 돈다.
+     *
+     * <p>⚠️ <b>이게 생존편향을 줄이는 유일한 수단이다.</b> 워치리스트는 <b>오늘 기준</b> 시총 상위 1,500이라
+     * "10년을 살아남아 지금 상위권인 회사"만 담는다. corpCode.xml은 <b>상장폐지된 법인도 stock_code와 함께
+     * 남겨두므로</b>(워치리스트에 죽은 티커 167개가 섞여 있던 것이 그 증거), 이걸 돌면 폐지 종목의 폐지 직전까지
+     * 가격이 들어와 "떨어지고 사라진" 표본이 유니버스에 복원된다.</p>
+     *
+     * <p>⚠️ ALL 모드는 <b>이미 행이 있는 종목을 무조건 건너뛴다</b> — 폐지 종목은 최신 거래일에 영영 도달하지
+     * 못해 {@link #covered}가 매번 재조회를 지시하기 때문이다(1회성 연구 적재라 이 단순화가 안전하다).</p>
+     */
+    public BackfillReport backfill(Integer years, Integer limit, String startDate, boolean force, String source) {
         long started = System.currentTimeMillis();
         ZonedDateTime now = ZonedDateTime.now(SEOUL);
         LocalDate today = now.toLocalDate();
@@ -109,7 +127,8 @@ public class DailyHistoryBackfillService {
                 : today.minusYears(years == null || years <= 0 ? DEFAULT_YEARS : years).format(YYYYMMDD);
         String to = today.format(YYYYMMDD);
 
-        List<String> codes = companyRepository.findAllStockCodes();
+        boolean all = "ALL".equalsIgnoreCase(source);
+        List<String> codes = all ? allListedCodes() : companyRepository.findAllStockCodes();
         int total = codes.size();
         if (limit != null && limit > 0 && limit < codes.size()) codes = codes.subList(0, limit);
 
@@ -117,7 +136,7 @@ public class DailyHistoryBackfillService {
 
         int fetched = 0, skipped = 0, empty = 0, rowsFetched = 0, rowsInserted = 0;
         for (String code : codes) {
-            if (!force && covered(coverage.get(code), from, maxDate)) {
+            if (!force && (all ? coverage.containsKey(code) : covered(coverage.get(code), from, maxDate))) {
                 skipped++;
                 continue;
             }
@@ -159,6 +178,33 @@ public class DailyHistoryBackfillService {
         m.put("to", dailyPriceRepository.maxBusinessDate());
         m.put("watchlist", companyRepository.count());
         return m;
+    }
+
+    /**
+     * DART corpCode.xml의 <b>전 상장 이력 종목코드</b>(폐지 법인 포함). 실패하면 워치리스트로 degrade.
+     *
+     * <p>⚠️ 여기서 나오는 코드 중 상당수는 이미 거래되지 않는다 — 그게 <b>의도</b>다.
+     * 네이버는 폐지 종목의 폐지 시점까지 가격을 주므로(000030 실측), 그 표본이 들어와야
+     * "떨어지고 사라진 종목"이 유니버스에 복원된다.</p>
+     */
+    private List<String> allListedCodes() {
+        if (corpCodeService == null) {
+            log.warn("[일봉적재] corpCodeService 미주입 — 워치리스트로 degrade");
+            return companyRepository.findAllStockCodes();
+        }
+        try {
+            List<String> codes = corpCodeService.fetchListedCompanies().stream()
+                    .map(c -> c.stockCode())
+                    .filter(c -> c != null && !c.isBlank())
+                    .distinct()
+                    .sorted()
+                    .toList();
+            log.info("[일봉적재] corpCode 전 상장이력 {}종목(폐지 포함)", codes.size());
+            return codes;
+        } catch (Exception e) {
+            log.warn("[일봉적재] corpCode 조회 실패 — 워치리스트로 degrade: {}", e.toString());
+            return companyRepository.findAllStockCodes();
+        }
     }
 
     /** 종목별 [min, max] 커버리지. */
