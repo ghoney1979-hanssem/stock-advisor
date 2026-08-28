@@ -409,6 +409,16 @@ stockadvisor:
   daily-history:
     throttle-ms: ${DAILY_HISTORY_THROTTLE_MS:250}   # 호출 간격(ms). 실측 무지연 15콜/2초에도 차단 없었으나 1,500콜은 얌전히
 
+  # 멀티데이 섀도우 슬리브(SleeveService) — 96조합 백테스트의 유일 생존자 HIGH_52W_HIGH를 실시간 기록.
+  # 실주문 없음. holdout을 3회 소진해 백테스트로는 더 검증 불가 → 포워드 기록만이 오염되지 않은 증거다.
+  sleeve:
+    enabled: ${SLEEVE_ENABLED:false}
+    top-n: ${SLEEVE_TOP_N:30}
+    hold-months: ${SLEEVE_HOLD_MONTHS:3}          # 백테스트 채택값(월별 리밸런싱은 비용 연 2.64%로 유니버스를 음수로 만든다)
+    min-price-krw: ${SLEEVE_MIN_PRICE_KRW:1000}   # 라이브와 같은 기준 — 빼면 동전주 호가 튐이 허수를 만든다
+    min-turnover-krw: ${SLEEVE_MIN_TURNOVER_KRW:500000000}
+    cron: ${SLEEVE_CRON:0 10 17 * * MON-FRI}      # 장 마감 후 점검(실매매 스케줄과 분리)
+
   # DART 연간 재무 소급 수집(FinancialFactBackfillService) — F-Score 랭킹 스프레드(선정력 측정)용.
   # ⚠️ DART 일일 한도(~2만)를 쓰는 잡이다. 10년×1,500종목 ≈ 15,000콜.
   financial-history:

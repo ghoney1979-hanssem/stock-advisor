@@ -35,6 +35,7 @@ import com.stockadvisor.service.FinancialFactBackfillService;
 import com.stockadvisor.service.FinancialSpreadAnalysisService;
 import com.stockadvisor.service.MultidayBacktestService;
 import com.stockadvisor.service.SelectionSweepService;
+import com.stockadvisor.service.SleeveService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -137,6 +138,8 @@ public class SignalAdminController {
     private MultidayBacktestService multidayBacktestService;                 // 멀티데이 백테스트 — 필드주입
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private SelectionSweepService selectionSweepService;                     // 선정 축 탐색 — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SleeveService sleeveService;                                     // 멀티데이 섀도우 슬리브 — 필드주입
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -345,6 +348,24 @@ public class SignalAdminController {
             @RequestParam(required = false) Long minPriceKrw,
             @RequestParam(required = false) Long minTurnoverKrw) {
         return selectionSweepService.sweep(since, until, topN, maxHoldMonths, minPriceKrw, minTurnoverKrw);
+    }
+
+    /**
+     * 멀티데이 섀도우 슬리브 리밸런싱 — 96조합 백테스트의 <b>유일 생존자</b>(`HIGH_52W_HIGH`)를 실시간 기록한다.
+     *
+     * <p>⚠️ 실주문 없음. holdout을 3회 소진해 백테스트로는 더 검증할 수 없어, 남은 수단이 포워드뿐이다.
+     * {@code dryRun=true}면 선정만 보고 저장하지 않는다.</p>
+     */
+    @PostMapping("/sleeve-rebalance")
+    public SleeveService.RebalanceReport sleeveRebalance(
+            @RequestParam(defaultValue = "false") boolean dryRun) {
+        return sleeveService.rebalance(dryRun);
+    }
+
+    /** 슬리브 사이클별 성과 — <b>절대 수익이 아니라 excessPct(유니버스 대비)로 판정할 것</b>. */
+    @GetMapping("/sleeve-report")
+    public SleeveService.SleeveReport sleeveReport() {
+        return sleeveService.report();
     }
 
     /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */
