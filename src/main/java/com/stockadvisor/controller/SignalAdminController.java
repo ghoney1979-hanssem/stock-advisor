@@ -295,8 +295,10 @@ public class SignalAdminController {
             @RequestParam(required = false) Integer horizonMonths,
             @RequestParam(required = false) Integer minEvaluated,
             @RequestParam(required = false) Integer highMin,
-            @RequestParam(required = false) Integer lowMax) {
-        return financialSpreadAnalysisService.analyze(horizonMonths, minEvaluated, highMin, lowMax);
+            @RequestParam(required = false) Integer lowMax,
+            @RequestParam(required = false) Integer topN,
+            @RequestParam(required = false) Integer scoreMin) {
+        return financialSpreadAnalysisService.analyze(horizonMonths, minEvaluated, highMin, lowMax, topN, scoreMin);
     }
 
     /** 특정 (종목, 사업연도)의 F-Score 기준별 충족 내역(진단). */
