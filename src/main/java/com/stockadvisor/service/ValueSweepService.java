@@ -28,7 +28,7 @@ import java.util.TreeMap;
  * 즉 가치 필터 없이 퀄리티를 기각한 셈이라 검증 순서가 거꾸로였다. 한국 시장에서 역사적으로 가장 강했던
  * 프리미엄(저PBR)이 이 시스템에선 아직 한 번도 측정되지 않았다.</p>
  *
- * <p><b>과거 시총 복원</b>: 주식수ᵧ = 자본금ᵧ(financial_fact) ÷ 액면가(company.face_value, KIS). 일봉이
+ * <p><b>과거 시총 복원</b>: 주식수ᵧ = 현 상장주식수 × (자본금ᵧ ÷ 최신 자본금), 미상이면 자본금÷액면가. 일봉이
  * 수정주가라 액면분할과 정합하고 증자·감자는 자본금에 반영된다. 시총 = 진입일 종가 × 주식수ᵧ.</p>
  *
  * <p><b>look-ahead</b>: 사업연도 Y 재무는 (Y+1)년 5월~(Y+2)년 4월에만 유효({@link MultidayBacktestService#validBusinessYear}).
@@ -63,8 +63,14 @@ public class ValueSweepService {
     /** 사업연도별 재무 스냅샷 — 주식수는 reconstructShares 로 복원. */
     record Fund(long shares, long equity, long netIncome, int fscore, int evaluated) {}
 
+    /**
+     * @param universeNetPct  <b>커버드 유니버스</b>(그 축 값이 있는 종목 전체) 동일가중 net — 재무가 있는 종목은 현 워치리스트
+     *                        생존자라 전 유니버스보다 구조적으로 유리하다. 같은 커버리지 안에서 비교해야 "가치"만 남는다.
+     * @param fullUniverseNetPct 참고용 전 유니버스(폐지 포함) net.
+     * @param quintileExcess  q1(값 최저)~q5(최고) 5분위별 커버드 대비 초과 — 단조성 확인용(양끝만 좋으면 노이즈).
+     */
     public record AxisResult(String axis, String direction, int cohorts, double portfolioNetPct, double universeNetPct,
-                             double excessPct, int yearsPositive, int yearsTotal, String topYear, Double excessExTopYear,
+                             double fullUniverseNetPct, Map<String, Double> quintileExcess, double excessPct, int yearsPositive, int yearsTotal, String topYear, Double excessExTopYear,
                              double worstCohortPct, Double vsOppositePct, boolean pass, List<String> fails,
                              Map<String, Double> excessByYear) {}
     public record Diag(String year, int universe, int withPbr, double medianPbr, double medianEpPct) {}
@@ -186,7 +192,16 @@ public class ValueSweepService {
                     List<Pick> sorted = new ArrayList<>(el);
                     sorted.sort("LOW".equals(dir) ? cmp : cmp.reversed());
                     double port = sorted.subList(0, n).stream().mapToDouble(Pick::fwd).average().orElse(0);
-                    per.add(new double[]{port - c.uni(), port, c.uni()});
+                    double cov = el.stream().mapToDouble(Pick::fwd).average().orElse(0);   // 커버드 유니버스(같은 커버리지)
+                    double[] row = new double[9];
+                    row[0] = port - cov; row[1] = port; row[2] = cov; row[3] = c.uni();
+                    List<Pick> asc = new ArrayList<>(el);
+                    asc.sort(Comparator.comparingDouble(p -> p.v()[ai]));
+                    for (int q = 0; q < 5; q++) {
+                        int from = asc.size() * q / 5, to = asc.size() * (q + 1) / 5;
+                        row[4 + q] = asc.subList(from, to).stream().mapToDouble(Pick::fwd).average().orElse(0) - cov;
+                    }
+                    per.add(row);
                     years.add(c.year());
                 }
                 raw.add(summarize(axes[a], dir, per, years, excessByKey));
@@ -199,7 +214,7 @@ public class ValueSweepService {
             List<String> fails = new ArrayList<>(r.fails());
             if (vs != null && vs < OPPOSITE_MARGIN_PCT) fails.add("반대 방향 대비 마진 부족(" + vs + " < " + OPPOSITE_MARGIN_PCT + ")");
             results.add(new AxisResult(r.axis(), r.direction(), r.cohorts(), r.portfolioNetPct(), r.universeNetPct(),
-                    r.excessPct(), r.yearsPositive(), r.yearsTotal(), r.topYear(), r.excessExTopYear(),
+                    r.fullUniverseNetPct(), r.quintileExcess(), r.excessPct(), r.yearsPositive(), r.yearsTotal(), r.topYear(), r.excessExTopYear(),
                     r.worstCohortPct(), vs, fails.isEmpty(), fails, r.excessByYear()));
         }
         results.sort((x, y) -> Double.compare(y.excessPct(), x.excessPct()));
@@ -244,7 +259,7 @@ public class ValueSweepService {
                                         Map<String, Double> excessByKey) {
         if (per.isEmpty()) {
             excessByKey.put(axis + ":" + dir, 0.0);
-            return new AxisResult(axis, dir, 0, 0, 0, 0, 0, 0, null, null, 0, null, false, List.of("코호트 0"), Map.of());
+            return new AxisResult(axis, dir, 0, 0, 0, 0, Map.of(), 0, 0, 0, null, null, 0, null, false, List.of("코호트 0"), Map.of());
         }
         Map<String, List<Double>> byYear = new TreeMap<>();
         for (int i = 0; i < per.size(); i++) byYear.computeIfAbsent(years.get(i), k -> new ArrayList<>()).add(per.get(i)[0]);
@@ -262,6 +277,9 @@ public class ValueSweepService {
         double excess = per.stream().mapToDouble(x -> x[0]).average().orElse(0);
         double port = per.stream().mapToDouble(x -> x[1]).average().orElse(0);
         double uni = per.stream().mapToDouble(x -> x[2]).average().orElse(0);
+        double full = per.stream().mapToDouble(x -> x[3]).average().orElse(0);
+        Map<String, Double> quint = new TreeMap<>();
+        for (int q = 0; q < 5; q++) { final int qi = 4 + q; quint.put("q" + (q + 1), round(per.stream().mapToDouble(x -> x[qi]).average().orElse(0))); }
         double worst = per.stream().mapToDouble(x -> x[1]).min().orElse(0);
         final String tY = topYear;
         List<Double> exTop = new ArrayList<>();
@@ -275,7 +293,7 @@ public class ValueSweepService {
         if (pos < need) fails.add("연도부호 " + pos + "/" + byYear.size() + " < " + need);
         if (exTopExcess == null || exTopExcess <= 0) fails.add("최대기여연도(" + topYear + ") 제외 시 소멸(" + exTopExcess + ")");
         excessByKey.put(axis + ":" + dir, excess);
-        return new AxisResult(axis, dir, per.size(), round(port), round(uni), round(excess), pos, byYear.size(),
+        return new AxisResult(axis, dir, per.size(), round(port), round(uni), round(full), quint, round(excess), pos, byYear.size(),
                 topYear, exTopExcess, round(worst), null, fails.isEmpty(), fails, exYear);
     }
 
