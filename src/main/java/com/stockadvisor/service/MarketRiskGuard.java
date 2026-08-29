@@ -86,13 +86,25 @@ public class MarketRiskGuard {
 
     /** 진입 허용 판정 — ① 서킷브레이커(<b>해당 시장</b>) ② 섹터 집중 한도 ③ 총노출 상한. */
     public RiskDecision allowEntry(long orderKrw, long netAssetsKrw, String sector, String market) {
+        return allowEntry(orderKrw, netAssetsKrw, sector, market, false);
+    }
+
+    /**
+     * @param gateStrictPass 성과게이트가 <b>엄격 버킷</b>(국면·흐름·시장폭 표본 충족)으로 통과시킨 진입이면 true —
+     *                       bear-block을 면제한다. "약세장이지만 이 상태에서 검증된 전략"은 여는 게 상태조건부 선택의 취지이고,
+     *                       bear-block이 막으려는 건 <b>검증 없이</b>(fallback·부트스트랩) 약세장에 들어가는 진입이다.
+     *                       실측(6/25~8/28): BEAR×흐름↑ 도 −0.69%(n=755)라 지금은 면제 대상이 거의 없지만,
+     *                       BEAR×흐름↑×폭 버킷이 표본 20으로 양수가 되면 그 순간 자동으로 열려야 한다.
+     */
+    public RiskDecision allowEntry(long orderKrw, long netAssetsKrw, String sector, String market, boolean gateStrictPass) {
         if (!props.enabled()) return RiskDecision.allow();
 
         // ⓪ 약세장 전 전략 신규진입 차단(2026-08-29, 사용자 결정). 섀도우 6/25~8/28 (전략,시장,국면) 셀 n≥30에서
         //    BEAR 셀은 L(8/25 클러스터) 하나 빼고 전부 −0.9~−2.8% — "약세장엔 여는 전략이 없다"가 가장 강한 단일 구조.
         //    노출상한(BEAR 30~60%)을 0으로 두는 것과 같되, 시장별 라벨(KOSDAQ 종목은 KOSDAQ 국면)로 판정한다.
         //    인버스는 OrderService가 이 가드를 건너뛰므로 무관(하락장이 곧 기회). 국면 미상은 통과(degrade open).
-        if (bearBlockEnabled) {
+        //    엄격 버킷 통과분(gateStrictPass)은 면제 — 상태조건부 검증이 있는 진입은 막지 않는다(사용자 지적 반영).
+        if (bearBlockEnabled && !gateStrictPass) {
             MarketTrend t = null;
             try {
                 t = (market != null && !market.isBlank()) ? marketRegimeService.trendOf(market) : marketRegimeService.overallTrend();

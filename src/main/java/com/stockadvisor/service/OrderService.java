@@ -256,7 +256,10 @@ public class OrderService {
         // ⚠️ 인버스 ETF(market="INVERSE")는 하락장/급락이 기회 → 서킷·노출 상한에서 면제(리스크가드 건너뜀).
         //    per-order 사이징·max-positions·일일손실 한도(PolicyGate)는 그대로 적용돼 여전히 bounded.
         if (!"INVERSE".equals(market)) {
-            MarketRiskGuard.RiskDecision risk = riskGuard.allowEntry(qty * price, netAssets, sector, market);
+            // 엄격 버킷(국면·흐름·시장폭) 통과 = LIVE에서 게이트가 fallback 아닌 경로로 허용한 진입 → bear-block 면제.
+            // DRY_RUN은 게이트를 안 타므로 면제 없음(차단 규칙을 그대로 시뮬).
+            boolean gateStrictPass = policy.mode() == TradingMode.LIVE && !fallbackEntry;
+            MarketRiskGuard.RiskDecision risk = riskGuard.allowEntry(qty * price, netAssets, sector, market, gateStrictPass);
             if (!risk.allowed()) {
                 log.info("[주문] 리스크 가드 차단 — 주문 스킵 [{}] {}: {}", strategy, stockCode, risk.reason());
                 return OrderResult.rejected("리스크 가드 차단: " + risk.reason());

@@ -267,6 +267,8 @@ class MarketRiskGuardTest {
         assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ").reason()).contains("bear-block");
         assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSPI").allowed()).isTrue();     // KOSPI 중립 → 통과
 
+        // 엄격 버킷 통과분은 면제 — "약세장이지만 이 상태에서 검증된 전략"은 열린다
+        assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ", true).allowed()).isTrue();
         g.setBearBlockEnabled(false);
         assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ").allowed()).isTrue();    // off = 종전 동작
     }

@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -51,7 +52,7 @@ class OrderServiceTest {
     /** 진입 허용 기본 스텁 리스크 가드. */
     private MarketRiskGuard riskGuard() {
         MarketRiskGuard g = mock(MarketRiskGuard.class);
-        when(g.allowEntry(anyLong(), anyLong(), any(), any())).thenReturn(MarketRiskGuard.RiskDecision.allow());
+        when(g.allowEntry(anyLong(), anyLong(), any(), any(), anyBoolean())).thenReturn(MarketRiskGuard.RiskDecision.allow());
         return g;
     }
 
@@ -198,7 +199,7 @@ class OrderServiceTest {
         when(kis.fetchBalance()).thenReturn(balance(1_000_000));
         MarketRiskGuard risk = mock(MarketRiskGuard.class);
         // 사이징은 됐지만(잔고 조회 성공) 총노출 한도/서킷브레이커로 진입 차단
-        when(risk.allowEntry(anyLong(), anyLong(), any(), any())).thenReturn(
+        when(risk.allowEntry(anyLong(), anyLong(), any(), any(), anyBoolean())).thenReturn(
                 MarketRiskGuard.RiskDecision.deny("서킷브레이커: 코스피 -3.50% ≤ -3.0%"));
         OrderService svc = new OrderService(policy(TradingMode.DRY_RUN), gate, repo, kis,
                 mock(DiscordNotifier.class), mock(StrategyPerformanceGate.class), risk, sizer(kis), mock(StrategyHoldTimeProvider.class));
@@ -219,14 +220,14 @@ class OrderServiceTest {
         when(kis.fetchBalance()).thenReturn(balance(1_000_000));
         MarketRiskGuard risk = mock(MarketRiskGuard.class);
         // 리스크가드가 차단하도록 스텁 — 인버스(market=INVERSE)는 이걸 건너뛰어야 함
-        when(risk.allowEntry(anyLong(), anyLong(), any(), any())).thenReturn(MarketRiskGuard.RiskDecision.deny("서킷"));
+        when(risk.allowEntry(anyLong(), anyLong(), any(), any(), anyBoolean())).thenReturn(MarketRiskGuard.RiskDecision.deny("서킷"));
         OrderService svc = new OrderService(policy(TradingMode.DRY_RUN), gate, repo, kis,
                 mock(DiscordNotifier.class), mock(StrategyPerformanceGate.class), risk, sizer(kis), mock(StrategyHoldTimeProvider.class));
 
         OrderService.OrderResult r = svc.submitEntry("VOLUME_LEADING_B", "114800", null, "INVERSE", 960, "k-inv");
 
         assertThat(r.status()).isEqualTo(OrderService.ResultStatus.DRY_RUN);   // 리스크가드 차단 무시하고 진입
-        verify(risk, never()).allowEntry(anyLong(), anyLong(), any(), any());          // 인버스는 리스크가드 호출 안 함
+        verify(risk, never()).allowEntry(anyLong(), anyLong(), any(), any(), anyBoolean());          // 인버스는 리스크가드 호출 안 함
     }
 
     @Test
