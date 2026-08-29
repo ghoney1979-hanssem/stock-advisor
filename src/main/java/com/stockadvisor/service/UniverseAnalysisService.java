@@ -60,6 +60,7 @@ public class UniverseAnalysisService {
     /** 라이브와 같은 저가주 하한(원) — 빼면 동전주 호가 양자화가 허수를 만든다(8/28 백테스트·8/29 유니버스 둘 다 실측). */
     private final long minPrice;
 
+    @org.springframework.beans.factory.annotation.Autowired   // 생성자가 둘이라 Spring에 주입 대상을 명시(미지정 시 기동 실패 — 2026-08-29 실측)
     public UniverseAnalysisService(UniverseSnapshotRepository repository,
                                    ExecutionCostModel executionCostModel,
                                    @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct,
