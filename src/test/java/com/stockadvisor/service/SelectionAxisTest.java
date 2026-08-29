@@ -69,4 +69,39 @@ class SelectionAxisTest {
 
         assertThat(t).isCloseTo(3.0, org.assertj.core.data.Offset.offset(1e-9));
     }
+    @Test
+    @DisplayName("MA_SPREAD_50_200: 단기선이 장기선 위면 양수, 아래면 음수, 이력 부족은 null")
+    void 골든크로스_상태() {
+        // 300일: 앞 250일 100원 횡보 → 마지막 50일 200원. MA50=200, MA200=(150×100+50×200)/200=125 → +60%
+        int[] c = new int[300]; int[] h = new int[300]; long[] v = new long[300];
+        for (int i = 0; i < 300; i++) { c[i] = i < 250 ? 100 : 200; h[i] = c[i]; v[i] = 1000; }
+        Double up = SelectionAxis.MA_SPREAD_50_200.value(c, h, v, 299, 279, 239, 179, 49);
+        assertThat(up).isCloseTo(60.0, org.assertj.core.data.Offset.offset(1e-9));
+
+        for (int i = 250; i < 300; i++) c[i] = 50;   // 거울상 — 데드크로스 상태
+        assertThat(SelectionAxis.MA_SPREAD_50_200.value(c, h, v, 299, 279, 239, 179, 49)).isNegative();
+
+        assertThat(SelectionAxis.MA_SPREAD_50_200.value(c, h, v, 150, 130, 90, 30, 0)).isNull();   // 200일 미만
+    }
+
+    @Test
+    @DisplayName("GC_RECENCY: 마지막 비골든일 다음 날이 크로스 — 경과 거래일을 돌려주고, 데드 상태면 null")
+    void 골든크로스_신선도() {
+        int[] c = new int[300]; int[] h = new int[300]; long[] v = new long[300];
+        for (int i = 0; i < 300; i++) { c[i] = i < 250 ? 100 : 200; h[i] = c[i]; v[i] = 1000; }
+        // 250일부터 200원: MA50이 MA200을 넘는 날 t* 가 존재하고, 그날 이후 경과일이 값이어야 한다.
+        Double rec = SelectionAxis.GC_RECENCY.value(c, h, v, 299, 279, 239, 179, 49);
+        assertThat(rec).isNotNull();
+        assertThat(rec).isBetween(1.0, 50.0);
+        // 하루 뒤(idx 298 기준)보다 정확히 1 크다 — look-ahead 없이 과거만 본다는 검증
+        Double prev = SelectionAxis.GC_RECENCY.value(c, h, v, 298, 278, 238, 178, 48);
+        assertThat(rec - prev).isEqualTo(1.0);
+
+        for (int i = 250; i < 300; i++) c[i] = 50;   // 데드크로스 상태
+        assertThat(SelectionAxis.GC_RECENCY.value(c, h, v, 299, 279, 239, 179, 49)).isNull();
+
+        for (int i = 0; i < 300; i++) c[i] = 100 + i;   // 12개월 내내 골든(꾸준한 상승) → 이벤트 아님
+        assertThat(SelectionAxis.GC_RECENCY.value(c, h, v, 299, 279, 239, 179, 49)).isNull();
+    }
+
 }

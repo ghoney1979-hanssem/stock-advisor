@@ -26,7 +26,18 @@ public enum SelectionAxis {
     /** 현재가 ÷ 최근 52주 최고가 — 신고가 근접도(HIGH=신고가 부근). 모멘텀 변형. */
     HIGH_52W,
     /** 최근 1개월 평균 거래대금(원) — 규모·유동성 프록시. */
-    TURNOVER;
+    TURNOVER,
+    /**
+     * (MA50 − MA200) / MA200 × 100 — <b>골든크로스 상태</b>(HIGH = 단기선이 장기선 위, 멀수록 강한 추세 / LOW = 데드크로스 상태).
+     * 사전 근거: 문헌의 50/200 골든크로스(사용자 요청, 2026-08-29). 인트라데이 F(MA20 가격돌파)가 edge −1.31%p로 떨어진 가설의 월 단위 판이다.
+     */
+    MA_SPREAD_50_200,
+    /**
+     * 최근 12개월 내 <b>가장 최근 골든크로스(MA50이 MA200을 상향 돌파) 이후 경과 거래일</b> — LOW = 신선한 크로스.
+     * 현재 MA50 &lt; MA200(데드크로스 상태)이거나 창 안에 크로스가 없으면 null(그 종목은 코호트에서 제외).
+     * 상태 축(MA_SPREAD)과 달리 <b>이벤트</b>를 잰다 — "크로스 직후를 사는" 교과서 규칙 그대로.
+     */
+    GC_RECENCY;
 
     /**
      * @param idx   진입 인덱스(이 시점까지의 과거만 본다)
@@ -73,6 +84,23 @@ public enum SelectionAxis {
                 for (int t = i12m; t <= idx; t++) if (high[t] > peak) peak = high[t];
                 return peak <= 0 ? null : (double) close[idx] / peak;
             }
+            case MA_SPREAD_50_200: {
+                Double ma50 = ma(close, idx, 50), ma200 = ma(close, idx, 200);
+                if (ma50 == null || ma200 == null || ma200 <= 0) return null;
+                return (ma50 - ma200) / ma200 * 100;
+            }
+            case GC_RECENCY: {
+                // 오늘 골든 상태여야 하고, 뒤로 걸어가며 MA50<=MA200 였던 마지막 날을 찾는다(그 다음 날이 크로스).
+                Double ma50 = ma(close, idx, 50), ma200 = ma(close, idx, 200);
+                if (ma50 == null || ma200 == null || ma50 <= ma200) return null;
+                int floor = Math.max(i12m, 0);
+                for (int t = idx - 1; t >= floor; t--) {
+                    Double a = ma(close, t, 50), b = ma(close, t, 200);
+                    if (a == null || b == null) return null;          // 200일 이력이 끊기면 판정 불가
+                    if (a <= b) return (double) (idx - t);           // t가 마지막 비골든일 → 경과 거래일
+                }
+                return null;   // 12개월 내내 골든 상태 = 이 창의 크로스 이벤트가 아니다
+            }
             case TURNOVER: {
                 if (i1m < 0 || idx - i1m < 5) return null;
                 double sum = 0;
@@ -86,6 +114,17 @@ public enum SelectionAxis {
             default:
                 return null;
         }
+    }
+
+    /** 단순이동평균(idx 포함 직전 n일). 이력이 n일 미만이거나 0가가 섞이면 null. */
+    static Double ma(int[] close, int idx, int n) {
+        if (idx - n + 1 < 0) return null;
+        double sum = 0;
+        for (int t = idx - n + 1; t <= idx; t++) {
+            if (close[t] <= 0) return null;
+            sum += close[t];
+        }
+        return sum / n;
     }
 
     private static Double ret(int[] close, int from, int to) {
