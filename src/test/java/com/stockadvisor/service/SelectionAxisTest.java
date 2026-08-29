@@ -104,4 +104,15 @@ class SelectionAxisTest {
         assertThat(SelectionAxis.GC_RECENCY.value(c, h, v, 299, 279, 239, 179, 49)).isNull();
     }
 
+    @Test
+    @DisplayName("FRGN_CHG: 지분율 %p 변화 — 끝점이 0(미보유·미제공)이면 null, 시계열 없으면 null")
+    void 외국인_지분율_변화() {
+        double[] frgn = {10.0, 10.5, 12.0, 11.0, 13.5};
+        assertThat(SelectionAxis.FRGN_CHG_1M.value(close, high, vol, frgn, 4, 3, 2, 1, 0)).isEqualTo(2.5);   // 11.0→13.5
+        assertThat(SelectionAxis.FRGN_CHG_3M.value(close, high, vol, frgn, 4, 3, 2, 1, 0)).isEqualTo(1.5);   // 12.0→13.5
+        assertThat(SelectionAxis.FRGN_CHG_1M.value(close, high, vol, new double[]{0, 0, 0, 0, 5.0}, 4, 3, 2, 1, 0)).isNull();
+        assertThat(SelectionAxis.FRGN_CHG_1M.value(close, high, vol, 4, 3, 2, 1, 0)).isNull();               // 구 시그니처 = frgn 없음
+        assertThat(SelectionAxis.RET_1M.value(close, high, vol, frgn, 4, 3, 2, 1, 0)).isEqualTo(-50.0);       // 다른 축은 불변
+    }
+
 }

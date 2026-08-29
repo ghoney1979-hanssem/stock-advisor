@@ -50,7 +50,7 @@ public class SelectionSweepService {
         this.roundTripCostPct = roundTripCostPct;
     }
 
-    private record Series(int[] dates, int[] high, int[] close, long[] volume) {}
+    private record Series(int[] dates, int[] high, int[] close, long[] volume, double[] frgn) {}
 
     /**
      * @param excessPct        유니버스 동일가중 단순보유 대비 초과수익(%p/월). <b>주지표</b>
@@ -141,7 +141,7 @@ public class SelectionSweepService {
                 int i12 = idxOnOrAfter(s.dates(), ymd(m.minusMonths(12)));
                 Double[] vals = new Double[axes.length];
                 for (int a = 0; a < axes.length; a++) {
-                    vals[a] = axes[a].value(s.close(), s.high(), s.volume(), ei, i1, i3, i6, i12);
+                    vals[a] = axes[a].value(s.close(), s.high(), s.volume(), s.frgn(), ei, i1, i3, i6, i12);
                 }
                 picks.add(new Pick(e.getKey(), fwd, vals));
             }
@@ -261,34 +261,37 @@ public class SelectionSweepService {
         Map<String, Series> out = new HashMap<>();
         int[] dates = new int[4096], high = new int[4096], close = new int[4096];
         long[] vol = new long[4096];
+        double[][] frefs = {new double[4096]};
         int[] size = {0};
         String[] cur = {null};
         int[][] refs = {dates, high, close};
         long[][] vrefs = {vol};
         jdbcTemplate.query(
-                "select stock_code, business_date, high_price, close_price, volume "
+                "select stock_code, business_date, high_price, close_price, volume, coalesce(frgn_hold_pct, 0) "
                         + "from daily_price order by stock_code, business_date",
                 rs -> {
                     String code = rs.getString(1);
                     if (cur[0] != null && !cur[0].equals(code)) {
                         out.put(cur[0], new Series(Arrays.copyOf(refs[0], size[0]), Arrays.copyOf(refs[1], size[0]),
-                                Arrays.copyOf(refs[2], size[0]), Arrays.copyOf(vrefs[0], size[0])));
+                                Arrays.copyOf(refs[2], size[0]), Arrays.copyOf(vrefs[0], size[0]), Arrays.copyOf(frefs[0], size[0])));
                         size[0] = 0;
                     }
                     cur[0] = code;
                     if (size[0] == refs[0].length) {
                         for (int i = 0; i < 3; i++) refs[i] = Arrays.copyOf(refs[i], refs[i].length * 2);
                         vrefs[0] = Arrays.copyOf(vrefs[0], vrefs[0].length * 2);
+                        frefs[0] = Arrays.copyOf(frefs[0], frefs[0].length * 2);
                     }
                     int k = size[0]++;
                     refs[0][k] = Integer.parseInt(rs.getString(2));
                     refs[1][k] = (int) rs.getLong(3);
                     refs[2][k] = (int) rs.getLong(4);
                     vrefs[0][k] = rs.getLong(5);
+                    frefs[0][k] = rs.getDouble(6);
                 });
         if (cur[0] != null && size[0] > 0) {
             out.put(cur[0], new Series(Arrays.copyOf(refs[0], size[0]), Arrays.copyOf(refs[1], size[0]),
-                    Arrays.copyOf(refs[2], size[0]), Arrays.copyOf(vrefs[0], size[0])));
+                    Arrays.copyOf(refs[2], size[0]), Arrays.copyOf(vrefs[0], size[0]), Arrays.copyOf(frefs[0], size[0])));
         }
         log.info("[선정축탐색] 일봉 로드 {}종목", out.size());
         return out;

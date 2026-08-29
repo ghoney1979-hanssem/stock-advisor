@@ -37,7 +37,14 @@ public enum SelectionAxis {
      * 현재 MA50 &lt; MA200(데드크로스 상태)이거나 창 안에 크로스가 없으면 null(그 종목은 코호트에서 제외).
      * 상태 축(MA_SPREAD)과 달리 <b>이벤트</b>를 잰다 — "크로스 직후를 사는" 교과서 규칙 그대로.
      */
-    GC_RECENCY;
+    GC_RECENCY,
+    /**
+     * 외국인 지분율 <b>변화</b>(%p, 1개월) — 한국 시장에서 문서화된 플로우 추종 신호(사용자 요청, 2026-08-29).
+     * 단타 반증(진입 전일 순매수, 2026-08-22)과는 시간 스케일이 다르다. 어느 한쪽 끝이 0(미보유·미제공)이면 null.
+     */
+    FRGN_CHG_1M,
+    /** 외국인 지분율 변화(%p, 3개월). */
+    FRGN_CHG_3M;
 
     /**
      * @param idx   진입 인덱스(이 시점까지의 과거만 본다)
@@ -45,6 +52,12 @@ public enum SelectionAxis {
      * @return 축 값. 계산 불가면 null(그 종목은 그 코호트에서 제외된다)
      */
     public Double value(int[] close, int[] high, long[] volume,
+                        int idx, int i1m, int i3m, int i6m, int i12m) {
+        return value(close, high, volume, null, idx, i1m, i3m, i6m, i12m);
+    }
+
+    /** @param frgn 외국인 지분율(%) 시계열 — null이면 외국인 축은 계산 불가(null). */
+    public Double value(int[] close, int[] high, long[] volume, double[] frgn,
                         int idx, int i1m, int i3m, int i6m, int i12m) {
         switch (this) {
             case RET_1M:
@@ -101,6 +114,10 @@ public enum SelectionAxis {
                 }
                 return null;   // 12개월 내내 골든 상태 = 이 창의 크로스 이벤트가 아니다
             }
+            case FRGN_CHG_1M:
+                return frgnChange(frgn, i1m, idx);
+            case FRGN_CHG_3M:
+                return frgnChange(frgn, i3m, idx);
             case TURNOVER: {
                 if (i1m < 0 || idx - i1m < 5) return null;
                 double sum = 0;
@@ -125,6 +142,13 @@ public enum SelectionAxis {
             sum += close[t];
         }
         return sum / n;
+    }
+
+    /** 지분율 변화(%p). 시계열 없음·구간 불량·끝점 0(미보유/미제공)이면 null — 0→x 는 데이터 등장이지 플로우가 아닐 수 있다. */
+    static Double frgnChange(double[] frgn, int from, int to) {
+        if (frgn == null || from < 0 || to < 0 || from >= to || to >= frgn.length) return null;
+        if (frgn[from] <= 0 || frgn[to] <= 0) return null;
+        return frgn[to] - frgn[from];
     }
 
     private static Double ret(int[] close, int from, int to) {
