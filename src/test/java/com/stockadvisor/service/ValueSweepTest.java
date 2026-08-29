@@ -30,4 +30,16 @@ class ValueSweepTest {
         assertThat(ShareInfoBackfillService.parseLong("")).isNull();
         assertThat(ShareInfoBackfillService.parseLong(null)).isNull();
     }
+    @Test
+    void 주식수_복원은_현_상장주식수를_자본금_변화로_스케일한다() {
+        // 삼성전자형: 자본금÷액면가(8.98B)는 이익소각·우선주로 부풀지만, 상장 5.85B × (자본금 변화 1.0) = 5.85B
+        assertThat(ValueSweepService.reconstructShares(5_846_278_608L, 897_514_000_000L, 897_514_000_000L, 100L))
+                .isEqualTo(5_846_278_608L);
+        // 과거 자본금이 절반이었으면(그 뒤 유상증자) 주식수도 절반
+        assertThat(ValueSweepService.reconstructShares(1_000L, 200L, 100L, 5000L)).isEqualTo(500L);
+        // 상장주식수 미상 → 자본금÷액면가 fallback
+        assertThat(ValueSweepService.reconstructShares(null, null, 1_000_000L, 500L)).isEqualTo(2_000L);
+        assertThat(ValueSweepService.reconstructShares(null, null, 1_000_000L, null)).isNull();
+    }
+
 }

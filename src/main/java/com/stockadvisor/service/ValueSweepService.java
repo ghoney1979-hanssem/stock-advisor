@@ -1,5 +1,6 @@
 package com.stockadvisor.service;
 
+
 import com.stockadvisor.domain.Company;
 import com.stockadvisor.domain.FinancialFact;
 import com.stockadvisor.repository.CompanyRepository;
@@ -59,7 +60,7 @@ public class ValueSweepService {
     }
 
     private record Series(int[] dates, int[] close, long[] volume) {}
-    /** 사업연도별 재무 스냅샷 — 주식수는 자본금÷액면가로 복원. */
+    /** 사업연도별 재무 스냅샷 — 주식수는 reconstructShares 로 복원. */
     record Fund(long shares, long equity, long netIncome, int fscore, int evaluated) {}
 
     public record AxisResult(String axis, String direction, int cohorts, double portfolioNetPct, double universeNetPct,
@@ -82,19 +83,36 @@ public class ValueSweepService {
 
         Map<String, Series> prices = loadSeries();
         int[] calendar = tradingCalendar(prices);
-        Map<String, Long> face = new HashMap<>();
+        Map<String, Long> face = new HashMap<>(), listed = new HashMap<>();
         for (Company c : companyRepository.findAll()) {
             if (c.getFaceValue() != null && c.getFaceValue() > 0) face.put(c.getStockCode(), c.getFaceValue());
+            if (c.getListedShares() != null && c.getListedShares() > 0) listed.put(c.getStockCode(), c.getListedShares());
+        }
+        // 종목별 최신 사업연도 자본금 — 주식수ᵧ = 현 상장주식수 × (자본금ᵧ / 최신 자본금). 자본금÷액면가만 쓰면
+        // 이익소각(자본금 불변·주식수 감소)과 우선주 자본금이 시총을 부풀린다(실측 삼성전자 8.98B vs 상장 5.85B,
+        // 현대차 298M vs 205M). 현 상장주식수를 기준점으로 삼고 자본금 변화로만 과거를 스케일하면 둘 다 피한다.
+        List<FinancialFact> facts = factRepository.findAll();
+        Map<String, Long> latestCapital = new HashMap<>();
+        Map<String, Integer> latestYear = new HashMap<>();
+        for (FinancialFact f : facts) {
+            try {
+                int y = Integer.parseInt(f.getBusinessYear());
+                if (f.getCapitalStock() > 0 && y > latestYear.getOrDefault(f.getStockCode(), -1)) {
+                    latestYear.put(f.getStockCode(), y);
+                    latestCapital.put(f.getStockCode(), f.getCapitalStock());
+                }
+            } catch (NumberFormatException ignored) { /* 비정상 연도 행 */ }
         }
         Map<String, Map<Integer, Fund>> funds = new HashMap<>();
-        for (FinancialFact f : factRepository.findAll()) {
-            Long fv = face.get(f.getStockCode());
-            if (fv == null || f.getCapitalStock() <= 0) continue;
+        for (FinancialFact f : facts) {
+            Long shares = reconstructShares(listed.get(f.getStockCode()), latestCapital.get(f.getStockCode()),
+                    f.getCapitalStock(), face.get(f.getStockCode()));
+            if (shares == null) continue;
             FinancialScore.Result r = FinancialScore.of(f);
             try {
                 funds.computeIfAbsent(f.getStockCode(), k -> new HashMap<>())
                         .put(Integer.parseInt(f.getBusinessYear()),
-                                new Fund(f.getCapitalStock() / fv, f.getTotalEquity(), f.getNetIncome(), r.score(), r.evaluated()));
+                                new Fund(shares, f.getTotalEquity(), f.getNetIncome(), r.score(), r.evaluated()));
             } catch (NumberFormatException ignored) { /* 비정상 연도 행 */ }
         }
 
@@ -197,6 +215,19 @@ public class ValueSweepService {
                 results.stream().filter(AxisResult::pass).count(), results.size());
         return new Report(window, n, hold, sMin, roundTripCostPct, prices.size(), face.size(), cohorts.size(),
                 results, diags, caveats());
+    }
+
+    /**
+     * 사업연도 주식수 복원(순수). 1순위: 현 상장주식수 × (자본금ᵧ ÷ 최신 자본금) — 이익소각·우선주 편향 회피.
+     * 2순위(상장주식수 미상): 자본금ᵧ ÷ 액면가. 둘 다 불가면 null.
+     */
+    static Long reconstructShares(Long listedNow, Long capitalLatest, long capitalY, Long faceValue) {
+        if (capitalY <= 0) return null;
+        if (listedNow != null && listedNow > 0 && capitalLatest != null && capitalLatest > 0) {
+            return Math.round(listedNow * ((double) capitalY / capitalLatest));
+        }
+        if (faceValue != null && faceValue > 0) return capitalY / faceValue;
+        return null;
     }
 
     /**
