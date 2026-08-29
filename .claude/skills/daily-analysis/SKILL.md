@@ -7,7 +7,7 @@ user-invocable: true
 # daily-analysis
 
 장 마감 후(또는 요청 시점) 시스템의 **모든 집계 데이터**를 수집해 종합 분석 리포트를 만든다.
-산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ③ 시스템 보완 조치 ④ 전역 수익률 개선 ⑤ **전략별 보정방안(수집 데이터 기반 진입·청산·손절·사이징 튜닝)** ⑥ **데이터 공백 & 추가 지표 제안** ⑦ **신규 전략 발굴(수익 pocket → 가설, Phase 5)** 7부.
+산출물은 ① 일별 성과 요약 ② 전략별 진단(옥석) ②-b **상태(국면·흐름·시장폭) 파악 정확도 점검(Phase 2.5)** ③ 시스템 보완 조치 ④ 전역 수익률 개선 ⑤ **전략별 보정방안(수집 데이터 기반 진입·청산·손절·사이징 튜닝)** ⑥ **데이터 공백 & 추가 지표 제안** ⑦ **신규 전략 발굴(수익 pocket → 가설, Phase 5)** 7부.
 
 ⚠️ **매 실행 시작 시**: 최근 배포로 **새 엔드포인트/데이터가 추가됐는지 먼저 점검**(로컬 `git log --oneline -15`로 최근 커밋 확인, 또는 새 `/admin/*` GET 시도)하고, 있으면 Phase 1 수집에 포함해 분석에 활용한다 — 이 시스템은 계속 진화하므로 고정된 엔드포인트 목록에 갇히지 말 것.
 
@@ -85,6 +85,39 @@ group by alert_date order by alert_date;
 3. **horizon 정합**: 게이트=exit horizon(전략별 권장 청산마크, 스윙 C=nextClose), outcome/control 기본=close. **서로 다른 horizon 수치를 직접 비교 금지** — F가 게이트 +0.33(90분)인데 control ENTERED −0.96(close)인 식의 차이는 모순이 아니라 horizon 차이.
 4. **flow lag=60의 구조적 편향**: mom60은 장 시작 60분 후부터만 존재 → lag60 표본 = **10시 이후 진입 부분집합**. lag30과 결과가 다르면 "흐름 차이"가 아니라 "진입 시간대 차이"일 수 있음(실사례: B는 lag60 부분집합 전체가 마이너스 = 늦은 진입 자체가 손실).
 5. `market-breadth`가 빈 배열이면: 재시작 직후(인메모리 소실)인지 확인. 진입 태깅은 `entry_breadth_pct`로 DB에 남으므로 분석은 DB 태깅값 사용.
+
+## Phase 2.5. 상태(국면·흐름·시장폭) 파악 정확도 점검 (2026-08-29 추가 — 게이트가 상태조건부로 판정하므로 상태 오독 = 잘못된 전략을 켬)
+
+2026-08-29부터 게이트는 (시장 × 국면 × 장중흐름 × 시장폭) 버킷으로 "지금 상태에서 양수였던 전략"만 열고, 약세장 라벨이면 엄격 버킷 통과분 외 전 전략을 차단한다(bear-block). 따라서 **상태 라벨이 틀리면 표본 풀 자체가 바뀌어 잘못된 전략이 열리거나 옳은 전략이 닫힌다.** 매 실행마다 아래를 점검하고, 오독 흔적이 있으면 Phase 4-A(시스템 보완)에 **상태 판정 수정안**으로 올린다.
+
+```sql
+-- ① 라벨-현실 불일치일: 그날 시장별 최빈 라벨 vs 실제(그날 진입 태그의 시장폭 평균·지수 등락 평균). 8/24형 "BEAR인데 종목 58% 상승" 탐지.
+--    BEAR 라벨인데 시장폭≥55 또는 지수≥+0.5  /  BULL 라벨인데 시장폭<40 또는 지수≤-1.0  → 불일치 후보
+select alert_date, entry_market, mode() within group (order by entry_market_trend) label,
+  round(avg(entry_market_breadth_pct)::numeric,1) breadth, round(avg(entry_market_change)::numeric,2) idx_chg, count(*) n
+from trade_outcome where alert_date>='YYYYMMDD' and entry_market in ('KOSPI','KOSDAQ') and entry_market_trend is not null
+group by 1,2 order by 1,2;
+
+-- ② 장중 라벨 플립: (날짜,시장)에 라벨이 2개 이상 → 그날 게이트 표본 풀이 바뀐 것. 디바운스(승격 30분 대기)가 작동하는지.
+select alert_date, entry_market, count(distinct entry_market_trend) labels, string_agg(distinct entry_market_trend, ',') which
+from trade_outcome where alert_date>='YYYYMMDD' and entry_market in ('KOSPI','KOSDAQ') and entry_market_trend is not null
+group by 1,2 having count(distinct entry_market_trend)>1 order by 1;
+
+-- ③ 흐름(mom30) 예측력: 흐름↑ 태그 진입의 이후 지수 변화가 실제로 양수였나. (지수 경로는 entry_market_change 태그로 근사 — 같은 (날,시장)에서 그 진입보다 늦은 태그들의 평균 등락 − 진입 시점 등락)
+with t as (select alert_date d, entry_market m, alert_time ts, entry_market_change c, entry_index_mom30 f from trade_outcome
+           where alert_date>='YYYYMMDD' and entry_market in ('KOSPI','KOSDAQ') and entry_market_change is not null and entry_index_mom30 is not null)
+select case when a.f>=0 then '흐름↑' else '흐름↓' end flow, count(*) n,
+  round(avg(b.later_c - a.c)::numeric,3) avg_next_idx_move, round(100.0*count(*) filter (where b.later_c>a.c)/count(*),1) up_pct
+from t a join lateral (select avg(c) later_c from t b where b.d=a.d and b.m=a.m and b.ts>a.ts + interval '20 minutes' and b.ts<a.ts + interval '60 minutes') b on true
+where b.later_c is not null group by 1;
+```
+
+- **④ 시장폭 스냅샷 건강**: 로그에서 `시장폭 갱신` 횟수(정상 ≈ 12분마다, 장중 ~30회) · `커버리지 미달 → 기존 스냅샷 유지` 발생 여부 · 15:20 이후 부분 스캔이 덮어쓴 흔적. `market-breadth` 응답이 장중 빈 배열이면 재시작(인메모리 소실) 확인. 신선도 40분 만료 구간(첫 스캔 publish 전 ~09:12)엔 폭 레이어가 생략되는 게 정상.
+- **⑤ 게이트가 실제로 어느 층에서 판정했나**: 그날 로그의 `성과 게이트 차단`·`부트스트랩`·주문 접수 사유에서 `폭버킷` / `흐름버킷` / `국면표본부족` / `fallback` / `부트스트랩` 건수를 센다. 폭·흐름 층 판정이 0건이고 전부 fallback·부트스트랩이면 **상태조건부가 아니라 표본부족이 판정자**였다는 뜻 — "상태 파악"이 아니라 "표본"이 병목임을 리포트에 명시.
+- **⑥ bear-block 발동**: `약세장 신규진입 차단(bear-block)` 건수와 그날의 ① 결과를 대조 — BEAR 라벨이 불일치 후보였던 날의 차단은 **오독에 의한 기회 손실**로 분류하고, 차단분의 섀도우 net(그 (날,시장)의 진입 표본 평균)으로 "막은 게 옳았나"를 적는다. 인버스는 차단 대상이 아니어야 한다(있으면 버그).
+- **⑦ 판정 소스 정합**: `market-regime`의 `asOf`가 당일인지(전일이면 08:40 배치 미갱신), K는 `priorDayTrendOf`(전일 확정) 라벨로 태깅·버킷팅됐는지(`entry_market_trend`가 장중 라벨과 다를 수 있음 — 정상), `intradayFlow` mom30이 개장 30분 전엔 null인지.
+
+**수정 판단 기준(제안 문턱, 데이터로 재검 가능)**: ① 불일치일이 최근 10거래일 중 ≥2일 → `MARKET_REGIME_INTRADAY_DEMOTE/PROMOTE_PCT`·시장폭 합의 조건 재검 / ② 플립이 하루 ≥2회 반복 → `UPGRADE_MIN_HOLD_MINUTES` 상향 검토 / ③ 흐름↑의 up_pct가 50% 근처 → 흐름 레이어는 예측이 아니라 동시 상태라는 뜻이니 흐름 버킷 표본 문턱을 올리거나 lag를 바꿀 근거 / ④·⑦ 결손은 즉시 버그.
 
 ## Phase 3. 분석 리포트 작성
 
