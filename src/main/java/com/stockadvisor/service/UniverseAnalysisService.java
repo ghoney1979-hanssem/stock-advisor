@@ -47,16 +47,43 @@ public class UniverseAnalysisService {
     /** 이 날짜부터 종가가 익일 확정 종가로 채워진다(그 이전은 순회 순서 편향 표본). */
     static final String CLOSE_FIX_DATE = "20260819";
 
+    /**
+     * 하루 수익률 절대값 상한(%) — KRX 가격제한폭(±30%)을 넘는 종가 이동은 정상 매매로 낼 수 없는 값이다
+     * (거래정지 후 재개·액면 변경·수집 오류). 2026-08-29 실측: highlights 1위 `ATR<2 +3.81%`가 1,000원 미만
+     * 4종목(+150%/+100%/+80%/+67%)이 만든 허수였고 그 행을 빼면 +0.09 ≈ base였다.
+     */
+    static final double MAX_ABS_RET_PCT = 30.0;
+
     private final UniverseSnapshotRepository repository;
     private final ExecutionCostModel executionCostModel;
     private final double roundTripCostPct;
+    /** 라이브와 같은 저가주 하한(원) — 빼면 동전주 호가 양자화가 허수를 만든다(8/28 백테스트·8/29 유니버스 둘 다 실측). */
+    private final long minPrice;
 
     public UniverseAnalysisService(UniverseSnapshotRepository repository,
                                    ExecutionCostModel executionCostModel,
-                                   @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct) {
+                                   @Value("${stockadvisor.cost.round-trip-pct:0.18}") double roundTripCostPct,
+                                   @Value("${stockadvisor.signal.min-price:1000}") long minPrice) {
         this.repository = repository;
         this.executionCostModel = executionCostModel;
         this.roundTripCostPct = roundTripCostPct;
+        this.minPrice = minPrice;
+    }
+
+    /** 호환 생성자(기존 테스트 무churn) — 저가주 하한은 라이브 기본값 1,000원. */
+    UniverseAnalysisService(UniverseSnapshotRepository repository, ExecutionCostModel executionCostModel,
+                            double roundTripCostPct) {
+        this(repository, executionCostModel, roundTripCostPct, 1000);
+    }
+
+    /**
+     * 유니버스 채점에서 제외할 행인가(순수) — 저가주 또는 하루 ±30%를 넘는 비정상 이동.
+     * ⚠️ lift가 아니라 <b>표본 자격</b> 판정이다: 이 행들은 "그 시점에 살 수 있었던 종목"이 아니다.
+     */
+    static boolean excludedFromUniverse(long price, long exitPrice, long minPrice) {
+        if (price < minPrice) return true;
+        double gross = (double) (exitPrice - price) / price * 100;
+        return Math.abs(gross) > MAX_ABS_RET_PCT;
     }
 
     /**
@@ -119,6 +146,7 @@ public class UniverseAnalysisService {
         List<UniverseSnapshot> rows = new ArrayList<>();
         List<Double> nets = new ArrayList<>();
         int total = 0;
+        int excluded = 0;   // 저가주·비정상 이동으로 자격 미달(응답 caveat로 노출)
         for (UniverseSnapshot s : repository.findAll()) {
             String d = s.getSnapDate();
             if (d == null || d.compareTo(cutoff) < 0) continue;
@@ -126,8 +154,10 @@ public class UniverseAnalysisService {
             if (market != null && !market.isBlank() && !market.equals(s.getMarket())) continue;
             if (snapTime != null && !snapTime.isBlank() && !snapTime.equals(s.getSnapTime())) continue;
             total++;
+            Long exit = exitPrice(s, h);
+            if (exit == null) continue;      // 사후 타깃 미수집 → 채점 제외
+            if (excludedFromUniverse(s.getPrice(), exit, minPrice)) { excluded++; continue; }
             Double net = net(s, h);
-            if (net == null) continue;      // 사후 타깃 미수집 → 채점 제외
             rows.add(s);
             nets.add(net);
         }
@@ -160,7 +190,7 @@ public class UniverseAnalysisService {
                 .sorted(Comparator.comparingDouble(Bucket::liftNetPct)).limit(10).toList();
 
         return new UniverseReport(total, rows.size(), h, market, snapTime, cutoff, until, minSamples, distinctDays,
-                round2(baseNet), round2(baseWin), highlights, avoid, features, caveats(h, distinctDays, cutoff));
+                round2(baseNet), round2(baseWin), highlights, avoid, features, caveats(h, distinctDays, cutoff, excluded));
     }
 
     private FeatureSlice slice(String feature, List<UniverseSnapshot> rows, List<Double> nets,
@@ -195,20 +225,28 @@ public class UniverseAnalysisService {
     }
 
     /** 가정 진입 net(%) — 왕복비용 + tick 기반 추정 슬리피지 차감. 사후 타깃 미수집이면 null. */
-    private Double net(UniverseSnapshot s, String horizon) {
-        Long exit = switch (horizon) {
+    private Long exitPrice(UniverseSnapshot s, String horizon) {
+        return switch (horizon) {
             case "m90" -> s.getPrice90m();
             case "nextClose" -> s.getPriceNextClose();
             default -> s.getPriceClose();
         };
+    }
+
+    private Double net(UniverseSnapshot s, String horizon) {
+        Long exit = exitPrice(s, horizon);
         if (exit == null || s.getPrice() <= 0) return null;
         double slip = executionCostModel.estimateRoundTripSlippagePct(s.getPrice());
         return (double) (exit - s.getPrice()) / s.getPrice() * 100 - roundTripCostPct - slip;
     }
 
     /** 해석을 그르치기 쉬운 지점을 응답에 실어 보낸다(수치만 보고 오독하는 것 방지). */
-    private List<String> caveats(String horizon, int distinctDays, String cutoff) {
+    private List<String> caveats(String horizon, int distinctDays, String cutoff, int excluded) {
         List<String> out = new ArrayList<>();
+        if (excluded > 0) {
+            out.add("저가주(<" + minPrice + "원)·하루 ±" + (int) MAX_ABS_RET_PCT + "% 초과 이동 " + excluded
+                    + "행은 채점 제외 — 거래정지 재개·호가 양자화가 만든 허수를 lift로 읽지 않기 위함");
+        }
         if (distinctDays < 10) {
             out.add("⚠️ 거래일 " + distinctDays + "일뿐 — lift 부호가 며칠 사이 뒤집힐 수 있다. "
                     + "since/until로 전·후반을 갈라 부호가 유지되는지 반드시 확인할 것");

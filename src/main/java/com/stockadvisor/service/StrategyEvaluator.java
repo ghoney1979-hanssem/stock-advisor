@@ -303,6 +303,19 @@ public class StrategyEvaluator {
         return "REVERSAL_L".equals(strategy) && reject != null && REVERSAL_CONTROL_REASONS.contains(reject);
     }
 
+    /** M(조용한 추세지속)의 <b>판별</b> 탈락 사유 — 정체성 사유(VOLUME_UP/BELOW_MA/EXTENDED)는 preScreen 경계라 제외. */
+    private static final java.util.Set<String> QUIET_CONTROL_REASONS =
+            java.util.Set.of("WEAK_5D", "RAN_5D", "DOWN_DAY", "CHASING", "SCORE");
+
+    /**
+     * M 대조군 강제 기록 판정(순수, 2026-08-29) — L의 {@link #reversalControl}과 같은 구조.
+     * 도입 시점부터 대조군을 붙인다: 근거가 유니버스 lift(8거래일)뿐이고 lift는 반사실이 아니라,
+     * "M이 고른 조용한 종목이 M이 거른 조용한 종목보다 나은가"를 첫날부터 재야 한다.
+     */
+    static boolean quietContinuationControl(String strategy, String reject) {
+        return "QUIET_CONTINUATION_M".equals(strategy) && reject != null && QUIET_CONTROL_REASONS.contains(reject);
+    }
+
     private boolean needsControl(String strategy) {
         if (!controlFocusEnabled) return true;   // 집중 비활성 → 기존대로 전부 수집
         java.time.Instant now = java.time.Instant.now();
@@ -677,7 +690,9 @@ public class StrategyEvaluator {
                         // 반등일 × 인버스 한정이라 표본 부담은 NOT_FADING과 같은 수준.
                         || "EXIT_ACTIVE".equals(reject)
                         // L(눌림 반전)의 판별 사유 — 아래 reversalControl 참조(2026-08-26).
-                        || reversalControl(strategy.name(), reject));
+                        || reversalControl(strategy.name(), reject)
+                        // M(조용한 추세지속)의 판별 사유 — quietContinuationControl 참조(2026-08-29).
+                        || quietContinuationControl(strategy.name(), reject));
             if (reject != null && !trackControl) {
                 continue;   // 미진입 + 대조군 미추적 → 아무것도 기록 안 함
             }

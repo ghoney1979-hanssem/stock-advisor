@@ -180,6 +180,17 @@ stockadvisor:
     reversal-max-change-pct: ${SIGNAL_REVERSAL_MAX_CHANGE_PCT:2.0}       # 당일 급등 추격 방지
     reversal-max-drop-pct: ${SIGNAL_REVERSAL_MAX_DROP_PCT:5.0}           # 당일 폭락(떨어지는 칼날) 제외
     reversal-min-score: ${SIGNAL_REVERSAL_MIN_SCORE:40.0}
+    # [M] 조용한 추세지속(2026-08-29 신설, 섀도우) — 유니버스 lift(8거래일, 저가주·이상치 제외): 거래량배수<0.5 +0.66 · ret5d 0~5 +0.52 · 당일 0~2 +0.49 · MA20이격 0~3 +0.28.
+    # L(MA20 아래·5일 약세)의 대칭 — 공유 조건은 저거래량 하나라, 둘의 성과가 갈리면 "저거래량이 좋은가 / 반전이 좋은가"가 분리된다.
+    quiet-enabled: ${SIGNAL_QUIET_ENABLED:true}
+    quiet-max-volume-ratio: ${SIGNAL_QUIET_MAX_VOLUME_RATIO:0.5}     # 이 배수 이상이면 "관심 받은 종목"이라 제외
+    quiet-min-ma-dist-pct: ${SIGNAL_QUIET_MIN_MA_DIST_PCT:0.0}       # MA20 위
+    quiet-max-ma-dist-pct: ${SIGNAL_QUIET_MAX_MA_DIST_PCT:3.0}       # 이격 과열 제외
+    quiet-min-ret5d-pct: ${SIGNAL_QUIET_MIN_RET5D_PCT:0.0}           # 5일 추세 생존
+    quiet-max-ret5d-pct: ${SIGNAL_QUIET_MAX_RET5D_PCT:5.0}           # 이미 달린 종목 제외
+    quiet-min-change-pct: ${SIGNAL_QUIET_MIN_CHANGE_PCT:0.0}         # 하락 중 진입 금지
+    quiet-max-change-pct: ${SIGNAL_QUIET_MAX_CHANGE_PCT:2.0}         # 급등 추격 금지
+    quiet-min-score: ${SIGNAL_QUIET_MIN_SCORE:40.0}
     # [E] 신고가 돌파 모멘텀 — 직전 N일 최고가를 거래량 급증과 함께 돌파하면 롱(강세 추격, 공격적). A~D의 역추세 편향과 반대 방향으로 다양성 부여
     breakout-lookback: ${SIGNAL_BREAKOUT_LOOKBACK:20}      # [E] 직전 20거래일 최고가(오늘 제외) 초과면 돌파
     breakout-min-score: ${SIGNAL_BREAKOUT_MIN_SCORE:40.0}  # [E] 진입 최소 추천 점수(건전성)

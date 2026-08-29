@@ -40,6 +40,34 @@ class UniverseAnalysisServiceTest {
     private static final String[] DAYS = {"20260818", "20260819", "20260820", "20260821"};
 
     @Test
+    void 저가주와_하루_30퍼센트_초과_이동은_채점에서_제외되고_caveat로_노출된다() {
+        // 2026-08-29 실측 재현: 1,000원 미만 4종목의 +67~+150% 이동이 ATR<2 bucket을 +3.81%로 부풀렸다.
+        List<UniverseSnapshot> rows = new ArrayList<>();
+        for (int i = 0; i < 40; i++) rows.add(snap(DAYS[i % 4], "A" + i, true, 1.0));
+        UniverseSnapshot penny = new UniverseSnapshot("20260820", "09:30", "PENNY", "KOSPI", 500);
+        penny.setFeatures(0, 0, 0.8, false, 0.5, -5, 1, 1, false, false, false);
+        penny.setPriceClose(1250);                                            // +150% — 저가주
+        UniverseSnapshot jump = snap("20260820", "JUMP", true, 45.0);         // 정상가지만 ±30% 초과
+        rows.add(penny); rows.add(jump);
+
+        UniverseAnalysisService.UniverseReport r =
+                svc(rows).analyze(30, "close", null, null, 20, "20260818", null);
+
+        assertThat(r.scored()).isEqualTo(40);
+        assertThat(r.baseNetPct()).isCloseTo(1.0, within(1e-6));             // 허수 두 행이 base를 흔들지 않는다
+        assertThat(r.caveats()).anyMatch(c -> c.contains("2행은 채점 제외"));
+    }
+
+    @Test
+    void 자격_판정은_순수함수다() {
+        assertThat(UniverseAnalysisService.excludedFromUniverse(500, 600, 1000)).isTrue();      // 저가주
+        assertThat(UniverseAnalysisService.excludedFromUniverse(10_000, 13_100, 1000)).isTrue(); // +31%
+        assertThat(UniverseAnalysisService.excludedFromUniverse(10_000, 6_900, 1000)).isTrue();  // −31%
+        assertThat(UniverseAnalysisService.excludedFromUniverse(10_000, 12_900, 1000)).isFalse(); // +29% 상한가 근접은 정상
+        assertThat(UniverseAnalysisService.excludedFromUniverse(1000, 1000, 1000)).isFalse();    // 경계 포함
+    }
+
+    @Test
     void 급증_모집단의_lift를_전체_base_rate_대비로_계산한다() {
         // 이 분석의 존재 이유: "거래량 급증 스크리닝이 실제로 나은가"는 급증 밖 표본이 있어야만 물을 수 있다.
         List<UniverseSnapshot> rows = new ArrayList<>();
