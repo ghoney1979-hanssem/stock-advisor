@@ -26,6 +26,8 @@ public record KisQuoteResponse(
             @JsonProperty("prdy_vrss") String dayChange,           // 전일 대비
             @JsonProperty("prdy_ctrt") String dayChangeRate,       // 전일 대비율
             @JsonProperty("hts_avls") String marketCap,            // 시가총액(억원)
+            @JsonProperty("lstn_stcn") String listedShares,        // 상장주식수(주) — 시총·PBR 역산용(2026-08-29)
+            @JsonProperty("stck_fcam") String faceValue,           // 액면가(원) — 과거 시총 복원(자본금÷액면가=주식수)용
             @JsonProperty("per") String per,                       // 주가수익비율
             @JsonProperty("pbr") String pbr,                       // 주가순자산비율
             @JsonProperty("rprs_mrkt_kor_name") String marketName, // 대표시장 한글명 (KOSPI200/KSQ150 등)

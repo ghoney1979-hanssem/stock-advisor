@@ -98,6 +98,11 @@ public class KisApiClient {
      *
      * @param stockCode 종목코드 6자리 (예: "005930" 삼성전자)
      */
+    /** 캐시 우회 현재가 — 백필 등 1회성 순회용(캐시에 1,500건을 1시간 쌓지 않는다). 새 DTO 필드는 캐시된 구 응답엔 없으므로 이 경로로 읽어야 한다. */
+    public KisQuoteResponse fetchCurrentQuoteUncached(String stockCode) {
+        return fetchCurrentQuote(stockCode);   // @Cacheable은 프록시 경유 호출에만 걸린다 — 내부(this) 호출은 캐시를 타지 않는다
+    }
+
     @Cacheable(cacheNames = RedisCacheConfig.KIS_QUOTE, key = "#stockCode")
     public KisQuoteResponse fetchCurrentQuote(String stockCode) {
         KisQuoteResponse response = get(

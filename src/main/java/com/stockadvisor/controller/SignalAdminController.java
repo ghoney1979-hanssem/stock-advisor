@@ -36,6 +36,8 @@ import com.stockadvisor.service.FinancialSpreadAnalysisService;
 import com.stockadvisor.service.MultidayBacktestService;
 import com.stockadvisor.service.SelectionSweepService;
 import com.stockadvisor.service.SleeveService;
+import com.stockadvisor.service.ShareInfoBackfillService;
+import com.stockadvisor.service.ValueSweepService;
 import com.stockadvisor.service.NewsBacktagService;
 import com.stockadvisor.service.FlowAnalysisService;
 import com.stockadvisor.service.MaeAnalysisService;
@@ -140,6 +142,10 @@ public class SignalAdminController {
     private SelectionSweepService selectionSweepService;                     // 선정 축 탐색 — 필드주입
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private SleeveService sleeveService;                                     // 멀티데이 섀도우 슬리브 — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ShareInfoBackfillService shareInfoBackfillService;               // 액면가·주식수 백필 — 필드주입
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ValueSweepService valueSweepService;                             // 가치 축 백테스트 — 필드주입
     private final FlowAnalysisService flowAnalysisService;
     private final MaeAnalysisService maeAnalysisService;
     private final MarketOpenNotifier marketOpenNotifier;
@@ -339,6 +345,27 @@ public class SignalAdminController {
      * {@code until}로 탐색 구간을 자르고, 거기서 통과한 축만 {@code since}로 holdout에서 <b>딱 한 번</b> 확인할 것.
      * 탐색 구간 결과 자체를 채택 근거로 쓰면 2026-08-21 발굴 세션(통과 pocket 50개가 전부 허수)을 반복한다.</p>
      */
+    /** 액면가·상장주식수 백필(KIS 종목당 1콜, 캐시 우회) — 가치 축 백테스트의 과거 시총 복원 전제. */
+    @PostMapping("/backfill-share-info")
+    public ShareInfoBackfillService.Report backfillShareInfo(@RequestParam(defaultValue = "false") boolean force,
+                                                            @RequestParam(required = false) Integer limit) {
+        return shareInfoBackfillService.backfill(force, limit);
+    }
+
+    /** 가치 축(PBR·이익수익률 ± F-Score 결합) 월별 코호트 백테스트 — 탐색/holdout은 since/until로. */
+    @GetMapping("/value-sweep")
+    public ValueSweepService.Report valueSweep(
+            @RequestParam(required = false) String since,
+            @RequestParam(required = false) String until,
+            @RequestParam(required = false) Integer topN,
+            @RequestParam(required = false) Integer maxHoldMonths,
+            @RequestParam(required = false) Integer scoreMin,
+            @RequestParam(required = false) Integer minEvaluated,
+            @RequestParam(required = false) Long minPriceKrw,
+            @RequestParam(required = false) Long minTurnoverKrw) {
+        return valueSweepService.sweep(since, until, topN, maxHoldMonths, scoreMin, minEvaluated, minPriceKrw, minTurnoverKrw);
+    }
+
     @GetMapping("/selection-sweep")
     public SelectionSweepService.SweepReport selectionSweep(
             @RequestParam(required = false) String since,

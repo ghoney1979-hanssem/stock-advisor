@@ -35,6 +35,19 @@ public class Company {
     @Column(name = "market", length = 10)
     private String market;
 
+    /** 액면가(원) — KIS stck_fcam. 과거 시총 복원(자본금ᵧ ÷ 액면가 = 수정주가 기준 주식수)용. nullable → ddl-auto 안전. 2026-08-29. */
+    @Column(name = "face_value")
+    private Long faceValue;
+
+    /** 상장주식수(주) — KIS lstn_stcn, 조회 시점 값. */
+    @Column(name = "listed_shares")
+    private Long listedShares;
+
+    public void setShareInfo(Long faceValue, Long listedShares) {
+        this.faceValue = faceValue;
+        this.listedShares = listedShares;
+    }
+
     public Company(String stockCode, String name, String corpCode, String market) {
         this.stockCode = stockCode;
         this.name = name;
