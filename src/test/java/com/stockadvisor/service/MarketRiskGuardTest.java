@@ -250,4 +250,25 @@ class MarketRiskGuardTest {
         assertThat(g.isRiskOff().off()).isTrue();    // -6% 발동
         assertThat(g.isRiskOff().off()).isTrue();    // -5%는 저점대비 +1%p라 아직 재개 안 함
     }
+    @Test
+    void 약세장_차단이_켜지면_해당_시장_BEAR에서_신규진입_거부() {
+        RiskProperties p = props(0, 60);
+        MarketRegimeService regime = mock(MarketRegimeService.class);
+        when(regime.overallTrend()).thenReturn(MarketTrend.NEUTRAL);
+        when(regime.trendOf("KOSDAQ")).thenReturn(MarketTrend.BEAR);
+        when(regime.trendOf("KOSPI")).thenReturn(MarketTrend.NEUTRAL);
+        when(regime.all()).thenReturn(List.of());
+        OrderRepository repo = mock(OrderRepository.class);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of());
+        MarketRiskGuard g = new MarketRiskGuard(regime, mock(KisApiClient.class), repo, p);
+
+        g.setBearBlockEnabled(true);
+        assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ").allowed()).isFalse();   // KOSDAQ BEAR → 차단
+        assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ").reason()).contains("bear-block");
+        assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSPI").allowed()).isTrue();     // KOSPI 중립 → 통과
+
+        g.setBearBlockEnabled(false);
+        assertThat(g.allowEntry(100_000, 10_000_000, null, "KOSDAQ").allowed()).isTrue();    // off = 종전 동작
+    }
+
 }

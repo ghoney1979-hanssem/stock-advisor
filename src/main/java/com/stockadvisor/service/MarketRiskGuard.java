@@ -39,6 +39,13 @@ public class MarketRiskGuard {
     private final OrderRepository orderRepository;
     private final RiskProperties props;
 
+    /** 약세장 전 전략 신규진입 차단(코드 기본 off — 종전 동작). prod에서 켬. */
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.risk.bear-block-enabled:false}")
+    private boolean bearBlockEnabled = false;
+
+    /** 테스트용. */
+    void setBearBlockEnabled(boolean v) { this.bearBlockEnabled = v; }
+
     // 시장폭(breadth) 리스크오프 — 지수 서킷의 사각지대(대형주가 버틴 광범위 투매) 보완. 필드주입(생성자 무churn),
     // 미주입(테스트)이면 breadth 판정 자체를 건너뜀(degrade open).
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -80,6 +87,20 @@ public class MarketRiskGuard {
     /** 진입 허용 판정 — ① 서킷브레이커(<b>해당 시장</b>) ② 섹터 집중 한도 ③ 총노출 상한. */
     public RiskDecision allowEntry(long orderKrw, long netAssetsKrw, String sector, String market) {
         if (!props.enabled()) return RiskDecision.allow();
+
+        // ⓪ 약세장 전 전략 신규진입 차단(2026-08-29, 사용자 결정). 섀도우 6/25~8/28 (전략,시장,국면) 셀 n≥30에서
+        //    BEAR 셀은 L(8/25 클러스터) 하나 빼고 전부 −0.9~−2.8% — "약세장엔 여는 전략이 없다"가 가장 강한 단일 구조.
+        //    노출상한(BEAR 30~60%)을 0으로 두는 것과 같되, 시장별 라벨(KOSDAQ 종목은 KOSDAQ 국면)로 판정한다.
+        //    인버스는 OrderService가 이 가드를 건너뛰므로 무관(하락장이 곧 기회). 국면 미상은 통과(degrade open).
+        if (bearBlockEnabled) {
+            MarketTrend t = null;
+            try {
+                t = (market != null && !market.isBlank()) ? marketRegimeService.trendOf(market) : marketRegimeService.overallTrend();
+            } catch (Exception ignored) { /* 국면 조회 실패 → 판정 생략 */ }
+            if (t == MarketTrend.BEAR) {
+                return RiskDecision.deny("약세장 신규진입 차단(bear-block): " + (market == null ? "전체" : market) + " 국면 BEAR");
+            }
+        }
 
         RiskOff ro = isRiskOff(market);   // 시장별 — 코스닥 폭락이 코스피 진입을 막지 않음
         if (ro.off()) {

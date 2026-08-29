@@ -1165,4 +1165,54 @@ class StrategyPerformanceGateTest {
         // 자기모순 문장이 나왔다(실측 2026-08-26 REVERSAL_L 8건).
         assertThat(StrategyPerformanceGate.verdictLabel(false, true)).isEqualTo("단일일 편중(LOO 미달)");
     }
+    /** 국면 + 흐름 + 시장폭 스텁 게이트 — 4차원 폭 버킷 검증용. */
+    private StrategyPerformanceGate breadthGate(StrategyPerformanceProperties p, List<TradeOutcome> rows,
+                                                MarketTrend regime, Double currentMom30, Double currentBreadth) {
+        StrategyPerformanceGate g = flowGate(p, rows, regime, currentMom30);
+        MarketBreadthService b = mock(MarketBreadthService.class);
+        when(b.isFresh(anyLong())).thenReturn(true);
+        when(b.breadthPct(any())).thenReturn(currentBreadth);
+        g.configureBreadth(b, true, 20);
+        return g;
+    }
+
+    @Test
+    void 폭버킷_표본충족이면_시장폭까지_반영해_판정한다() {
+        // 국면(중립)×흐름(↑) 전체로는 +0.5%인데, 그중 시장폭 ≥60 진입분(25건)은 −1% → 현재 폭 ≥60이면 폭 버킷으로 차단.
+        List<TradeOutcome> rows = new ArrayList<>();
+        List<TradeOutcome> wide = flowSamples("RSI_REVERSAL_G", 25, -1.0, "NEUTRAL", 1.0);
+        for (TradeOutcome o : wide) o.setEntryBreadth(65.0, 65.0);
+        List<TradeOutcome> narrow = flowSamples("RSI_REVERSAL_G", 40, 1.5, "NEUTRAL", 1.0);
+        for (TradeOutcome o : narrow) o.setEntryBreadth(30.0, 30.0);
+        rows.addAll(wide); rows.addAll(narrow);
+
+        StrategyPerformanceGate.GateDecision wideNow =
+                breadthGate(regimeProps(20), rows, MarketTrend.NEUTRAL, 1.0, 65.0).evaluate("RSI_REVERSAL_G", "KOSPI");
+        assertThat(wideNow.allowed()).isFalse();
+        assertThat(wideNow.reason()).contains("폭≥60").contains("폭버킷");
+        assertThat(wideNow.samples()).isEqualTo(25);
+
+        // 현재 폭 <40 이면 그 버킷(40건 +1.5%)으로 판정 → 통과
+        StrategyPerformanceGate.GateDecision narrowNow =
+                breadthGate(regimeProps(20), rows, MarketTrend.NEUTRAL, 1.0, 30.0).evaluate("RSI_REVERSAL_G", "KOSPI");
+        assertThat(narrowNow.allowed()).isTrue();
+        assertThat(narrowNow.reason()).contains("폭<40");
+    }
+
+    @Test
+    void 폭_표본부족이면_흐름버킷으로_자연_fallback() {
+        // 폭 ≥60 진입분이 5건뿐 → 폭 레이어 생략, 흐름 버킷(65건 전체) 으로 판정
+        List<TradeOutcome> rows = new ArrayList<>();
+        List<TradeOutcome> wide = flowSamples("RSI_REVERSAL_G", 5, -1.0, "NEUTRAL", 1.0);
+        for (TradeOutcome o : wide) o.setEntryBreadth(65.0, 65.0);
+        List<TradeOutcome> narrow = flowSamples("RSI_REVERSAL_G", 60, 1.5, "NEUTRAL", 1.0);
+        for (TradeOutcome o : narrow) o.setEntryBreadth(30.0, 30.0);
+        rows.addAll(wide); rows.addAll(narrow);
+
+        StrategyPerformanceGate.GateDecision d =
+                breadthGate(regimeProps(20), rows, MarketTrend.NEUTRAL, 1.0, 65.0).evaluate("RSI_REVERSAL_G", "KOSPI");
+        assertThat(d.reason()).contains("흐름버킷").doesNotContain("폭버킷");
+        assertThat(d.samples()).isEqualTo(65);
+    }
+
 }

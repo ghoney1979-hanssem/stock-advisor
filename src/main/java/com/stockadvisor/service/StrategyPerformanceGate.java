@@ -120,6 +120,33 @@ public class StrategyPerformanceGate {
     /** 전략 → 구표본 재필터 술어(조이는 필터 임계). */
     private final java.util.Map<String, GateRefilter> refilters;
 
+    // ── 시장폭 조건부(4차원, 2026-08-29) ────────────────────────────────────────────────
+    // walk-forward(섀도우 6/25~8/28, 33일 평가)에서 상태조건부 선택의 단위당 net: 상태 무관 −0.84 → 국면 −0.29 →
+    // 국면×흐름 +0.07~+0.17 → **국면×시장폭 +0.40~+0.50(적중 73~77%)**. 시장폭은 진입 시 태깅만 하고
+    // 판정엔 안 쓰던 차원이었다(8/24: BEAR 라벨인데 종목 58%가 오른 날 게이트가 닫혀 있었다).
+    // 체인: 국면×흐름×폭(표본 충족 시) → 국면×흐름 → 국면 → fallback. 흐름 레이어와 같은 자연 fallback.
+    // ⚠️ 코드 기본 off(종전 동작). 표본이 33일이라 '검증'이 아니라 포워드로 넘길 가치가 있는 수준 — prod에서 켜서 관찰.
+    @Value("${stockadvisor.trading.perf-gate.breadth-conditional:false}")
+    private boolean breadthConditional = false;
+    @Value("${stockadvisor.trading.perf-gate.breadth-min-samples:20}")
+    private int breadthMinSamples = 20;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private MarketBreadthService breadthService;   // 필드주입(생성자 무churn) — 미주입(테스트)이면 폭 레이어 생략
+    private static final long BREADTH_FRESH_MINUTES = 40;   // MarketBreadthService.isFresh 와 같은 기준(마감 후·전일분 오발동 방지)
+
+    /** 테스트용 — 폭 레이어 구성. */
+    void configureBreadth(MarketBreadthService service, boolean enabled, int minSamples) {
+        this.breadthService = service;
+        this.breadthConditional = enabled;
+        this.breadthMinSamples = minSamples;
+    }
+
+    /** 시장폭(상승비율%) → 3구간 라벨. 미상이면 null. walk-forward가 쓴 경계(40/60)와 동일. */
+    static String breadthBin(Double pct) {
+        if (pct == null) return null;
+        return pct < 40 ? "<40" : pct < 60 ? "40~60" : "≥60";
+    }
+
     private final double maxSingleDaySharePct;
     private final boolean looTopDay;
     private final boolean inversePooled;
@@ -349,11 +376,23 @@ public class StrategyPerformanceGate {
             }
         }
 
-        // 세 개의 누산기를 한 번의 순회로: (nF) 국면+흐름 매칭[3차원 primary], (nR) 국면 매칭[2차원],
-        // (nAll) 국면 무관 전체[fallback pool]. 시장 필터(marketSplit)는 전부 공통.
+        // 시장폭 조건부(4차원): 현재 시장의 상승비율 구간 — 스냅샷 미상/신선도 만료(마감 후·전일분)면 null → 폭 레이어 생략.
+        String breadthNow = null;
+        if (breadthConditional && breadthService != null && market != null && !market.isBlank() && regimeName != null) {
+            try {
+                if (breadthService.isFresh(BREADTH_FRESH_MINUTES)) breadthNow = breadthBin(breadthService.breadthPct(market));
+            } catch (Exception ignored) {
+                // 폭 조회 실패 → 흐름/국면으로 판정(degrade)
+            }
+        }
+
+        // 네 개의 누산기를 한 번의 순회로: (nB) 국면+흐름+폭 매칭[4차원], (nF) 국면+흐름 매칭[3차원 primary],
+        // (nR) 국면 매칭[2차원], (nAll) 국면 무관 전체[fallback pool]. 시장 필터(marketSplit)는 전부 공통.
         double sumR = 0; int nR = 0;
         double sumAll = 0; int nAll = 0;
         double sumF = 0; int nF = 0;
+        double sumB = 0; int nB = 0;
+        java.util.Map<String, double[]> daysB = new java.util.HashMap<>();
         // 교차 거래일 요건: 버킷별 (alertDate → 표본수) — 단일일 지배(클러스터) 판정용.
         // 값은 {표본수, net합} — 점유율(수)과 최대기여일 제외 net(합) 둘 다 필요하다.
         java.util.Map<String, double[]> daysR = new java.util.HashMap<>();
@@ -376,8 +415,11 @@ public class StrategyPerformanceGate {
             sumAll += net; nAll++; bump(daysAll, d, net);                       // 전국면 pool
             boolean regimeMatch = regimeName == null || regimeName.equals(o.getEntryMarketTrend());
             if (regimeMatch) { sumR += net; nR++; bump(daysR, d, net); }         // 국면 매칭
-            if (regimeMatch && flowUp != null && o.getEntryIndexMom30() != null
-                    && (o.getEntryIndexMom30() >= 0) == flowUp) { sumF += net; nF++; bump(daysF, d, net); }   // 국면+흐름 매칭
+            boolean flowMatch = flowUp != null && o.getEntryIndexMom30() != null && (o.getEntryIndexMom30() >= 0) == flowUp;
+            if (regimeMatch && flowMatch) { sumF += net; nF++; bump(daysF, d, net); }   // 국면+흐름 매칭
+            // 국면+흐름+폭 매칭 — 흐름 미산출(개장 ~30분)이면 흐름 조건은 생략하고 국면+폭으로만 맞춘다(폭 레이어가 통째로 죽지 않게).
+            if (breadthNow != null && regimeMatch && (flowUp == null || flowMatch)
+                    && breadthNow.equals(breadthBin(o.getEntryMarketBreadthPct()))) { sumB += net; nB++; bump(daysB, d, net); }
         }
         int n = nR;
         Double avg = n == 0 ? null : round2(sumR / nR);
@@ -390,6 +432,28 @@ public class StrategyPerformanceGate {
 
         if (!props.enabled()) {
             return new GateDecision(strategy, true, "게이트 비활성", n, avg, regimeName, market, false);
+        }
+        // ⓪-a 국면+흐름+시장폭(4차원) — 폭 버킷 표본이 충족되면 그 버킷만으로 판정(walk-forward 최우위 조합). 부족하면 아래 흐름/국면으로 자연 fallback.
+        if (breadthNow != null && nB >= breadthMinSamples) {
+            Double avgB = round2(sumB / nB);
+            String inner = regimeTag.isEmpty() ? "" : regimeTag.substring(0, regimeTag.length() - 2);
+            String breadthTag = inner + (flowUp == null ? "" : "·흐름" + (flowUp ? "↑" : "↓")) + "·폭" + breadthNow + "] ";
+            String keyB = hystKey(strategy, market, regimeName, (flowUp == null ? "_" : flowUp ? "up" : "down") + "|b" + breadthNow);
+            boolean wasOpenB = hystActive && Boolean.TRUE.equals(openState.get(keyB));
+            double effMinNetB = wasOpenB ? props.closeNetAvgPct() : props.minNetAvgPct();
+            double shareB = singleDaySharePct(daysB, nB);
+            if (clustered(shareB)) {
+                if (mutateHyst) openState.put(keyB, false);
+                return clusterBlock(strategy, breadthTag, shareB, nB, daysB.size(), avgB, regimeName, market);
+            }
+            LooNet looB = looTopDay ? looExcludingTopDay(daysB, sumB, nB) : null;
+            boolean allow = avgB >= effMinNetB && (looB == null || looB.net() >= effMinNetB);
+            if (mutateHyst) openState.put(keyB, allow);
+            return new GateDecision(strategy, allow,
+                    String.format("%s폭버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
+                            breadthTag, verdictLabel(allow, avgB >= effMinNetB), avgB, avgB >= effMinNetB ? "≥" : "<", effMinNetB, nB,
+                            looB == null ? "" : looB.tag(), wasOpenB ? HYST_TAG : ""),
+                    nB, avgB, regimeName, market, false);
         }
         // ⓪ 국면+흐름(3차원) — 흐름 버킷 표본이 충족되면 그 버킷만으로 판정(가장 정밀). 부족하면 아래 국면 버킷으로 자연 fallback.
         //    실측 근거: 흐름 엣지는 국면 내부에서 갈림(예: H 중립·흐름↑ +0.94 vs 중립·흐름↓ −0.37) — 충분한 곳만 반영.
@@ -439,6 +503,8 @@ public class StrategyPerformanceGate {
         if (mutateHyst) {
             openState.put(hystKey(strategy, market, regimeName, "_"), false);
             if (flowUp != null) openState.put(hystKey(strategy, market, regimeName, flowUp ? "up" : "down"), false);
+            if (breadthNow != null) openState.put(hystKey(strategy, market, regimeName,
+                    (flowUp == null ? "_" : flowUp ? "up" : "down") + "|b" + breadthNow), false);
         }
         // ② 국면 표본 부족 + fallback 활성 → 국면무관 전국면 pool로 재평가(더 엄격한 바). regimeName==null(미산출/off)이면
         // primary가 이미 전국면이라 fallback 무의미 → 건너뜀.

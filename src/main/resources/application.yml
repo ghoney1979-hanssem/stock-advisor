@@ -311,6 +311,10 @@ stockadvisor:
       inverse-bootstrap-size-mult: ${TRADING_PERF_GATE_INVERSE_BOOTSTRAP_SIZE_MULT:0.3}  # INVERSE 부트스트랩 — 표본 미달이어도 이 배수 축소사이징으로 실주문(0.3=일반 비중의 30%≈순자산 1.5%). 표본 차면 자동 졸업(통과=정상 사이징/미달=차단). 0=비활성
       flow-conditional: ${TRADING_PERF_GATE_FLOW_CONDITIONAL:true}               # 국면+흐름 3차원 — 흐름 버킷 표본 충족 시 그 버킷으로 판정, 부족/미산출(개장~30분)이면 국면만(자연 fallback)
       flow-min-samples: ${TRADING_PERF_GATE_FLOW_MIN_SAMPLES:30}
+      # 시장폭 조건부(4차원, 2026-08-29) — 국면×흐름×시장폭(<40/40~60/≥60) 버킷 표본 충족 시 그 버킷으로 판정, 부족하면 흐름/국면으로 자연 fallback.
+      # walk-forward(33일): 상태 무관 −0.84 → 국면×흐름 +0.1 → 국면×시장폭 +0.4~0.5/단위. 코드 기본 off, prod on(관찰).
+      breadth-conditional: 
+      breadth-min-samples: 
       inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
       inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용
       close-net-avg-pct: ${TRADING_PERF_GATE_CLOSE_NET_AVG_PCT:0.3}   # 히스테리시스 닫기 문턱(%) — 열려있으면 이 값까지 유지(열 땐 min-net 0.3). <min-net이면 활성(예 −0.2), ≥min-net이면 off(기본 0.3=off). 문턱 근처 여닫이 진동·역선택 억제
@@ -327,6 +331,7 @@ stockadvisor:
       bull-exposure-pct: ${TRADING_RISK_BULL_EXPOSURE_PCT:100}    # 강세장 총노출 상한(순자산 대비 %)
       neutral-exposure-pct: ${TRADING_RISK_NEUTRAL_EXPOSURE_PCT:80} # 중립장 (60→80 상향)
       bear-exposure-pct: ${TRADING_RISK_BEAR_EXPOSURE_PCT:60}     # 약세장 (30→60 상향)
+      bear-block-enabled:    # 약세장(시장별 라벨 BEAR) 전 전략 신규진입 차단(2026-08-29) — 섀도우 BEAR 셀 전부 음수. 인버스 무관. 코드 기본 off, prod on
       high-vol-exposure-mult: ${TRADING_RISK_HIGH_VOL_MULT:0.5}   # 고변동 국면이면 상한에 곱하는 계수
       crash-halt-pct: ${TRADING_RISK_CRASH_HALT_PCT:3.0}          # 지수 장중 고점대비 -이값%p 급락+절대 -이값% 이하 → 서킷 발동. 0=비활성
       rebound-pct: ${TRADING_RISK_REBOUND_PCT:2.0}                # 발동 후 지수가 장중 저점 대비 +이값%p 반등하면 재개(예 -6%→-4%). 절대수준 복귀 안 기다림
