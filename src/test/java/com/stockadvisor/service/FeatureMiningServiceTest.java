@@ -56,11 +56,19 @@ class FeatureMiningServiceTest {
     @Test
     void 단일일_클러스터_pocket은_highlights에서_제외되고_다일_수익pocket은_표시() {
         List<TradeOutcome> rows = new ArrayList<>();
+        // ⚠️ 날짜는 오늘 기준 상대값이어야 한다 — 종전엔 20260601~06을 하드코딩해 두고 lookbackDays=90으로
+        // 조회했더니, 2026-08-31에 cutoff(오늘−90일)가 20260602를 넘어서면서 단일일 클러스터용 20260601 행이
+        // 통째로 창 밖으로 밀려 `<2` bucket이 사라졌다(NoSuchElementException). 절대 날짜를 상대 룩백과
+        // 함께 쓰면 테스트가 시한부가 된다.
+        java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd");
+        java.time.LocalDate today = java.time.LocalDate.now();
         // 거래량배수 8~15 구간: net +2%, 5거래일 분산(비클러스터)
-        String[] dates = {"20260602", "20260603", "20260604", "20260605", "20260606"};
+        String[] dates = new String[5];
+        for (int d = 0; d < 5; d++) dates[d] = today.minusDays(d + 1L).format(fmt);
         for (int i = 0; i < 25; i++) rows.add(vr(10, dates[i % 5], i, 2.0));
         // 거래량배수 <2 구간: net -1%, 한 거래일 전부(단일일 클러스터)
-        for (int i = 0; i < 25; i++) rows.add(vr(1, "20260601", 100 + i, -1.0));
+        String clusterDay = today.minusDays(6).format(fmt);
+        for (int i = 0; i < 25; i++) rows.add(vr(1, clusterDay, 100 + i, -1.0));
         when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
 
         FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 20, 80.0, false);

@@ -238,6 +238,57 @@ class StrategyHoldTimeProviderTest {
         assertThat(l.samples()).isEqualTo(89);
     }
 
+    /** csv 전략별 캡을 주입한 provider — @Value 필드라 테스트에선 리플렉션으로 세팅한다. */
+    private StrategyHoldTimeProvider providerWithCaps(AdaptiveExitProperties props, String csv,
+                                                      List<ExitTimingService.StrategyExitTiming> analysis) {
+        StrategyHoldTimeProvider p = provider(props, analysis);
+        try {
+            java.lang.reflect.Field f = StrategyHoldTimeProvider.class.getDeclaredField("maxHoldPerStrategyCsv");
+            f.setAccessible(true);
+            f.set(p, csv);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+        return p;
+    }
+
+    @Test
+    void 전략별_캡이_지정되면_전역캡보다_우선한다() {
+        // 실측 2026-08-31: L은 권장 290분(+1.92%)인데 전역 캡 90이 잘라 90분 +0.43%로 청산·채점됐다.
+        // 전역 캡을 그대로 두고 L만 240분으로 풀면 A(권장 275분, 음수 구간)는 종전대로 90분에 머문다.
+        StrategyHoldTimeProvider p = providerWithCaps(props(true, 20, 90), "REVERSAL_L:240", List.of(
+                timing("REVERSAL_L", mark(90, 120, 0.43), mark(240, 112, 1.51), mark(290, 97, 1.92)),
+                timing("MOMENTUM_A", mark(90, 30, -0.50), mark(275, 28, -1.29))));
+
+        assertThat(p.holdMinutes("REVERSAL_L")).isEqualTo(240);   // 전략별 캡 적용
+        assertThat(p.holdMinutes("MOMENTUM_A")).isEqualTo(90);    // 미지정 → 전역 캡 그대로
+    }
+
+    @Test
+    void 전략별_캡이_권장마크보다_길면_캡은_안_걸린다() {
+        // 캡은 상한일 뿐이라 권장이 더 짧으면 권장을 그대로 쓴다(캡이 보유시간을 늘리지는 않는다).
+        StrategyHoldTimeProvider p = providerWithCaps(props(true, 20, 90), "REVERSAL_L:240", List.of(
+                timing("REVERSAL_L", mark(120, 100, 1.0))));
+
+        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
+                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
+
+        assertThat(l.holdMinutes()).isEqualTo(120);
+        assertThat(l.capped()).isFalse();
+    }
+
+    @Test
+    void 전략별_캡_csv_오타는_무시하고_전역캡으로_degrade() {
+        // 설정 실수로 보유시간이 0이 되면 진입 즉시 청산되므로, 알 수 없는 값은 종전 동작으로 되돌린다.
+        assertThat(StrategyHoldTimeProvider.parseHoldCaps("REVERSAL_L:abc,BAD_ENTRY,MOMENTUM_A:0,:240"))
+                .isEmpty();
+        assertThat(StrategyHoldTimeProvider.parseHoldCaps("REVERSAL_L:240, RSI_REVERSAL_G:180 "))
+                .containsEntry("REVERSAL_L", 240)
+                .containsEntry("RSI_REVERSAL_G", 180);
+        assertThat(StrategyHoldTimeProvider.parseHoldCaps(null)).isEmpty();
+        assertThat(StrategyHoldTimeProvider.parseHoldCaps("")).isEmpty();
+    }
+
     @Test
     void 캡에_안_걸리면_capped는_false() {
         StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(

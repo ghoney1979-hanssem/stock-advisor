@@ -374,6 +374,10 @@ stockadvisor:
       min-samples: ${TRADING_ADAPTIVE_EXIT_MIN_SAMPLES:20}    # 마크 채택 최소 표본(미만 마크 제외)
       refresh-minutes: ${TRADING_ADAPTIVE_EXIT_REFRESH_MINUTES:30}  # 권장 보유시간 재계산 캐시 주기(분)
       max-hold-minutes: ${TRADING_ADAPTIVE_EXIT_MAX_HOLD_MINUTES:300}  # 보유시간 상한(종가 권장 시 캡)
+      # 전략별 보유시간 상한 csv "STRATEGY:분" — 미지정 전략은 위 전역값 사용(종전 동작).
+      # 캡은 실제 청산 시점 + 게이트 채점 horizon + 진입 마감시각(진입+보유 ≤ session-end)을 동시에 정하므로,
+      # 올리면 수익 구간이 늘지만 늦은 진입이 막힌다(240분이면 11:20 이후 진입 불가).
+      max-hold-minutes-per-strategy: ${TRADING_ADAPTIVE_EXIT_MAX_HOLD_PER_STRATEGY:}
       smooth-window: ${TRADING_ADAPTIVE_EXIT_SMOOTH_WINDOW:3}  # 권장 마크 선택 전 이웃 평활 창(마크 수, 홀수). 60개 마크 중 max-pick의 노이즈 편향 억제(2026-08-18). 1=평활 없음
 
     # 적응형 청산방식 — 시간기반/트레일링/VWAP이탈/추세전환 중 전략별 평균 net 수익 최대 방식을 자동 채택.

@@ -19,7 +19,14 @@ import java.util.Map;
  *
  * <p>{@link ExitTimingService}가 계산한 보유시간별 평균 net 수익 곡선에서, 전략별로 <b>표본이 충분한
  * (≥ minSamples) 마크 중 평균수익 최대 마크</b>를 보유시간으로 채택한다. 자격 마크가 없으면(데이터 부족)
- * 고정값 {@code policy.timeExitHoldMinutes()}로 fallback. 종가(EOD) 권장이거나 과대 마크는 maxHoldMinutes로 캡.</p>
+ * 고정값 {@code policy.timeExitHoldMinutes()}로 fallback. 종가(EOD) 권장이거나 과대 마크는 maxHoldMinutes로 캡
+ * (전략별 상한 {@code max-hold-minutes-per-strategy}가 지정돼 있으면 그 값이 우선).</p>
+ *
+ * <p>⚠️ 여기서 정한 값은 <b>실제 청산 시점</b>일 뿐 아니라 {@link StrategyPerformanceGate}의 <b>채점 horizon</b>과
+ * {@link PolicyGate}의 <b>진입 마감시각</b>("진입시각+보유 ≤ session-end")을 함께 결정한다. 즉 캡을 올리면
+ * 수익 구간이 늘고 게이트 채점도 그 마크로 옮겨가지만, 그만큼 <b>늦은 진입이 차단</b>된다(예 240분 캡이면
+ * 11:20 이후 진입 불가). 세 소비처가 한 값으로 묶여 있는 것이 의도다 — 어긋나면 "검증한 적 없는 청산"으로
+ * 실주문이 나간다(2026-08-18 비-TIME horizon 버그와 같은 유형).</p>
  *
  * <p>{@link PositionExitService}가 매분 호출하므로 {@code refreshMinutes} 주기 TTL 캐시로 재계산을 줄인다.</p>
  */
@@ -35,6 +42,17 @@ public class StrategyHoldTimeProvider {
 
     private volatile Instant lastRefresh;
     private volatile Map<String, HoldInfo> cache = Map.of();
+
+    // 전략별 보유시간 상한(csv "STRATEGY:분", 2026-08-31) — 종전엔 max-hold-minutes 하나가 전 전략에 걸려
+    // 한 전략의 캡을 풀면 다른 전략의 손실 구간까지 함께 늘어났다. 실측 2026-08-31 REVERSAL_L: 분석 권장이
+    // 290분(+1.92%)인데 prod 캡 90분이 잘라 동일표본 90분 +0.43% vs 종가 +1.45%(n=120)로 건당 1.0%p를 버렸고,
+    // 그 잘린 90분 마크가 그대로 게이트 채점 horizon이라 흐름버킷 net +0.03%로 L 자신이 차단됐다(3중 구속).
+    // 반면 같은 캡을 전역으로 풀면 A(권장 275분, −1.29%)·K(100분, −0.57%)·J(260분, −0.02%)의 음수 구간도 늘어난다.
+    // 미지정 전략은 전역 max-hold-minutes 사용(= 종전 동작).
+    @org.springframework.beans.factory.annotation.Value(
+            "${stockadvisor.trading.adaptive-exit.max-hold-minutes-per-strategy:}")
+    private String maxHoldPerStrategyCsv = "";
+    private volatile Map<String, Integer> maxHoldPerStrategy;
 
     // 가시화(describe)용 전략 목록 — 필드주입(생성자 무churn, 기존 단위테스트 영향 없음). 미주입이면 STRATEGIES만.
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -177,6 +195,41 @@ public class StrategyHoldTimeProvider {
                 .orElse(null);
     }
 
+    /**
+     * "STRATEGY:분,STRATEGY2:분" 파싱(순수). 값이 숫자가 아니거나 ≤0이면 그 항목은 무시(=전역 캡 사용).
+     *
+     * <p>⚠️ 오타·잘못된 값을 조용히 무시하는 것은 의도다 — 설정 실수로 보유시간이 0이 되면 진입 즉시
+     * 청산되므로, 알 수 없는 값은 종전 동작(전역 캡)으로 degrade하는 편이 안전하다.</p>
+     */
+    static Map<String, Integer> parseHoldCaps(String csv) {
+        Map<String, Integer> m = new java.util.HashMap<>();
+        if (csv == null) return m;
+        for (String part : csv.split(",")) {
+            String[] kv = part.split(":");
+            if (kv.length != 2) continue;
+            String k = kv[0].trim();
+            if (k.isEmpty()) continue;
+            try {
+                int v = Integer.parseInt(kv[1].trim());
+                if (v > 0) m.put(k, v);
+            } catch (NumberFormatException ignored) {
+                // degrade — 전역 캡으로 되돌아간다
+            }
+        }
+        return m;
+    }
+
+    /** 해당 전략에 적용할 보유시간 상한(분) — 전략별 지정이 있으면 그 값, 없으면 전역 max-hold-minutes. */
+    private int maxHoldFor(String strategy) {
+        Map<String, Integer> m = maxHoldPerStrategy;
+        if (m == null) {
+            m = parseHoldCaps(maxHoldPerStrategyCsv);
+            maxHoldPerStrategy = m;
+        }
+        Integer v = m.get(strategy);
+        return v != null ? v : props.maxHoldMinutes();
+    }
+
     private synchronized void refreshIfStale() {
         Instant now = Instant.now();
         if (lastRefresh != null && Duration.between(lastRefresh, now).toMinutes() < props.refreshMinutes()) {
@@ -192,11 +245,10 @@ public class StrategyHoldTimeProvider {
             ExitTimingService.MarkStat best = pickBest(t.curve(), props.minSamples(), props.smoothWindow());
             if (best == null) continue;   // 자격 마크 없음 → fallback(캐시 미등록)
             // 종가(EOD, markMinutes<0)이거나 과대 마크는 상한으로 캡 → 사실상 장마감까지 보유
-            int mins = best.markMinutes() < 0
-                    ? props.maxHoldMinutes()
-                    : Math.min(best.markMinutes(), props.maxHoldMinutes());
+            int cap = maxHoldFor(t.strategy());   // 전략별 지정 > 전역 max-hold-minutes
+            int mins = best.markMinutes() < 0 ? cap : Math.min(best.markMinutes(), cap);
             // 캡이 실제로 잘랐는지 노출 — EOD(-1) 권장은 정의상 '캡으로 잘린 것'이다(장마감까지 보유가 원 권장).
-            boolean capped = best.markMinutes() < 0 || best.markMinutes() > props.maxHoldMinutes();
+            boolean capped = best.markMinutes() < 0 || best.markMinutes() > cap;
             map.put(t.strategy(), new HoldInfo(t.strategy(), mins, true, best.samples(), best.avgReturnPct(),
                     best.markMinutes(), capped));
         }
