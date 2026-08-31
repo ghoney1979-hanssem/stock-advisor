@@ -185,6 +185,19 @@ stockadvisor:
     reversal-max-change-pct: ${SIGNAL_REVERSAL_MAX_CHANGE_PCT:2.0}       # 당일 급등 추격 방지
     reversal-max-drop-pct: ${SIGNAL_REVERSAL_MAX_DROP_PCT:5.0}           # 당일 폭락(떨어지는 칼날) 제외
     reversal-min-score: ${SIGNAL_REVERSAL_MIN_SCORE:40.0}
+    # [N] 깊은 눌림(2026-08-31 신설, 섀도우) — L의 밴드 바로 바깥(이격 -10 ~ -25)을 산다.
+    # L은 이격 <-10 을 BROKEN_TREND로 제외하는데 preScreen이 그 후보를 평가에서 먼저 걸러 대조군이 0행 = 미검증 사각지대였다.
+    # ⚠️ 밴드 외 조건(저거래량·ret5d·당일 상하한·점수)은 전부 L과 같은 값 — 변수를 하나만 바꿔야 "L의 밴드를 넓혀야 하나"의 답이 된다.
+    # 근거는 유니버스 lift(9거래일: <-10 +0.42 · -10~-3 +0.30 · -3~0 +0.20, 단조)이나 ⚠️ 시간분할에서 +0.47 → -0.03으로 불안정 →
+    # 실주문 0(화이트리스트 미포함) + 도입 시점부터 대조군으로 "측정 먼저".
+    deep-pullback-enabled: ${SIGNAL_DEEP_PULLBACK_ENABLED:true}
+    deep-pullback-max-volume-ratio: ${SIGNAL_DEEP_PULLBACK_MAX_VOLUME_RATIO:1.0}   # L과 동일
+    deep-pullback-min-pullback-pct: ${SIGNAL_DEEP_PULLBACK_MIN_PULLBACK_PCT:10.0}  # L의 상한 = N의 하한(밴드가 맞닿음)
+    deep-pullback-max-pullback-pct: ${SIGNAL_DEEP_PULLBACK_MAX_PULLBACK_PCT:25.0}  # 그 이상은 구조적 붕괴로 제외
+    deep-pullback-max-ret5d-pct: ${SIGNAL_DEEP_PULLBACK_MAX_RET5D_PCT:-5.0}        # L과 동일
+    deep-pullback-max-change-pct: ${SIGNAL_DEEP_PULLBACK_MAX_CHANGE_PCT:2.0}       # L과 동일
+    deep-pullback-max-drop-pct: ${SIGNAL_DEEP_PULLBACK_MAX_DROP_PCT:5.0}           # L과 동일
+    deep-pullback-min-score: ${SIGNAL_DEEP_PULLBACK_MIN_SCORE:40.0}                # L과 동일
     # [M] 조용한 추세지속(2026-08-29 신설, 섀도우) — 유니버스 lift(8거래일, 저가주·이상치 제외): 거래량배수<0.5 +0.66 · ret5d 0~5 +0.52 · 당일 0~2 +0.49 · MA20이격 0~3 +0.28.
     # L(MA20 아래·5일 약세)의 대칭 — 공유 조건은 저거래량 하나라, 둘의 성과가 갈리면 "저거래량이 좋은가 / 반전이 좋은가"가 분리된다.
     quiet-enabled: ${SIGNAL_QUIET_ENABLED:true}
