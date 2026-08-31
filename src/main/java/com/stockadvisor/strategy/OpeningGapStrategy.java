@@ -41,6 +41,7 @@ public class OpeningGapStrategy implements TradingStrategy {
     private final LocalTime windowEnd; // 개장 창 종료(09:00~이 시각)
     private final double maxIndexGap;  // 지수 갭 상한%(이 이상 갭업한 날은 진입 보류). 0=비활성
     private final Set<String> allowedRegimes;  // 진입 허용 전일국면(csv). 빈값=제약 없음
+    private final boolean requireRisingFlow;   // 진입시점 지수흐름<0(시가 아래)이면 보류. 기본 off
 
     public OpeningGapStrategy(@Value("${stockadvisor.signal.opening-gap-enabled:true}") boolean enabled,
                               @Value("${stockadvisor.signal.opening-gap-min-gap:2.0}") double minGap,
@@ -48,7 +49,8 @@ public class OpeningGapStrategy implements TradingStrategy {
                               @Value("${stockadvisor.signal.opening-gap-min-score:40.0}") double minScore,
                               @Value("${stockadvisor.signal.opening-gap-window-end:09:30}") String windowEnd,
                               @Value("${stockadvisor.signal.opening-gap-max-index-gap:0}") double maxIndexGap,
-                              @Value("${stockadvisor.signal.opening-gap-allowed-regimes:BULL,NEUTRAL}") String allowedRegimes) {
+                              @Value("${stockadvisor.signal.opening-gap-allowed-regimes:BULL,NEUTRAL}") String allowedRegimes,
+                              @Value("${stockadvisor.signal.opening-gap-require-rising-flow:false}") boolean requireRisingFlow) {
         this.enabled = enabled;
         this.minGap = minGap;
         this.maxGap = maxGap;
@@ -56,6 +58,7 @@ public class OpeningGapStrategy implements TradingStrategy {
         this.windowEnd = LocalTime.parse(windowEnd);
         this.maxIndexGap = maxIndexGap;
         this.allowedRegimes = parseRegimes(allowedRegimes);
+        this.requireRisingFlow = requireRisingFlow;
     }
 
     static Set<String> parseRegimes(String csv) {
@@ -107,7 +110,36 @@ public class OpeningGapStrategy implements TradingStrategy {
         if (regimeReject != null) return regimeReject;   // 허용 국면 밖(기본 약세장 제외)
         if (s.changeRate() < gap) return "FADING";            // 현재가<시가(갭 못 지킴)
         if (ctx.recScore() < minScore) return "SCORE";
-        return null;                                          // 갭업 유지 + 비약세 → 개장 롱
+        // 흐름↓ 스킵(마지막 게이트) — K 조건을 다 통과한 후보만 흐름으로 최종 판정.
+        // 그래야 FLOW_DOWN 대조군 = "K 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
+        return flowReject(ctx.indexMom30(), requireRisingFlow);
+    }
+
+    /**
+     * 흐름↓ 스킵 판정(순수) — 진입 시점 지수 흐름 &lt; 0이면 {@code "FLOW_DOWN"}.
+     *
+     * <p>⚠️ <b>K에서 이 값의 의미는 다른 전략과 다르다</b>. {@code MarketRegimeService.momPct}는
+     * {@code k = Math.min(lag, candles.size())}로 계산하는데, K의 유효 창(09:00~09:30)엔 분봉이 30개도 안 쌓여
+     * <b>mom30·mom60이 같은 값으로 붕괴</b>한다(실측 359건 전부 {@code mom30 == mom60}). 즉 K에게 "흐름↓"은
+     * <i>30분 추세가 음수</i>가 아니라 <b>"지수가 시가 아래"</b>다. A·F·G·H·J의 같은 이름 필터가 재는 것과
+     * 다른 물리량이라, 그쪽 근거를 K에 옮겨오면 안 된다.</p>
+     *
+     * <p>⚠️ 따라서 <b>"lag30·lag60 양쪽 일관"이라는 통상의 채택 기준이 K에는 무의미</b>하다(같은 숫자를 두 번
+     * 세는 셈). 대신 <b>시간분할과 LOO로 검증</b>했다(2026-08-31, 90분 마크 net): 흐름↓ <b>−1.01%(n=47, 15거래일)</b>
+     * vs 흐름↑ <b>−0.29%(n=115)</b>이고, 전·후반으로 갈라도 방향이 유지된다(전반 −0.77 vs −0.44 / 후반 −1.55 vs +0.22).
+     * 최대기여일(20260715, n=20) 제외 시에도 흐름↓는 −0.82%로 여전히 열위.</p>
+     *
+     * <p>의미상으로도 정합적이다 — K는 <b>갭업을 사는</b> 전략인데 지수가 시가 아래로 밀렸다면 그 갭은
+     * 시장 전체가 되돌리는 중이다. 종목 단위 {@code FADING}(현재가&lt;시가)의 <b>지수판</b>이고,
+     * {@code INDEX_GAP_DAY}(지수가 통째로 갭업한 날)와도 다른 축이라 중복이 아니다.</p>
+     *
+     * <p>⚠️ 표본이 얇다(흐름↓ n=47) — 방향은 믿되 차단분 대조군으로 계속 재검할 것.
+     * ⚠️ 기대효과는 흑자 전환이 아니라 출혈 감소다(흐름↑만 남겨도 −0.29%로 음수).
+     * ⚠️ 흐름 미산출(null — 09:00 첫 스캔은 분봉 1개라 산출 불가)이면 미적용(degrade open).</p>
+     */
+    static String flowReject(Double indexMom30, boolean require) {
+        if (!require || indexMom30 == null) return null;
+        return indexMom30 < 0.0 ? "FLOW_DOWN" : null;
     }
 
     /**

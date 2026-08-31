@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OpeningGapStrategyTest {
 
     // enabled, minGap 2, maxGap 10, minScore 40, window 09:00~09:30, 지수갭 필터 0=비활성(기존 케이스 무영향)
-    private final OpeningGapStrategy s = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL,NEUTRAL");
+    private final OpeningGapStrategy s = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL,NEUTRAL", false);
     private static final LocalTime IN = LocalTime.of(9, 10);   // 개장 창 내
 
     /** changeRate·gapPct·recScore·trend 로 ctx 구성. */
@@ -24,10 +24,16 @@ class OpeningGapStrategyTest {
 
     /** 지수 갭%까지 지정. */
     private StrategyContext ctx(double changeRate, double gapPct, double score, String trend, Double indexGapPct) {
+        return ctx(changeRate, gapPct, score, trend, indexGapPct, null);
+    }
+
+    /** 지수 장중흐름(mom30)까지 지정 — K에선 개장 창 특성상 "시가 대비 등락"에 해당. */
+    private StrategyContext ctx(double changeRate, double gapPct, double score, String trend,
+                                Double indexGapPct, Double indexMom30) {
         SignalResult sig = new SignalResult(0, changeRate, 1000, 0, false, false, false, 0,
                 false, false, false, 0, 0, 0, gapPct);
         return new StrategyContext("005930", sig, score, RecommendationType.BUY, null, false, false,
-                trend, null, indexGapPct);
+                trend, indexMom30, indexGapPct);
     }
 
     @Test
@@ -46,7 +52,7 @@ class OpeningGapStrategyTest {
     @Test
     void 지수_통째_갭업일이면_INDEX_GAP_DAY로_보류() {
         // 지수갭 상한 1.5% 활성
-        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5, "BULL,NEUTRAL");
+        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5, "BULL,NEUTRAL", false);
         // 8/14 재현: 지수가 +2.6% 갭업한 날의 종목 갭업 → 보류
         assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", 2.6), IN)).isEqualTo("INDEX_GAP_DAY");
         // 지수가 조용히 열린 날(+0.4%)의 종목 갭업은 종목 고유 촉매 → 정상 진입
@@ -57,7 +63,7 @@ class OpeningGapStrategyTest {
 
     @Test
     void 지수갭_미상이거나_비활성이면_필터_미적용() {
-        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5, "BULL,NEUTRAL");
+        OpeningGapStrategy g = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 1.5, "BULL,NEUTRAL", false);
         assertThat(g.reject(ctx(3.5, 3.0, 50, "BULL", null), IN)).isNull();   // 장전·휴장·조회실패 → degrade open
         assertThat(s.reject(ctx(3.5, 3.0, 50, "BULL", 2.6), IN)).isNull();    // s는 상한 0=비활성
     }
@@ -91,7 +97,7 @@ class OpeningGapStrategyTest {
         assertThat(s.reject(ctx(3.5, 3.0, 50, "NEUTRAL", null), IN)).isNull();
 
         // BULL 한정(2026-08-21 prod) — 중립국면도 제외되고, 사유가 REGIME_BEAR과 구분된다
-        OpeningGapStrategy bullOnly = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL");
+        OpeningGapStrategy bullOnly = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL", false);
         assertThat(bullOnly.reject(ctx(3.5, 3.0, 50, "NEUTRAL", null), IN)).isEqualTo("REGIME_NEUTRAL");
         assertThat(bullOnly.reject(ctx(3.5, 3.0, 50, "BEAR", null), IN)).isEqualTo("REGIME_BEAR");
         assertThat(bullOnly.reject(ctx(3.5, 3.0, 50, "BULL", null), IN)).isNull();
@@ -99,10 +105,52 @@ class OpeningGapStrategyTest {
 
     @Test
     void 국면_미상이면_degrade_open이고_빈_목록은_제약없음() {
-        OpeningGapStrategy bullOnly = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL");
+        OpeningGapStrategy bullOnly = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL", false);
         assertThat(bullOnly.reject(ctx(3.5, 3.0, 50, null, null), IN)).isNull();   // 국면 미상 → 통과
 
-        OpeningGapStrategy noLimit = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "");
+        OpeningGapStrategy noLimit = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "", false);
         assertThat(noLimit.reject(ctx(3.5, 3.0, 50, "BEAR", null), IN)).isNull();  // 빈 목록 = 제약 없음
+    }
+
+    // ── 흐름↓ 스킵(2026-08-31) ────────────────────────────────────────────
+
+    @Test
+    void 흐름필터_켜면_지수가_시가아래일때_FLOW_DOWN() {
+        OpeningGapStrategy flow = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL,NEUTRAL", true);
+
+        // 갭업 유지·강세·점수 통과인데 지수만 시가 아래(-0.4%) → 시장이 갭을 되돌리는 중이라 보류
+        assertThat(flow.reject(ctx(3.5, 3.0, 50, "BULL", null, -0.4), IN)).isEqualTo("FLOW_DOWN");
+        // 지수가 시가 위면 정상 진입
+        assertThat(flow.reject(ctx(3.5, 3.0, 50, "BULL", null, 0.4), IN)).isNull();
+        // 경계: 0은 통과(부등호는 < 0)
+        assertThat(flow.reject(ctx(3.5, 3.0, 50, "BULL", null, 0.0), IN)).isNull();
+    }
+
+    @Test
+    void 흐름_미산출이면_미적용_degrade_open() {
+        // 09:00 첫 스캔은 분봉이 1개라 momPct가 null → 흐름으로 매매를 막지 않는다.
+        OpeningGapStrategy flow = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL,NEUTRAL", true);
+
+        assertThat(flow.reject(ctx(3.5, 3.0, 50, "BULL", null, null), IN)).isNull();
+    }
+
+    @Test
+    void 흐름필터_비활성이면_종전동작() {
+        // s는 requireRisingFlow=false → 흐름이 음수여도 진입
+        assertThat(s.reject(ctx(3.5, 3.0, 50, "BULL", null, -1.5), IN)).isNull();
+    }
+
+    @Test
+    void 흐름판정은_K_고유사유_뒤에_온다() {
+        // 판정 위치가 핵심 — 어차피 탈락할 후보가 아니라 "진입했을 후보"만 FLOW_DOWN으로 걸러야
+        // 대조군이 ENTERED와 직접 비교되고 기존 사유 통계도 오염되지 않는다.
+        OpeningGapStrategy flow = new OpeningGapStrategy(true, 2.0, 10.0, 40.0, "09:30", 0, "BULL,NEUTRAL", true);
+
+        // 흐름↓이지만 갭 부족이 먼저 → NO_GAP
+        assertThat(flow.reject(ctx(1.5, 1.0, 50, "BULL", null, -0.4), IN)).isEqualTo("NO_GAP");
+        // 흐름↓이지만 갭을 못 지킴이 먼저 → FADING
+        assertThat(flow.reject(ctx(2.5, 3.0, 50, "BULL", null, -0.4), IN)).isEqualTo("FADING");
+        // 흐름↓이지만 점수 미달이 먼저 → SCORE
+        assertThat(flow.reject(ctx(3.5, 3.0, 30, "BULL", null, -0.4), IN)).isEqualTo("SCORE");
     }
 }
