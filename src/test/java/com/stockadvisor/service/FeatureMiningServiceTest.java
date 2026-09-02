@@ -44,6 +44,17 @@ class FeatureMiningServiceTest {
         assertThat(FeatureMiningService.maxSharePct(Map.of(), 0)).isEqualTo(0);
     }
 
+    /**
+     * 오늘 기준 상대 날짜(yyyyMMdd) — <b>절대 날짜를 상대 룩백(lookbackDays)과 함께 쓰면 테스트가 시한부가 된다.</b>
+     *
+     * <p>실제로 두 번 깨졌다: 2026-08-31에 클러스터 검증용 행이, 2026-09-02에 나머지 세 테스트의 표본이
+     * cutoff(오늘−90일) 밖으로 밀려 bucket 자체가 사라졌다(NoSuchElementException).</p>
+     */
+    private static String dAgo(int daysAgo) {
+        return java.time.LocalDate.now().minusDays(daysAgo)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+    }
+
     private TradeOutcome vr(double volRatio, String date, int i, double retPct) {
         long buy = 10_000;
         TradeOutcome o = new TradeOutcome("SQUEEZE_BREAKOUT_H", null, "00593" + i, date, buy);
@@ -95,7 +106,7 @@ class FeatureMiningServiceTest {
     @Test
     void 진입_대조군_비교_edge_계산() {
         List<TradeOutcome> rows = new ArrayList<>();
-        String[] dates = {"20260602", "20260603", "20260604", "20260605", "20260606"};
+        String[] dates = {dAgo(6), dAgo(5), dAgo(4), dAgo(3), dAgo(2)};
         // 진입(8~15): net +2%
         for (int i = 0; i < 25; i++) rows.add(vr(10, dates[i % 5], i, 2.0));
         // 같은 8~15 pocket의 대조군(미진입): net -1%
@@ -127,7 +138,7 @@ class FeatureMiningServiceTest {
     @Test
     void 대조군_커버리지_미달이면_edge를_내지_않고_커버리지를_노출한다() {
         List<TradeOutcome> rows = new ArrayList<>();
-        String[] dates = {"20260602", "20260603", "20260604", "20260605", "20260606"};
+        String[] dates = {dAgo(6), dAgo(5), dAgo(4), dAgo(3), dAgo(2)};
         for (int i = 0; i < 25; i++) rows.add(vr(10, dates[i % 5], i, 2.0));            // 진입 25건
         for (int i = 0; i < 25; i++) {                                                   // 대조군 25건 중
             TradeOutcome c = vr(10, dates[i % 5], 200 + i, -1.0);
@@ -155,27 +166,27 @@ class FeatureMiningServiceTest {
         // 전반(06-02~06-03)은 +2%, 후반(06-05~06-06)은 -2% — 전 구간을 합치면 0%로 보여
         // "엣지 없음"이 되지만, 갈라 보면 부호가 뒤집히는 불안정 pocket임이 드러난다.
         List<TradeOutcome> rows = new ArrayList<>();
-        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? "20260602" : "20260603", i, 2.0));
-        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? "20260605" : "20260606", 50 + i, -2.0));
+        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? dAgo(6) : dAgo(5), i, 2.0));
+        for (int i = 0; i < 12; i++) rows.add(vr(10, i % 2 == 0 ? dAgo(3) : dAgo(2), 50 + i, -2.0));
         when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
 
         assertThat(net(svc().mine(90, "close", null, null, 20, 80.0, false))).isCloseTo(0.0, within(1e-6));
         // 전반만
-        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, null, "20260603")))
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, null, dAgo(5))))
                 .isCloseTo(2.0, within(1e-6));
         // 후반만
-        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, "20260605", null)))
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, dAgo(3), null)))
                 .isCloseTo(-2.0, within(1e-6));
     }
 
     @Test
     void since가_주어지면_lookbackDays_cutoff보다_우선한다() {
         List<TradeOutcome> rows = new ArrayList<>();
-        for (int i = 0; i < 12; i++) rows.add(vr(10, "20260602", i, 1.0));
+        for (int i = 0; i < 12; i++) rows.add(vr(10, dAgo(5), i, 1.0));
         when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
 
-        FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 10, 80.0, false, "20260601", null);
-        assertThat(r.since()).isEqualTo("20260601");   // cutoff가 since로 대체돼 응답에 노출
+        FeatureMiningService.MiningReport r = svc().mine(90, "close", null, null, 10, 80.0, false, dAgo(6), null);
+        assertThat(r.since()).isEqualTo(dAgo(6));   // cutoff가 since로 대체돼 응답에 노출
         assertThat(r.until()).isNull();
     }
 

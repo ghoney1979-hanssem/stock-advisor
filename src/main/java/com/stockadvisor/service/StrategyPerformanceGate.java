@@ -141,6 +141,62 @@ public class StrategyPerformanceGate {
         this.breadthMinSamples = minSamples;
     }
 
+    // ── net 추세 조건부(2026-09-02, 사용자 결정) ──────────────────────────────────────────
+    // 게이트를 <b>절대 net의 수준</b>이 아니라 <b>net의 방향</b>으로 판정한다:
+    // 총 net이 음수여도 <b>상승곡선</b>이면 열고, 양수여도 <b>하락곡선</b>이면 닫는다.
+    //
+    // 왜: 수준 판정은 구조적으로 후행한다 — 회복 중인 전략은 룩백 평균이 문턱을 넘을 때까지 닫혀 있어
+    // 회복 구간을 통째로 놓치고, 식어가는 전략은 평균이 문턱 아래로 내려올 때까지 열려 있어 하강분을 다 맞는다.
+    // (실측 배경: 8/14에 히스테리시스 밴드를 −0.2→−0.05로 좁힌 것도 "회복한 적 없는 버킷이 열린 채 유지"된
+    //  같은 유형의 문제였다. 밴드 폭 조정은 증상 완화였고, 방향을 직접 재는 게 원인 처방이다.)
+    //
+    // ⚠️ <b>비대칭</b>이 이 설계의 핵심 — 이 시스템의 다른 모든 가드와 같은 원칙(리스크 축소는 빠르게, 확대는 느리게):
+    //   · <b>닫기</b>(하락곡선)는 기울기 하나로 즉시 — LOO 요구 없음.
+    //   · <b>열기</b>(상승곡선)는 기울기 + <b>어느 하루를 빼도 기울기 부호가 유지</b>될 것(전수 LOO).
+    //     하루가 만든 반등으로 게이트가 열리는 것을 막는다(클러스터·LOO 가드가 반복해 잡아온 바로 그 실패 유형).
+    //   · 데드밴드 안(평탄)이면 <b>종전 절대 net 판정으로 fallback</b> — 방향이 없을 땐 수준이 답이다.
+    //
+    // ⚠️ 표본 수 요건(minSamples/flowMinSamples/breadthMinSamples)·클러스터 가드는 <b>그대로</b>다 —
+    //    추세는 "얼마나 검증됐나"가 아니라 "어느 방향인가"만 바꾼다. 표본이 부족하면 추세 판정 자체를 하지 않는다.
+    // ⚠️ 코드 기본 off(종전 동작). prod에서 env로 켠다.
+    @Value("${stockadvisor.trading.perf-gate.net-trend-conditional:false}")
+    private boolean netTrendConditional = false;
+    /** 추세 판정 최소 거래일 — 전수 LOO가 의미를 가지려면 하나 빼고도 3점이 남아야 한다. */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-min-days:5}")
+    private int netTrendMinDays = 5;
+    /** 상승 판정 문턱(%p/거래일). 데드밴드 상한 — 이 미만이면 '평탄'으로 보고 절대 net으로 판정. */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-up-pct:0.05}")
+    private double netTrendUpPct = 0.05;
+    /** 하락 판정 문턱(%p/거래일, 양수로 지정). 데드밴드 하한. */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-down-pct:0.05}")
+    private double netTrendDownPct = 0.05;
+
+    /** 테스트용 — 추세 레이어 구성. */
+    void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct) {
+        this.netTrendConditional = enabled;
+        this.netTrendMinDays = minDays;
+        this.netTrendUpPct = upPct;
+        this.netTrendDownPct = downPct;
+    }
+
+    /** 버킷의 일별 net 맵 → 추세(비활성이거나 거래일 부족이면 null=판정 생략). */
+    private NetTrend trendOf(java.util.Map<String, double[]> days) {
+        return netTrendConditional ? netTrend(days, netTrendMinDays, netTrendUpPct, netTrendDownPct) : null;
+    }
+
+    /**
+     * 최종 허용 판정 — 추세가 있으면 추세가 절대 net 판정을 <b>대체</b>하고, 평탄하거나 추세 미판정이면 종전 그대로.
+     *
+     * @param netOk 절대 net 판정 결과(net 기준 통과 AND LOO 통과) — 종전 동작
+     * @param tr    추세(null이면 미판정)
+     */
+    static boolean decide(boolean netOk, NetTrend tr) {
+        if (tr == null) return netOk;
+        if (tr.falling()) return false;   // + 여도 하락곡선이면 닫는다
+        if (tr.rising()) return true;     // − 여도 상승곡선이면 연다
+        return netOk;                      // 평탄 → 수준으로 판정(종전)
+    }
+
     /** 시장폭(상승비율%) → 3구간 라벨. 미상이면 null. walk-forward가 쓴 경계(40/60)와 동일. */
     static String breadthBin(Double pct) {
         if (pct == null) return null;
@@ -223,13 +279,17 @@ public class StrategyPerformanceGate {
                 .toList();
         int n = rows.size();
         Double avg = null;
+        // 추세 판정용 일별 net(주문일 기준) — 섀도우 경로의 daysR/daysF와 같은 {건수, net합} 구조.
+        java.util.Map<String, double[]> daysInv = new java.util.HashMap<>();
         if (n > 0) {
             double sum = 0;
             for (com.stockadvisor.domain.Order o : rows) {
                 long price = (o.getAvgFillPrice() != null && o.getAvgFillPrice() > 0) ? o.getAvgFillPrice() : o.getRequestedPrice();
                 long qty = (o.getFilledQty() != null && o.getFilledQty() > 0) ? o.getFilledQty() : o.getRequestedQty();
                 if (price <= 0 || qty <= 0) { n--; continue; }
-                sum += (double) o.getRealizedPnl() / (price * qty) * 100;   // realized_pnl은 이미 net(비용 차감) 기록
+                double net = (double) o.getRealizedPnl() / (price * qty) * 100;   // realized_pnl은 이미 net(비용 차감) 기록
+                sum += net;
+                bump(daysInv, o.getOrderDate(), net);
             }
             avg = n == 0 ? null : round2(sum / n);
         }
@@ -239,13 +299,20 @@ public class StrategyPerformanceGate {
         }
         String poolTag = inversePooled ? "·통합" : "";
         if (n >= minSamples) {
-            if (avg < props.inverseMinNetAvgPct()) {
+            NetTrend trInv = trendOf(daysInv);
+            boolean allow = decide(avg >= props.inverseMinNetAvgPct(), trInv);
+            String trTag = trInv == null ? "" : trInv.tag();
+            if (!allow) {
                 return new GateDecision(strategy, false,
-                        String.format("[INVERSE·실현손익%s] 성과 미달(net %.2f%% < 기준 %.2f%%, n=%d)", poolTag, avg, props.inverseMinNetAvgPct(), n),
+                        String.format("[INVERSE·실현손익%s] %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s", poolTag,
+                                (trInv != null && trInv.falling()) ? "net 하락추세 차단" : "성과 미달",
+                                avg, avg >= props.inverseMinNetAvgPct() ? "≥" : "<", props.inverseMinNetAvgPct(), n, trTag),
                         n, avg, null, "INVERSE", false);
             }
             return new GateDecision(strategy, true,
-                    String.format("[INVERSE·실현손익%s] 통과(net %.2f%% ≥ 기준 %.2f%%, n=%d)", poolTag, avg, props.inverseMinNetAvgPct(), n),
+                    String.format("[INVERSE·실현손익%s] %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s", poolTag,
+                            (trInv != null && trInv.rising() && avg < props.inverseMinNetAvgPct()) ? "net 상승추세 통과" : "통과",
+                            avg, avg >= props.inverseMinNetAvgPct() ? "≥" : "<", props.inverseMinNetAvgPct(), n, trTag),
                     n, avg, null, "INVERSE", false);
         }
         if (props.inverseBootstrapSizeMult() > 0) {
@@ -447,12 +514,13 @@ public class StrategyPerformanceGate {
                 return clusterBlock(strategy, breadthTag, shareB, nB, daysB.size(), avgB, regimeName, market);
             }
             LooNet looB = looTopDay ? looExcludingTopDay(daysB, sumB, nB) : null;
-            boolean allow = avgB >= effMinNetB && (looB == null || looB.net() >= effMinNetB);
+            NetTrend trB = trendOf(daysB);
+            boolean allow = decide(avgB >= effMinNetB && (looB == null || looB.net() >= effMinNetB), trB);
             if (mutateHyst) openState.put(keyB, allow);
             return new GateDecision(strategy, allow,
-                    String.format("%s폭버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
-                            breadthTag, verdictLabel(allow, avgB >= effMinNetB), avgB, avgB >= effMinNetB ? "≥" : "<", effMinNetB, nB,
-                            looB == null ? "" : looB.tag(), wasOpenB ? HYST_TAG : ""),
+                    String.format("%s폭버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
+                            breadthTag, verdictLabel(allow, avgB >= effMinNetB, trB), avgB, avgB >= effMinNetB ? "≥" : "<", effMinNetB, nB,
+                            looB == null ? "" : looB.tag(), trB == null ? "" : trB.tag(), wasOpenB ? HYST_TAG : ""),
                     nB, avgB, regimeName, market, false);
         }
         // ⓪ 국면+흐름(3차원) — 흐름 버킷 표본이 충족되면 그 버킷만으로 판정(가장 정밀). 부족하면 아래 국면 버킷으로 자연 fallback.
@@ -470,12 +538,13 @@ public class StrategyPerformanceGate {
                 return clusterBlock(strategy, flowTag, shareF, nF, daysF.size(), avgF, regimeName, market);
             }
             LooNet looF = looTopDay ? looExcludingTopDay(daysF, sumF, nF) : null;
-            boolean allow = avgF >= effMinNetF && (looF == null || looF.net() >= effMinNetF);
+            NetTrend trF = trendOf(daysF);
+            boolean allow = decide(avgF >= effMinNetF && (looF == null || looF.net() >= effMinNetF), trF);
             if (mutateHyst) openState.put(keyF, allow);
             return new GateDecision(strategy, allow,
-                    String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
-                            flowTag, verdictLabel(allow, avgF >= effMinNetF), avgF, avgF >= effMinNetF ? "≥" : "<", effMinNetF, nF,
-                            looF == null ? "" : looF.tag(), wasOpenF ? HYST_TAG : ""),
+                    String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
+                            flowTag, verdictLabel(allow, avgF >= effMinNetF, trF), avgF, avgF >= effMinNetF ? "≥" : "<", effMinNetF, nF,
+                            looF == null ? "" : looF.tag(), trF == null ? "" : trF.tag(), wasOpenF ? HYST_TAG : ""),
                     nF, avgF, regimeName, market, false);
         }
         // ① 현재 국면 표본 충분 → 엄격(국면조건부) 경로. 표본이 minSamples 도달하면 여기로 자동 졸업(④).
@@ -489,12 +558,13 @@ public class StrategyPerformanceGate {
                 return clusterBlock(strategy, regimeTag, shareR, n, daysR.size(), avg, regimeName, market);
             }
             LooNet looR = looTopDay ? looExcludingTopDay(daysR, sumR, n) : null;
-            boolean allow = avg >= effMinNetR && (looR == null || looR.net() >= effMinNetR);
+            NetTrend trR = trendOf(daysR);
+            boolean allow = decide(avg >= effMinNetR && (looR == null || looR.net() >= effMinNetR), trR);
             if (mutateHyst) openState.put(keyR, allow);
             return new GateDecision(strategy, allow,
-                    String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s",
-                            regimeTag, verdictLabel(allow, avg >= effMinNetR), avg, avg >= effMinNetR ? "≥" : "<", effMinNetR, n,
-                            looR == null ? "" : looR.tag(), wasOpenR ? HYST_TAG : ""),
+                    String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
+                            regimeTag, verdictLabel(allow, avg >= effMinNetR, trR), avg, avg >= effMinNetR ? "≥" : "<", effMinNetR, n,
+                            looR == null ? "" : looR.tag(), trR == null ? "" : trR.tag(), wasOpenR ? HYST_TAG : ""),
                     n, avg, regimeName, market, false);
         }
         // 여기 도달 = 엄격(흐름·국면) 버킷 판정에 실패(표본부족) → 아래는 전부 비엄격 경로(fallback·부트스트랩·fail-closed).
@@ -516,13 +586,21 @@ public class StrategyPerformanceGate {
                         nAll, daysAll.size(), avgAll, regimeName, market);
             }
             LooNet looAll = looTopDay ? looExcludingTopDay(daysAll, sumAll, nAll) : null;
-            if (nAll >= props.fallbackMinSamples() && avgAll != null && avgAll >= props.fallbackMinNetAvgPct()
-                    && (looAll == null || looAll.net() >= props.fallbackMinNetAvgPct())) {
+            NetTrend trAll = trendOf(daysAll);
+            // ⚠️ 표본 수 요건은 추세와 무관하게 유지 — 추세는 '어느 방향인가'만 바꾸고 '검증됐나'는 못 바꾼다.
+            boolean sampleOkAllPass = nAll >= props.fallbackMinSamples() && avgAll != null;
+            boolean netOkAllPass = sampleOkAllPass && avgAll >= props.fallbackMinNetAvgPct()
+                    && (looAll == null || looAll.net() >= props.fallbackMinNetAvgPct());
+            if (sampleOkAllPass && decide(netOkAllPass, trAll)) {
                 // ③ 통과 → fallback=true(OrderService가 축소사이징 적용)
                 return new GateDecision(strategy, true,
-                        String.format("%s국면표본부족(%d/%d)→전국면 fallback통과(net %.2f%% ≥ %.2f%%, n=%d)%s — 축소진입",
-                                regimeTag, n, minSamples, avgAll, props.fallbackMinNetAvgPct(), nAll,
-                                looAll == null ? "" : looAll.tag()),
+                        // ⚠️ 부등호를 %s로 둔 게 요점 — 추세가 열어준 경우 net은 기준 <b>아래</b>이므로
+                        //    "≥"를 하드코딩하면 8/26에 고친 자기모순 문장이 재발한다. 왜 열렸는지는 뒤의 추세 태그가 말한다.
+                        String.format("%s국면표본부족(%d/%d)→전국면 fallback통과(net %.2f%% %s %.2f%%, n=%d)%s%s — 축소진입",
+                                regimeTag, n, minSamples,
+                                avgAll, avgAll >= props.fallbackMinNetAvgPct() ? "≥" : "<",
+                                props.fallbackMinNetAvgPct(), nAll,
+                                looAll == null ? "" : looAll.tag(), trAll == null ? "" : trAll.tag()),
                         nAll, avgAll, regimeName, market, true);
             }
             // 🐞 2026-08-21: 여기서 무조건 return하는 바람에 아래 '일반 부트스트랩(재검증 다리)' 분기가
@@ -537,12 +615,15 @@ public class StrategyPerformanceGate {
                 // LOO 미달은 "표본이 사실상 하루"라 시간이 처방이다. ①②는 종전 문구를 그대로 둔다.
                 boolean sampleOkAll = nAll >= props.fallbackMinSamples() && avgAll != null;
                 boolean netOkAll = sampleOkAll && avgAll >= props.fallbackMinNetAvgPct();
+                // ④ 추세 조건부(2026-09-02): net이 기준 위인데 하락곡선이라 닫힌 경우를 "fallback미달"로 찍으면
+                //    또 자기모순 문장이 된다(8/26 수정과 같은 유형) — 하락추세 차단을 별도 사유로 분리한다.
+                String reasonAll = (trAll != null && trAll.falling() && netOkAll) ? "전국면 net 하락추세 차단"
+                        : netOkAll ? "전국면 단일일 편중(LOO 미달)" : "fallback미달";
                 return new GateDecision(strategy, false,
-                        String.format("%s국면표본부족(%d/%d)+%s(전국면 net %s, n=%d/%d)%s",
-                                regimeTag, n, minSamples,
-                                netOkAll ? "전국면 단일일 편중(LOO 미달)" : "fallback미달",
+                        String.format("%s국면표본부족(%d/%d)+%s(전국면 net %s, n=%d/%d)%s%s",
+                                regimeTag, n, minSamples, reasonAll,
                                 avgAll == null ? "N/A" : String.format("%.2f%%", avgAll), nAll, props.fallbackMinSamples(),
-                                looAll == null ? "" : looAll.tag()),
+                                looAll == null ? "" : looAll.tag(), trAll == null ? "" : trAll.tag()),
                         n, avg, regimeName, market, false);
             }
         }
@@ -661,6 +742,18 @@ public class StrategyPerformanceGate {
         return netOk ? "단일일 편중(LOO 미달)" : "성과 미달";
     }
 
+    /**
+     * 추세 조건부까지 반영한 사유 라벨(2026-09-02).
+     *
+     * <p>추세가 판정자면 <b>수준 라벨을 쓰면 안 된다</b> — net이 기준 위인데 하락추세로 닫힌 것을 "성과 미달"로
+     * 찍으면 8/26에 고친 자기모순 문장이 그대로 재발한다(그때도 라벨은 AND 결과인데 부등호는 한쪽만 반영했다).</p>
+     */
+    static String verdictLabel(boolean allow, boolean netOk, NetTrend tr) {
+        if (tr != null && tr.falling()) return "net 하락추세 차단";
+        if (tr != null && tr.rising()) return "net 상승추세 통과";
+        return verdictLabel(allow, netOk);
+    }
+
     private static LooNet looExcludingTopDay(java.util.Map<String, double[]> days, double sum, int n) {
         if (days.size() < 2 || n <= 0) return null;
         String top = null;
@@ -678,6 +771,81 @@ public class StrategyPerformanceGate {
     private record LooNet(String day, int count, double net) {
         String tag() {
             return String.format(" ·최대기여일(%s, n=%d) 제외 net %.2f%%", day, count, net);
+        }
+    }
+
+    /**
+     * 버킷 net의 <b>방향</b>(2026-09-02) — 일별 평균 net을 거래일 순서에 대해 <b>표본가중 최소제곱</b>으로 회귀한 기울기.
+     *
+     * <p>단위는 <b>%p/거래일</b>. x는 달력일이 아니라 <b>정렬된 거래일의 인덱스</b>다 — 주말·휴장이 x를 늘리면
+     * 연휴를 낀 버킷의 기울기만 구조적으로 완만해진다(신호가 아니라 달력이 만든 차이).</p>
+     *
+     * <p>가중치는 그날 표본 수다. 1건짜리 날과 20건짜리 날을 같은 무게로 두면 <b>기울기가 표본 1건에 끌려간다</b>
+     * — 이 시스템이 반복해 당한 단일일 아티팩트의 회귀판이다.</p>
+     *
+     * <p><b>전수 LOO</b>: 하루씩 빼며 기울기를 다시 구해 최소·최대를 함께 돌려준다. 상승 판정은 <b>최소값까지
+     * 양수</b>일 때만 성립한다(= 어느 하루를 빼도 상승) — 반등 하루가 게이트를 여는 것을 막는다. 하락 판정에는
+     * LOO를 요구하지 않는다(닫는 방향은 빠르게).</p>
+     *
+     * <p>⚠️ 하루를 뺄 때 <b>남은 날의 x는 원래 인덱스를 유지</b>한다. 다시 0..k-2로 매기면 가운데 하루를 뺄 때
+     * 시간축이 압축돼 기울기가 부풀려진다.</p>
+     *
+     * @return 거래일이 {@code minDays} 미만이거나 기울기가 정의되지 않으면 null(판정 생략)
+     */
+    static NetTrend netTrend(java.util.Map<String, double[]> days, int minDays, double upPct, double downPct) {
+        if (days == null || days.size() < Math.max(3, minDays)) return null;
+        java.util.List<String> keys = new java.util.ArrayList<>(days.keySet());
+        java.util.Collections.sort(keys);   // yyyyMMdd 고정폭 → 사전식 정렬이 곧 시간순
+        int k = keys.size();
+        double[] w = new double[k];
+        double[] y = new double[k];
+        for (int i = 0; i < k; i++) {
+            double[] v = days.get(keys.get(i));
+            w[i] = v[0];                              // 그날 표본 수 = 가중치
+            y[i] = v[0] > 0 ? v[1] / v[0] : 0;        // 그날 평균 net(%)
+        }
+        Double slope = wlsSlope(w, y, -1);
+        if (slope == null) return null;
+        double looMin = Double.POSITIVE_INFINITY;
+        double looMax = Double.NEGATIVE_INFINITY;
+        for (int drop = 0; drop < k; drop++) {
+            Double sd = wlsSlope(w, y, drop);
+            if (sd == null) continue;
+            looMin = Math.min(looMin, sd);
+            looMax = Math.max(looMax, sd);
+        }
+        boolean looComputed = looMin != Double.POSITIVE_INFINITY;
+        boolean rising = slope > 0 && slope >= upPct && looComputed && looMin > 0;
+        boolean falling = slope < 0 && slope <= -downPct;
+        return new NetTrend(slope, k, rising, falling,
+                looComputed ? looMin : null, looComputed ? looMax : null);
+    }
+
+    /** 표본가중 최소제곱 기울기. {@code skip}(음수면 없음) 인덱스는 제외하되 남은 점의 x는 원래 인덱스 유지. */
+    private static Double wlsSlope(double[] w, double[] y, int skip) {
+        double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+        int used = 0;
+        for (int i = 0; i < w.length; i++) {
+            if (i == skip || w[i] <= 0) continue;
+            sw += w[i];
+            sx += w[i] * i;
+            sy += w[i] * y[i];
+            sxx += w[i] * i * i;
+            sxy += w[i] * i * y[i];
+            used++;
+        }
+        if (used < 2) return null;
+        double denom = sw * sxx - sx * sx;
+        if (Math.abs(denom) < 1e-9) return null;   // 모든 x가 같음(불가) 또는 수치적 퇴화
+        return (sw * sxy - sx * sy) / denom;
+    }
+
+    /** 버킷 net의 방향 — 사유문에 기울기·거래일·LOO 범위까지 실어 "왜 열렸나/닫혔나"를 드러낸다. */
+    record NetTrend(double slope, int days, boolean rising, boolean falling, Double looMin, Double looMax) {
+        String tag() {
+            String s = String.format(" ·net추세 %+.3f%%p/일(%d거래일", slope, days);
+            if (looMin != null) s += String.format(", LOO %+.3f~%+.3f", looMin, looMax);
+            return s + (rising ? ", 상승" : falling ? ", 하락" : ", 평탄") + ")";
         }
     }
 
