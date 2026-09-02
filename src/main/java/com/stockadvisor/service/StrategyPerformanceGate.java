@@ -181,14 +181,31 @@ public class StrategyPerformanceGate {
      */
     @Value("${stockadvisor.trading.perf-gate.net-trend-last-day-min-pct:0}")
     private double netTrendLastDayMinPct = 0;
+    /**
+     * 하락추세면 <b>부트스트랩 경로도 닫는다</b>(기본 false = 종전 동작).
+     *
+     * <p>부트스트랩은 성과 판정을 건너뛰는 경로라, 이 플래그 없이는 추세 조건부가 <b>정작 지금 열려 있는
+     * 전략들에는 안 걸린다</b>(2026-09-02 실측: 열려 있던 4개 버킷이 전부 부트스트랩이었다).</p>
+     *
+     * <p>⚠️ 닫기만 한다 — 상승추세로 부트스트랩을 졸업시키지는 않는다(표본 수 요건 우회 방지).</p>
+     */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-closes-bootstrap:false}")
+    private boolean netTrendClosesBootstrap = false;
 
     /** 테스트용 — 추세 레이어 구성. */
     void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct, double lastDayMinPct) {
+        configureNetTrend(enabled, minDays, upPct, downPct, lastDayMinPct, false);
+    }
+
+    /** 테스트용 — 추세 레이어 구성(부트스트랩 차단 포함). */
+    void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct, double lastDayMinPct,
+                           boolean closesBootstrap) {
         this.netTrendConditional = enabled;
         this.netTrendMinDays = minDays;
         this.netTrendUpPct = upPct;
         this.netTrendDownPct = downPct;
         this.netTrendLastDayMinPct = lastDayMinPct;
+        this.netTrendClosesBootstrap = closesBootstrap;
     }
 
     /** 버킷의 일별 net 맵 → 추세(비활성이거나 거래일 부족이면 null=판정 생략). */
@@ -330,6 +347,15 @@ public class StrategyPerformanceGate {
                     n, avg, null, "INVERSE", false);
         }
         if (props.inverseBootstrapSizeMult() > 0) {
+            // 하락추세는 부트스트랩도 닫는다(섀도우 경로와 동일 규칙) — 인버스는 표본이 폭락일에만 쌓여
+            // minSamples 도달이 느린 만큼, 부트스트랩 구간이 길고 그동안 성과 판정이 통째로 비어 있었다.
+            NetTrend trBoot = netTrendClosesBootstrap ? trendOf(daysInv) : null;
+            if (trBoot != null && trBoot.falling()) {
+                return new GateDecision(strategy, false,
+                        String.format("[INVERSE·실현손익%s] 부트스트랩 net 하락추세 차단(실현표본 %d/%d)%s",
+                                poolTag, n, minSamples, trBoot.tag()),
+                        n, avg, null, "INVERSE", false);
+            }
             return new GateDecision(strategy, true,
                     String.format("[INVERSE·실현손익%s] 인버스 부트스트랩(실현표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)",
                             poolTag, n, minSamples, props.inverseBootstrapSizeMult()),
@@ -640,6 +666,25 @@ public class StrategyPerformanceGate {
                                 looAll == null ? "" : looAll.tag(), trAll == null ? "" : trAll.tag()),
                         n, avg, regimeName, market, false);
             }
+        }
+        // 하락추세는 부트스트랩도 닫는다(2026-09-02, 사용자 결정 — `net-trend-closes-bootstrap`, 기본 false).
+        //
+        // ⚠️ 이게 없으면 "+여도 하락곡선이면 닫는다"가 <b>정작 지금 열려 있는 전략들에는 안 걸린다</b>: 부트스트랩은
+        // 성과 판정 자체를 건너뛰는 경로라, 위 fallback에서 하락으로 막혀도 지정 전략이면 여기로 흘러와 열린다
+        // (실측 2026-09-02: 실제로 열려 있던 4개 버킷 L KOSPI·G 양시장·J가 전부 이 경로였다).
+        //
+        // 논리는 "닫기는 빠르게" 원칙 그대로 — 추세가 계산될 만큼(min-days) 거래일이 쌓였다면 그 버킷은 이미
+        // "아직 모르는 상태"가 아니다. 판정 풀은 <b>전국면 pool(daysAll)</b>을 쓴다: 부트스트랩에 온 것 자체가
+        // 국면·흐름 버킷 표본이 모자랐다는 뜻이라, 그 얇은 버킷으로 추세를 재면 대부분 null이 된다.
+        //
+        // ⚠️ 상승추세로 부트스트랩을 <b>졸업</b>시키지는 않는다 — 표본 수 요건을 우회하는 셈이 되고,
+        // 부트스트랩은 이미 열려 있으므로 열 이유도 없다. 조이는 방향으로만 작용한다.
+        NetTrend trBoot = netTrendClosesBootstrap ? trendOf(daysAll) : null;
+        if (trBoot != null && trBoot.falling()) {
+            return new GateDecision(strategy, false,
+                    String.format("%s부트스트랩 net 하락추세 차단(표본 %d/%d, 전국면 n=%d)%s",
+                            regimeTag, n, minSamples, nAll, trBoot.tag()),
+                    n, avg, regimeName, market, false);
         }
         // INVERSE 부트스트랩: 표본 미달이어도 축소사이징(inverseBootstrapSizeMult)으로 실주문 허용 — 적은 비용으로
         // 실표본을 수집(폭락일에만 쌓이는 인버스 특성 보완). 표본이 inverseMinSamples에 차면 이 분기에 안 오고

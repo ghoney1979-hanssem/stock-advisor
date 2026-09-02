@@ -343,6 +343,9 @@ stockadvisor:
       net-trend-up-pct: ${TRADING_PERF_GATE_NET_TREND_UP_PCT:0.05}     # 상승 판정 문턱(%p/거래일) — 미만이면 '평탄'
       net-trend-down-pct: ${TRADING_PERF_GATE_NET_TREND_DOWN_PCT:0.05} # 하락 판정 문턱(%p/거래일, 양수 지정)
       net-trend-last-day-min-pct: ${TRADING_PERF_GATE_NET_TREND_LAST_DAY_MIN_PCT:0}   # 상승 판정 전용 추가 요건 — 마지막 판정근거일 net이 이 값 초과여야 연다(0=흑자). 하락엔 미적용
+      # 하락추세면 부트스트랩 경로(J·G·L·인버스)도 닫는다. 이게 없으면 추세 조건부가 정작 지금 열려 있는
+      # 전략들에는 안 걸린다(부트스트랩은 성과 판정을 건너뛰는 경로라서). 닫기만 하고 졸업은 안 시킨다.
+      net-trend-closes-bootstrap: ${TRADING_PERF_GATE_NET_TREND_CLOSES_BOOTSTRAP:false}
       inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
       inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용
       close-net-avg-pct: ${TRADING_PERF_GATE_CLOSE_NET_AVG_PCT:0.3}   # 히스테리시스 닫기 문턱(%) — 열려있으면 이 값까지 유지(열 땐 min-net 0.3). <min-net이면 활성(예 −0.2), ≥min-net이면 off(기본 0.3=off). 문턱 근처 여닫이 진동·역선택 억제

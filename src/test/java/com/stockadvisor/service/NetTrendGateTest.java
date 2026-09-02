@@ -150,6 +150,50 @@ class NetTrendGateTest {
         assertThat(d.reason()).doesNotContain("net추세");
     }
 
+    // ── 부트스트랩 차단(2026-09-02) ────────────────────────────────────────────────
+    // ⚠️ 이게 없으면 추세 조건부가 정작 지금 열려 있는 전략들에는 안 걸린다 — 부트스트랩은 성과 판정을
+    //    건너뛰는 경로라, fallback에서 하락으로 막혀도 지정 전략이면 그 아래로 흘러와 열린다.
+
+    /** prod 유사(국면조건부 on + fallback on) + 부트스트랩 지정 — 부트스트랩 경로 도달용. */
+    private StrategyPerformanceGate bootstrapGate(List<TradeOutcome> rows, boolean closesBootstrap) {
+        StrategyPerformanceProperties p = new StrategyPerformanceProperties(true, 20, 30, 0.3, "close",
+                true, false, true, 50, 0.5, 0.5, 10, 0.3, false, 30, "", 0, 999.0);
+        TradeOutcomeRepository repo = mock(TradeOutcomeRepository.class);
+        when(repo.findByStrategyAndAlertDateGreaterThanEqual(any(), any())).thenReturn(rows);
+        MarketRegimeService regimeSvc = mock(MarketRegimeService.class);
+        when(regimeSvc.trendOf(any())).thenReturn(com.stockadvisor.domain.MarketTrend.NEUTRAL);
+        ExecutionCostModel costModel = mock(ExecutionCostModel.class);
+        when(costModel.estimateRoundTripSlippagePct(anyLong())).thenReturn(0.0);
+        StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
+                mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
+                COST, "", "nextClose", 0.0, false, false, "", "REVERSAL_L", "", "");
+        g.configureNetTrend(true, 5, 0.05, 0.05, 0.0, closesBootstrap);
+        return g;
+    }
+
+    @Test
+    void 하락추세면_부트스트랩도_닫는다() {
+        // 표본 25건(minSamples 30 미달) → 엄격·fallback 둘 다 미달 → 종전이면 부트스트랩으로 열렸을 상황.
+        var rows = daily("REVERSAL_L", new double[]{2.0, 1.5, 1.0, 0.5, 0.0}, 5);
+
+        assertThat(bootstrapGate(rows, false).evaluate("REVERSAL_L").allowed()).isTrue();   // 플래그 off = 종전
+
+        var d = bootstrapGate(rows, true).evaluate("REVERSAL_L");
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).contains("부트스트랩 net 하락추세 차단");
+    }
+
+    @Test
+    void 상승추세로_부트스트랩을_졸업시키지는_않는다() {
+        // 닫기만 하고 열기는 안 한다 — 표본 수 요건(minSamples)을 추세로 우회하면 안 되기 때문.
+        var rows = daily("REVERSAL_L", new double[]{-1.5, -1.0, -0.5, 0.0, 0.5}, 5);
+
+        var d = bootstrapGate(rows, true).evaluate("REVERSAL_L");
+        assertThat(d.allowed()).isTrue();
+        assertThat(d.fallback()).isTrue();                  // 여전히 축소사이징 부트스트랩
+        assertThat(d.reason()).contains("부트스트랩(표본");   // 정상 졸업이 아니다
+    }
+
     // ── 순수함수 ──────────────────────────────────────────────────────────────────
     // ⚠️ 아래는 기울기·LOO 로직만 격리해 보려고 마지막날 요건을 −99로 사실상 끈다(위 게이트 통합에서 별도 검증).
 
