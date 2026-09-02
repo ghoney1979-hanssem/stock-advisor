@@ -81,6 +81,10 @@ stockadvisor:
     min-change-rate: ${SIGNAL_MIN_CHANGE_RATE:1.5}       # 당일 등락률 ≥ +1.5% (조기 포착)
     min-opinion-score: ${SIGNAL_MIN_OPINION_SCORE:40.0}  # 추천 점수 ≥ 40 (중립 이상)
     momentum-require-rising-flow: ${SIGNAL_A_REQUIRE_RISING_FLOW:false}   # [전략A] 진입 시점 지수 mom30<0(흐름↓)이면 보류(FLOW_DOWN). 흐름↓ -1.85% vs 흐름↑ -0.35%(n=41)
+    # [전략A] 분봉 신선도·활성도 요구. 기본 true=종전. false면 거래량급증+상승만 요구(A 정체성 유지, 신선도만 해제).
+    # 근거: control-analysis(close, 기간정렬) NOT_FRESH 차단분 -0.33%(n=295, 44거래일) > 진입분 -0.83%(n=86) = edge +0.52%p.
+    # F가 2026-08-14에 같은 근거로 ma-trend-require-fresh를 원복한 전례와 동형.
+    momentum-require-fresh: ${SIGNAL_A_REQUIRE_FRESH:true}
     # 공시 감지 후 이 시간 안에서만 진입 신호를 재평가(진입은 공시 직후가 현실적, 호출량도 절감)
     observation-window: ${SIGNAL_OBSERVATION_WINDOW:1h}
     # 분봉 신선도/활성도 필터 — "이미 끝난 움직임" 배제
@@ -428,6 +432,11 @@ stockadvisor:
       min-samples: ${TRADING_ADAPTIVE_STOP_MIN_SAMPLES:30}      # 전략별 승자 채택 최소 표본(미만이면 고정값)
       min-stop-pct: ${TRADING_ADAPTIVE_STOP_MIN_PCT:3.0}        # 손절선 하한%(이보다 타이트 금지)
       max-stop-pct: ${TRADING_ADAPTIVE_STOP_MAX_PCT:10.0}       # 손절선 상한%(이보다 느슨 금지)
+      # 전략별 손절선 하한(csv "STRATEGY:%") — 미지정 전략은 전역 min-stop-pct = 종전 동작.
+      # 전역 하한 하나가 전 전략에 걸려, L만 넓히려 해도 min을 올리면 A(4.9)·F(5.8)·K(5.9)·H(6.2)·C(6.4)가 함께 끌려온다.
+      # L 실측: p10 −2.53%가 전역 하한 3.0에 클램프돼 히트율 23%(54/238), 격자 시뮬(240분·8/25제외)에서
+      # 무손절 +0.16 vs −3.0% −0.61 / −7.0% −0.13 → 현행이 건당 ~0.77%p를 태운다. 폐지가 아니라 넓히기.
+      min-stop-pct-per-strategy: ${TRADING_ADAPTIVE_STOP_MIN_PCT_PER_STRATEGY:}
       refresh-minutes: ${TRADING_ADAPTIVE_STOP_REFRESH_MINUTES:30}  # 손절선 재계산 캐시 주기(분)
 
   # 시장 국면 엔진 (레이어 1) — 지수 추종 ETF(프록시) 일봉으로 추세/변동성 판정.

@@ -99,7 +99,7 @@ public class FeatureMiningService {
 
     /** @param since/until 진입일 구간(yyyyMMdd, 포함). 시간분할 검증용 — 전·후반 부호가 갈리면 그 pocket은 채택 금지. */
     public record MiningReport(int rows, int lookbackDays, String horizon, String market, String regime, int minSamples,
-                               String since, String until,
+                               String strategy, String since, String until,
                                double maxDaySharePct, List<Bucket> highlights, List<Bucket> avoid,
                                List<FeatureMining> features) {}
 
@@ -207,6 +207,23 @@ public class FeatureMiningService {
      */
     public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
                              double maxDaySharePct, boolean includeControl, String since, String until) {
+        return mine(lookbackDays, horizon, market, regime, minSamples, maxDaySharePct, includeControl,
+                since, until, null);
+    }
+
+    /**
+     * @param strategy 이 전략의 진입·대조군만으로 좁혀 마이닝(null=전 전략 풀링).
+     *
+     * <p><b>왜 필요한가</b>(2026-09-02): 풀링 edge만 보고 전역 필터를 도입하면 안 된다는 게 이 시스템이
+     * 두 번 배운 교훈인데(8/21 F·H vs K의 Simpson 역설, 8/25 EXEC_OVERHEAT의 H 제외), 정작 <b>축을 전략별로
+     * 분해할 수단이 없었다</b>. 예컨대 "체결강도 ≥200 전역 상한"은 풀링 edge −1.61이지만, 그 구간에 실제로
+     * 진입하는 전략은 가드가 안 걸린 쪽(E·B·F)뿐이라 전략별로 봐야 판단이 선다.</p>
+     *
+     * <p>저장된 컬럼 필터라 <b>비용 0·소급 즉시</b>. market/regime과 AND로 겹쳐 쓸 수 있다.</p>
+     */
+    public MiningReport mine(int lookbackDays, String horizon, String market, String regime, int minSamples,
+                             double maxDaySharePct, boolean includeControl, String since, String until,
+                             String strategy) {
         String cutoff = (since != null && !since.isBlank())
                 ? since
                 : LocalDate.now(SEOUL).minusDays(lookbackDays).format(YYYYMMDD);
@@ -219,6 +236,7 @@ public class FeatureMiningService {
                 if (o.getAlertDate().compareTo(cutoff) < 0) continue;
                 if (until != null && !until.isBlank() && o.getAlertDate().compareTo(until) > 0) continue;
             }
+            if (strategy != null && !strategy.isBlank() && !strategy.equals(o.getStrategy())) continue;
             if (market != null && !market.isBlank() && !market.equals(o.getEntryMarket())) continue;
             if (regime != null && !regime.isBlank() && !regime.equals(o.getEntryMarketTrend())) continue;
             if (o.isControl()) { if (includeControl) control.add(o); } else entered.add(o);
@@ -268,7 +286,7 @@ public class FeatureMiningService {
                 .sorted(Comparator.comparingDouble(Bucket::netAvgPct)).limit(10).toList();
 
         return new MiningReport(rows.size(), lookbackDays, horizon == null ? "close" : horizon, market, regime,
-                minSamples, cutoff, until, maxDaySharePct, highlights, avoid, features);
+                minSamples, strategy, cutoff, until, maxDaySharePct, highlights, avoid, features);
     }
 
     private FeatureMining mineFeature(String feature, List<TradeOutcome> entered, List<TradeOutcome> control,

@@ -457,10 +457,12 @@ public class SignalAdminController {
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "80") double maxDayShare,
             @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeControl,
             @org.springframework.web.bind.annotation.RequestParam(required = false) String since,
-            @org.springframework.web.bind.annotation.RequestParam(required = false) String until) {
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String until,
+            // 전략별 분해(2026-09-02) — 풀링 edge만 보고 전역 필터를 넣지 않기 위한 전제. 저장 컬럼 필터라 비용 0.
+            @org.springframework.web.bind.annotation.RequestParam(required = false) String strategy) {
         if (featureMiningService == null) return java.util.Map.of("error", "service unavailable");
         return featureMiningService.mine(lookbackDays, horizon, market, regime, minSamples, maxDayShare,
-                includeControl, since, until);
+                includeControl, since, until, strategy);
     }
 
     /** 장중흐름 분석 — 전략별 진입시 지수흐름(mom lag) 부호별 net·승률(exit-horizon)·국면분리·what-if. lag=30|60. */

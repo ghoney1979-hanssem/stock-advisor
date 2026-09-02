@@ -179,6 +179,30 @@ class FeatureMiningServiceTest {
                 .isCloseTo(-2.0, within(1e-6));
     }
 
+    /**
+     * 전략별 분해(2026-09-02) — 풀링 edge만 보고 전역 필터를 넣지 않기 위한 전제.
+     * 같은 pocket이라도 전략마다 부호가 갈릴 수 있다(8/21 Simpson 역설·8/25 EXEC_OVERHEAT의 H 제외).
+     */
+    @Test
+    void strategy로_좁히면_그_전략_표본만_집계한다() {
+        List<TradeOutcome> rows = new ArrayList<>();
+        String[] dates = {dAgo(6), dAgo(5), dAgo(4), dAgo(3), dAgo(2)};
+        for (int i = 0; i < 12; i++) rows.add(vr(10, dates[i % 5], i, 2.0));            // H: +2%
+        for (int i = 0; i < 12; i++) {                                                   // 다른 전략: -3%
+            TradeOutcome o = vr(10, dates[i % 5], 300 + i, -3.0);
+            org.springframework.test.util.ReflectionTestUtils.setField(o, "strategy", "REVERSAL_L");
+            rows.add(o);
+        }
+        when(repo.findByAlertDateGreaterThanEqual(any())).thenReturn(rows);
+
+        assertThat(net(svc().mine(90, "close", null, null, 20, 80.0, false)))
+                .isCloseTo(-0.5, within(1e-6));   // 풀링하면 두 전략이 섞여 부호가 흐려진다
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, null, null, "SQUEEZE_BREAKOUT_H")))
+                .isCloseTo(2.0, within(1e-6));
+        assertThat(net(svc().mine(90, "close", null, null, 10, 80.0, false, null, null, "REVERSAL_L")))
+                .isCloseTo(-3.0, within(1e-6));
+    }
+
     @Test
     void since가_주어지면_lookbackDays_cutoff보다_우선한다() {
         List<TradeOutcome> rows = new ArrayList<>();

@@ -1,5 +1,7 @@
 package com.stockadvisor.strategy;
 
+import com.stockadvisor.domain.RecommendationType;
+import com.stockadvisor.service.SignalResult;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,5 +32,34 @@ class MomentumStrategyTest {
     @Test
     void 비활성이면_흐름하락이어도_통과() {
         assertThat(MomentumStrategy.flowReject(-0.5, false)).isNull();
+    }
+
+    // ── 분봉 신선도 knob(2026-09-02) — control-analysis NOT_FRESH 차단분이 진입분보다 +0.52%p 나았다 ──
+
+    private StrategyContext ctx(boolean volumeSpike, boolean freshActive, double changeRate) {
+        SignalResult sig = new SignalResult(3.0, changeRate, 10_000, 1_000_000,
+                volumeSpike, freshActive, false, 0, false, false, false,
+                3.0, -12.0, 0.0, 0.0, false, 0.0, false, 9_900, "20260901");
+        return new StrategyContext("005930", sig, 50, RecommendationType.HOLD, null, false, false);
+    }
+
+    @Test
+    void 신선도_요구시엔_freshActive_하나로_판정한다() {
+        assertThat(MomentumStrategy.baseReject(ctx(true, true, 2.0), true, 1.5)).isNull();
+        assertThat(MomentumStrategy.baseReject(ctx(true, false, 2.0), true, 1.5)).isEqualTo("NOT_FRESH");
+    }
+
+    @Test
+    void 신선도를_꺼도_거래량급증과_상승은_계속_요구한다() {
+        // ⚠️ 핵심 — freshActive는 (분봉신선 AND 급증 AND 상승)이라, 그냥 무시하면 A의 정체성인 '상승'까지 사라진다.
+        assertThat(MomentumStrategy.baseReject(ctx(true, false, 2.0), false, 1.5)).isNull();      // 신선도만 해제
+        assertThat(MomentumStrategy.baseReject(ctx(false, false, 2.0), false, 1.5)).isEqualTo("NO_VOLUME");
+        assertThat(MomentumStrategy.baseReject(ctx(true, false, 0.5), false, 1.5)).isEqualTo("NOT_RISING");
+        assertThat(MomentumStrategy.baseReject(ctx(true, false, -3.0), false, 1.5)).isEqualTo("NOT_RISING");
+    }
+
+    @Test
+    void 상승_경계는_minChangeRate_포함() {
+        assertThat(MomentumStrategy.baseReject(ctx(true, false, 1.5), false, 1.5)).isNull();
     }
 }

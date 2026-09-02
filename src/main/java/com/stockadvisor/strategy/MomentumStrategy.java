@@ -13,12 +13,16 @@ public class MomentumStrategy implements TradingStrategy {
 
     private final SignalProperties props;
     private final boolean requireRisingFlow;   // 진입시점 지수흐름(mom30)<0이면 보류. 기본 off
+    private final boolean requireFresh;        // 분봉 신선도·활성도 요구. 기본 on(종전 동작)
 
     public MomentumStrategy(SignalProperties props,
                             @Value("${stockadvisor.signal.momentum-require-rising-flow:false}")
-                            boolean requireRisingFlow) {
+                            boolean requireRisingFlow,
+                            @Value("${stockadvisor.signal.momentum-require-fresh:true}")
+                            boolean requireFresh) {
         this.props = props;
         this.requireRisingFlow = requireRisingFlow;
+        this.requireFresh = requireFresh;
     }
 
     @Override
@@ -38,12 +42,36 @@ public class MomentumStrategy implements TradingStrategy {
 
     @Override
     public String rejectReason(StrategyContext ctx) {
-        // freshActive 는 내부적으로 거래량급증 + 상승(+minChangeRate)을 이미 포함
-        if (!ctx.signal().freshActive()) return "NOT_FRESH";
+        String base = baseReject(ctx, requireFresh, props.minChangeRate());
+        if (base != null) return base;
         if (ctx.recScore() < props.minOpinionScore()) return "SCORE";
         // 흐름↓ 스킵(마지막 게이트) — A 조건을 다 통과한 후보만 흐름으로 최종 판정.
         // 그래야 FLOW_DOWN 대조군 = "A 조건 다 만족했으나 흐름↓" → ENTERED와 직접 비교 가능(필터 forward 검증).
         return flowReject(ctx.indexMom30(), requireRisingFlow);
+    }
+
+    /**
+     * A의 기본 조건(순수) — {@code requireFresh}면 종전대로 {@code freshActive} 하나로, 아니면 그 구성요소를 분해해
+     * <b>거래량급증 + 상승만</b> 요구한다.
+     *
+     * <p>⚠️ <b>분해가 이 메서드의 존재 이유다.</b> {@code freshActive = 분봉신선·활발 AND 거래량급증 AND 상승}으로
+     * <b>세 조건이 묶여 있어서</b>, 신선도를 끄겠다고 이 플래그 하나를 통째로 무시하면 A의 정체성인 <b>"상승을 산다"</b>까지
+     * 같이 사라진다(하락 중인 공시 종목도 진입하게 된다). 그건 필터 완화가 아니라 다른 전략이다.</p>
+     *
+     * <p><b>근거</b>(2026-09-02 `control-analysis`, close, 기간 정렬): A의 차단분 {@code NOT_FRESH}가
+     * <b>−0.33%(n=295, 44거래일)</b>로 같은 창 진입분 <b>−0.83%(n=86)</b>보다 <b>+0.52%p 낫다</b> —
+     * 즉 신선도 요구가 더 나은 후보를 버리고 있다. F가 2026-08-14에 정확히 같은 근거
+     * ({@code NOT_FRESH} +0.47% vs 진입 −1.35%)로 {@code ma-trend-require-fresh}를 원복한 전례가 있고,
+     * A의 차단분은 44거래일에 걸쳐 있어 단일일 클러스터도 아니다.</p>
+     *
+     * <p>⚠️ 진입 n=86으로 얇다(A는 공시 경로라 진입 자체가 드물다). ⚠️ 기대효과는 흑자 전환이 아니라
+     * <b>출혈 감소</b>다 — 어느 쪽이든 A는 음수다. ⚠️ 끄면 {@code NO_VOLUME}/{@code NOT_RISING}이 새 대조군
+     * 사유로 남아 되돌릴 근거가 계속 쌓인다.</p>
+     */
+    static String baseReject(StrategyContext ctx, boolean requireFresh, double minChangeRate) {
+        if (requireFresh) return ctx.signal().freshActive() ? null : "NOT_FRESH";
+        if (!ctx.signal().volumeSpike()) return "NO_VOLUME";
+        return ctx.signal().changeRate() < minChangeRate ? "NOT_RISING" : null;
     }
 
     /**

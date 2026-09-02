@@ -23,8 +23,40 @@ class StrategyStopProviderTest {
     }
 
     private StrategyStopProvider svc(boolean enabled, double defaultStop, List<MaeAnalysisService.StrategyHeat> heats) {
+        return svc(enabled, defaultStop, heats, "");
+    }
+
+    private StrategyStopProvider svc(boolean enabled, double defaultStop, List<MaeAnalysisService.StrategyHeat> heats,
+                                     String minStopPerStrategyCsv) {
         lenient().when(mae.analyze()).thenReturn(heats);
-        return new StrategyStopProvider(mae, props(enabled), defaultStop);
+        return new StrategyStopProvider(mae, props(enabled), defaultStop, minStopPerStrategyCsv);
+    }
+
+    @Test
+    void 전략별_손절하한이_전역하한을_대체한다() {
+        // L 실측 재현: 승자 worst10 −2.53 → 전역 하한 3.0에 클램프돼 −3.0%가 되던 것을, 전략별 하한 7.0으로 넓힌다.
+        var heats = List.of(heat("REVERSAL_L", -2.53, 125), heat("MOMENTUM_A", -4.85, 40));
+
+        StrategyStopProvider p = svc(true, 7.0, heats, "REVERSAL_L:7.0");
+
+        assertThat(p.stopPct("REVERSAL_L")).isCloseTo(7.0, within(0.01));
+        assertThat(p.stopPct("MOMENTUM_A")).isCloseTo(4.9, within(0.01));   // 미지정 전략은 전역 하한 그대로(round1)
+    }
+
+    @Test
+    void 전략별_손절하한도_상한을_넘지_못한다() {
+        // max-stop-pct 10.0 — 하한을 12로 줘도 "손절선 ≤ 상한" 불변식이 유지돼야 한다.
+        StrategyStopProvider p = svc(true, 7.0, List.of(heat("REVERSAL_L", -2.53, 125)), "REVERSAL_L:12");
+        assertThat(p.stopPct("REVERSAL_L")).isCloseTo(10.0, within(0.01));
+    }
+
+    @Test
+    void csv_오타나_0이면_전역하한으로_degrade() {
+        // 손절선이 0이 되면 손절이 사라지는 것이라, 잘못된 설정은 무시하고 전역값으로 되돌아가는 게 fail-safe다.
+        var heats = List.of(heat("REVERSAL_L", -2.53, 125));
+        assertThat(svc(true, 7.0, heats, "REVERSAL_L:abc").stopPct("REVERSAL_L")).isCloseTo(3.0, within(0.01));
+        assertThat(svc(true, 7.0, heats, "REVERSAL_L:0").stopPct("REVERSAL_L")).isCloseTo(3.0, within(0.01));
+        assertThat(svc(true, 7.0, heats, "REVERSAL_L").stopPct("REVERSAL_L")).isCloseTo(3.0, within(0.01));
     }
 
     /** 승자 worst10=worst10, n=winners 인 heat. */
