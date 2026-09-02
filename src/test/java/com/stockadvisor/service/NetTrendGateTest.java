@@ -60,7 +60,7 @@ class NetTrendGateTest {
         StrategyPerformanceGate g = new StrategyPerformanceGate(repo, p, regimeSvc, costModel,
                 mock(StrategyHoldTimeProvider.class), mock(OutcomeSampleRepository.class), List.of(),
                 COST, "", "nextClose", 0.0, false, false, "", "", "", "");
-        g.configureNetTrend(trendOn, 5, 0.05, 0.05);
+        g.configureNetTrend(trendOn, 5, 0.05, 0.05, 0.0);
         return g;
     }
 
@@ -76,9 +76,10 @@ class NetTrendGateTest {
     // ── 게이트 통합 ────────────────────────────────────────────────────────────────
 
     @Test
-    void 총net이_음수여도_상승곡선이면_연다() {
-        // 일별 gross −2.0 → 0.0 (기울기 +0.5%p/일). 평균 gross −1.0 → net −1.18 < 기준 0.3 → 수준 판정은 차단.
-        var rows = daily("REVERSAL_L", new double[]{-2.0, -1.5, -1.0, -0.5, 0.0}, 6);
+    void 총net이_음수여도_상승곡선이고_마지막날이_흑자면_연다() {
+        // 일별 gross −1.5 → +0.5 (기울기 +0.5%p/일). 평균 gross −0.5 → net −0.68 < 기준 0.3 → 수준 판정은 차단.
+        // 마지막 판정근거일 net = 0.5 − 0.18 = +0.32 (흑자) → 상승 요건 충족.
+        var rows = daily("REVERSAL_L", new double[]{-1.5, -1.0, -0.5, 0.0, 0.5}, 6);
 
         var blocked = gate(props(30, 0.3), rows, false).evaluate("REVERSAL_L");
         assertThat(blocked.allowed()).isFalse();   // 종전 동작(수준 판정)
@@ -116,6 +117,22 @@ class NetTrendGateTest {
         assertThat(d.reason()).contains("성과 미달");   // 방향이 없으면 수준이 판정자
     }
 
+    /**
+     * 기울기만으로는 <b>"덜 지는 중"과 "이기는 중"이 구분되지 않는다</b> — −2.5%에서 −0.5%로 개선되는 전략도
+     * 상승곡선이지만 마지막 날까지 여전히 적자다. 그런 회복은 열지 않는다.
+     */
+    @Test
+    void 상승곡선이어도_마지막_판정근거일이_적자면_열지_않는다() {
+        // 일별 gross −2.5 → −0.5 (기울기 +0.5%p/일, 전수 LOO도 양수). 마지막 net = −0.5 − 0.18 = −0.68 (적자).
+        var rows = daily("REVERSAL_L", new double[]{-2.5, -2.0, -1.5, -1.0, -0.5}, 6);
+        var d = gate(props(30, 0.3), rows, true).evaluate("REVERSAL_L");
+
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).doesNotContain("net 상승추세 통과");
+        assertThat(d.reason()).contains("마지막");        // 왜 안 열렸는지 태그로 드러난다
+        assertThat(d.reason()).contains("평탄");          // 상승으로 인정 안 됨
+    }
+
     @Test
     void 하루가_만든_반등으로는_열리지_않는다() {
         // 0,0,0,0,+5 — 기울기는 양수지만 마지막 하루를 빼면 0이 된다(전수 LOO 미충족) → 상승으로 인정 안 함.
@@ -134,6 +151,7 @@ class NetTrendGateTest {
     }
 
     // ── 순수함수 ──────────────────────────────────────────────────────────────────
+    // ⚠️ 아래는 기울기·LOO 로직만 격리해 보려고 마지막날 요건을 −99로 사실상 끈다(위 게이트 통합에서 별도 검증).
 
     @Test
     void 표본_수로_가중한다_1건짜리_날이_기울기를_끌고가지_못한다() {
@@ -142,7 +160,7 @@ class NetTrendGateTest {
         for (int i = 0; i < 4; i++) m.put(String.format("202608%02d", i + 10), new double[]{20, 0});
         m.put("20260814", new double[]{1, 10});
 
-        var tr = StrategyPerformanceGate.netTrend(m, 5, 0.05, 0.05);
+        var tr = StrategyPerformanceGate.netTrend(m, 5, 0.05, 0.05, -99.0);
         assertThat(tr).isNotNull();
         assertThat(tr.slope()).isPositive();
         assertThat(tr.rising()).isFalse();   // 그 하루를 빼면 기울기 0 → 전수 LOO 미충족
@@ -151,7 +169,7 @@ class NetTrendGateTest {
     @Test
     void LOO에서_가운데_하루를_빼도_시간축이_압축되지_않는다() {
         // y = x (기울기 1). 어느 하루를 빼도 기울기는 1이어야 한다 — 남은 날의 x를 다시 매기면 1.4가 나온다.
-        var tr = StrategyPerformanceGate.netTrend(days(0, 1, 2, 3, 4), 5, 0.05, 0.05);
+        var tr = StrategyPerformanceGate.netTrend(days(0, 1, 2, 3, 4), 5, 0.05, 0.05, -99.0);
         assertThat(tr).isNotNull();
         assertThat(tr.slope()).isEqualTo(1.0, within(1e-9));
         assertThat(tr.looMin()).isEqualTo(1.0, within(1e-9));
@@ -162,7 +180,7 @@ class NetTrendGateTest {
     @Test
     void 데드밴드_안이면_상승도_하락도_아니다() {
         // 기울기 +0.01%p/일 < 문턱 0.05
-        var tr = StrategyPerformanceGate.netTrend(days(0, 0.01, 0.02, 0.03, 0.04), 5, 0.05, 0.05);
+        var tr = StrategyPerformanceGate.netTrend(days(0, 0.01, 0.02, 0.03, 0.04), 5, 0.05, 0.05, -99.0);
         assertThat(tr).isNotNull();
         assertThat(tr.rising()).isFalse();
         assertThat(tr.falling()).isFalse();
@@ -172,7 +190,7 @@ class NetTrendGateTest {
     @Test
     void 하락은_LOO없이_기울기만으로_즉시_판정된다() {
         // 0,0,0,0,−5 — 마지막 하루가 만든 하락이지만 닫는 방향엔 LOO를 요구하지 않는다(리스크 축소는 빠르게).
-        var tr = StrategyPerformanceGate.netTrend(days(0, 0, 0, 0, -5), 5, 0.05, 0.05);
+        var tr = StrategyPerformanceGate.netTrend(days(0, 0, 0, 0, -5), 5, 0.05, 0.05, -99.0);
         assertThat(tr).isNotNull();
         assertThat(tr.falling()).isTrue();
         assertThat(tr.looMax()).isEqualTo(0.0, within(1e-9));   // 그 하루를 빼면 평탄인데도 닫는다

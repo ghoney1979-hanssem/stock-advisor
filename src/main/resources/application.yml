@@ -335,12 +335,14 @@ stockadvisor:
       breadth-min-samples: ${TRADING_PERF_GATE_BREADTH_MIN_SAMPLES:20}
       # net 추세 조건부(2026-09-02) — 게이트를 net의 '수준'이 아니라 '방향'으로 판정.
       # 총 net이 −여도 상승곡선이면 열고, +여도 하락곡선이면 닫는다. 데드밴드 안(평탄)이면 종전 절대 net 판정.
-      # 비대칭: 닫기는 기울기만으로 즉시 / 열기는 기울기 + 전수 LOO(어느 하루를 빼도 기울기가 양수)까지 요구.
+      # 비대칭: 닫기는 기울기만으로 즉시 / 열기는 기울기 + 전수 LOO(어느 하루를 빼도 기울기가 양수)
+      #        + 마지막 판정근거일 net 흑자까지 요구(기울기만으로는 "덜 지는 중"과 "이기는 중"이 안 갈린다).
       # 표본 수 요건·클러스터 가드는 불변(추세는 '방향'만 바꾼다). 코드 기본 off.
       net-trend-conditional: ${TRADING_PERF_GATE_NET_TREND_CONDITIONAL:false}
       net-trend-min-days: ${TRADING_PERF_GATE_NET_TREND_MIN_DAYS:5}    # 추세 판정 최소 거래일(하나 빼고도 3점이 남아야 LOO가 의미)
       net-trend-up-pct: ${TRADING_PERF_GATE_NET_TREND_UP_PCT:0.05}     # 상승 판정 문턱(%p/거래일) — 미만이면 '평탄'
       net-trend-down-pct: ${TRADING_PERF_GATE_NET_TREND_DOWN_PCT:0.05} # 하락 판정 문턱(%p/거래일, 양수 지정)
+      net-trend-last-day-min-pct: ${TRADING_PERF_GATE_NET_TREND_LAST_DAY_MIN_PCT:0}   # 상승 판정 전용 추가 요건 — 마지막 판정근거일 net이 이 값 초과여야 연다(0=흑자). 하락엔 미적용
       inverse-realized-since: ${TRADING_PERF_GATE_INVERSE_REALIZED_SINCE:}
       inverse-min-net-avg-pct: ${TRADING_PERF_GATE_INVERSE_MIN_NET:0}   # INVERSE 버킷 전용 net 문턱(%) — 헤지 다리 완화용(2026-07-24). 0=공통 min-net(0.3) 사용
       close-net-avg-pct: ${TRADING_PERF_GATE_CLOSE_NET_AVG_PCT:0.3}   # 히스테리시스 닫기 문턱(%) — 열려있으면 이 값까지 유지(열 땐 min-net 0.3). <min-net이면 활성(예 −0.2), ≥min-net이면 off(기본 0.3=off). 문턱 근처 여닫이 진동·역선택 억제

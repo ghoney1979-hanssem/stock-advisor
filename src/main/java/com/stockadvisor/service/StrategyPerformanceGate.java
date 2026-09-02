@@ -152,8 +152,11 @@ public class StrategyPerformanceGate {
     //
     // ⚠️ <b>비대칭</b>이 이 설계의 핵심 — 이 시스템의 다른 모든 가드와 같은 원칙(리스크 축소는 빠르게, 확대는 느리게):
     //   · <b>닫기</b>(하락곡선)는 기울기 하나로 즉시 — LOO 요구 없음.
-    //   · <b>열기</b>(상승곡선)는 기울기 + <b>어느 하루를 빼도 기울기 부호가 유지</b>될 것(전수 LOO).
-    //     하루가 만든 반등으로 게이트가 열리는 것을 막는다(클러스터·LOO 가드가 반복해 잡아온 바로 그 실패 유형).
+    //   · <b>열기</b>(상승곡선)는 기울기 + <b>어느 하루를 빼도 기울기 부호가 유지</b>될 것(전수 LOO)
+    //     + <b>마지막 판정근거일 net이 흑자</b>일 것.
+    //     앞의 둘은 "하루가 만든 반등으로 열리는 것"을 막고(클러스터·LOO 가드가 반복해 잡아온 실패 유형),
+    //     마지막 하나는 <b>"덜 지는 중"과 "이기는 중"을 가른다</b> — 기울기만 보면 −4%→−2% 개선도 상승곡선이라
+    //     열리는데 그건 여전히 손실이다.
     //   · 데드밴드 안(평탄)이면 <b>종전 절대 net 판정으로 fallback</b> — 방향이 없을 땐 수준이 답이다.
     //
     // ⚠️ 표본 수 요건(minSamples/flowMinSamples/breadthMinSamples)·클러스터 가드는 <b>그대로</b>다 —
@@ -170,18 +173,29 @@ public class StrategyPerformanceGate {
     /** 하락 판정 문턱(%p/거래일, 양수로 지정). 데드밴드 하한. */
     @Value("${stockadvisor.trading.perf-gate.net-trend-down-pct:0.05}")
     private double netTrendDownPct = 0.05;
+    /**
+     * 상승 판정의 추가 요건 — <b>마지막 판정근거일 net이 이 값을 넘어야</b> 연다(기본 0 = 흑자여야 함).
+     *
+     * <p>기울기만 보면 "덜 지는 중"과 "이기는 중"이 구분되지 않는다. 이 조건이 그 둘을 가른다.
+     * 하락 판정엔 적용하지 않는다(닫는 방향은 빠르게 — 비대칭 유지).</p>
+     */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-last-day-min-pct:0}")
+    private double netTrendLastDayMinPct = 0;
 
     /** 테스트용 — 추세 레이어 구성. */
-    void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct) {
+    void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct, double lastDayMinPct) {
         this.netTrendConditional = enabled;
         this.netTrendMinDays = minDays;
         this.netTrendUpPct = upPct;
         this.netTrendDownPct = downPct;
+        this.netTrendLastDayMinPct = lastDayMinPct;
     }
 
     /** 버킷의 일별 net 맵 → 추세(비활성이거나 거래일 부족이면 null=판정 생략). */
     private NetTrend trendOf(java.util.Map<String, double[]> days) {
-        return netTrendConditional ? netTrend(days, netTrendMinDays, netTrendUpPct, netTrendDownPct) : null;
+        return netTrendConditional
+                ? netTrend(days, netTrendMinDays, netTrendUpPct, netTrendDownPct, netTrendLastDayMinPct)
+                : null;
     }
 
     /**
@@ -787,12 +801,21 @@ public class StrategyPerformanceGate {
      * 양수</b>일 때만 성립한다(= 어느 하루를 빼도 상승) — 반등 하루가 게이트를 여는 것을 막는다. 하락 판정에는
      * LOO를 요구하지 않는다(닫는 방향은 빠르게).</p>
      *
+     * <p><b>마지막 판정근거일 net &gt; {@code lastDayMinPct}</b>(2026-09-02 추가, 상승 판정 전용): 기울기만 보면
+     * <b>"덜 지는 중"과 "이기는 중"이 구분되지 않는다</b> — −4%에서 −2%로 개선되는 전략도 상승곡선이라
+     * 열려버리고, 그건 여전히 손실이다. 마지막으로 판정 근거가 된 거래일의 net이 실제로 <b>흑자</b>여야
+     * 연다(net은 이미 비용 차감분이라 &gt;0 = 진짜 흑자). 하락 판정엔 요구하지 않는다(비대칭 유지).</p>
+     *
+     * <p>⚠️ 마지막 날 표본이 1건일 수도 있다. 그래도 안전한 이유는 이 조건이 <b>조이는 방향으로만</b>
+     * 작용하기 때문이다 — 잘못 닫을 수는 있어도 잘못 열 수는 없다(fail-closed).</p>
+     *
      * <p>⚠️ 하루를 뺄 때 <b>남은 날의 x는 원래 인덱스를 유지</b>한다. 다시 0..k-2로 매기면 가운데 하루를 뺄 때
      * 시간축이 압축돼 기울기가 부풀려진다.</p>
      *
      * @return 거래일이 {@code minDays} 미만이거나 기울기가 정의되지 않으면 null(판정 생략)
      */
-    static NetTrend netTrend(java.util.Map<String, double[]> days, int minDays, double upPct, double downPct) {
+    static NetTrend netTrend(java.util.Map<String, double[]> days, int minDays, double upPct, double downPct,
+                             double lastDayMinPct) {
         if (days == null || days.size() < Math.max(3, minDays)) return null;
         java.util.List<String> keys = new java.util.ArrayList<>(days.keySet());
         java.util.Collections.sort(keys);   // yyyyMMdd 고정폭 → 사전식 정렬이 곧 시간순
@@ -815,10 +838,13 @@ public class StrategyPerformanceGate {
             looMax = Math.max(looMax, sd);
         }
         boolean looComputed = looMin != Double.POSITIVE_INFINITY;
-        boolean rising = slope > 0 && slope >= upPct && looComputed && looMin > 0;
+        // 마지막 판정근거일 = 이 버킷에 표본이 있는 가장 최근 거래일(달력상 어제가 아니라 '마지막으로 판정 근거가 된 날').
+        double lastNet = y[k - 1];
+        boolean rising = slope > 0 && slope >= upPct && looComputed && looMin > 0 && lastNet > lastDayMinPct;
         boolean falling = slope < 0 && slope <= -downPct;
         return new NetTrend(slope, k, rising, falling,
-                looComputed ? looMin : null, looComputed ? looMax : null);
+                looComputed ? looMin : null, looComputed ? looMax : null,
+                keys.get(k - 1), lastNet, (int) w[k - 1]);
     }
 
     /** 표본가중 최소제곱 기울기. {@code skip}(음수면 없음) 인덱스는 제외하되 남은 점의 x는 원래 인덱스 유지. */
@@ -840,11 +866,13 @@ public class StrategyPerformanceGate {
         return (sw * sxy - sx * sy) / denom;
     }
 
-    /** 버킷 net의 방향 — 사유문에 기울기·거래일·LOO 범위까지 실어 "왜 열렸나/닫혔나"를 드러낸다. */
-    record NetTrend(double slope, int days, boolean rising, boolean falling, Double looMin, Double looMax) {
+    /** 버킷 net의 방향 — 사유문에 기울기·거래일·LOO 범위·마지막 판정근거일까지 실어 "왜 열렸나/닫혔나"를 드러낸다. */
+    record NetTrend(double slope, int days, boolean rising, boolean falling, Double looMin, Double looMax,
+                    String lastDay, double lastDayNet, int lastDayN) {
         String tag() {
             String s = String.format(" ·net추세 %+.3f%%p/일(%d거래일", slope, days);
             if (looMin != null) s += String.format(", LOO %+.3f~%+.3f", looMin, looMax);
+            s += String.format(", 마지막 %s net %+.2f%%(n=%d)", lastDay, lastDayNet, lastDayN);
             return s + (rising ? ", 상승" : falling ? ", 하락" : ", 평탄") + ")";
         }
     }
