@@ -192,6 +192,21 @@ class NetTrendGateTest {
         assertThat(d.allowed()).isTrue();
         assertThat(d.fallback()).isTrue();                  // 여전히 축소사이징 부트스트랩
         assertThat(d.reason()).contains("부트스트랩(표본");   // 정상 졸업이 아니다
+        // ⚠️ 열린 채 통과할 때도 추세를 노출해야 "왜 안 닫혔나"를 알 수 있다(LOO 태그와 같은 사상).
+        assertThat(d.reason()).contains("net추세");
+    }
+
+    @Test
+    void 부트스트랩이_열린_채_통과해도_추세를_노출한다() {
+        // 거래일 4일 → 추세 판정 자체가 불가. 사유만 보고 "판정 생략"인지 "평탄 통과"인지 구분되어야 한다.
+        var few = daily("REVERSAL_L", new double[]{1.0, 0.5, 0.0, -0.5}, 5);
+        var d = bootstrapGate(few, true).evaluate("REVERSAL_L");
+        assertThat(d.allowed()).isTrue();
+        assertThat(d.reason()).contains("net추세(거래일 부족 — 판정 생략)");
+
+        // 평탄이면 기울기·마지막일이 그대로 실려 나온다
+        var flat = daily("REVERSAL_L", new double[]{1.0, 1.0, 1.0, 1.0, 1.0}, 5);
+        assertThat(bootstrapGate(flat, true).evaluate("REVERSAL_L").reason()).contains("평탄");
     }
 
     // ── 순수함수 ──────────────────────────────────────────────────────────────────

@@ -357,8 +357,10 @@ public class StrategyPerformanceGate {
                         n, avg, null, "INVERSE", false);
             }
             return new GateDecision(strategy, true,
-                    String.format("[INVERSE·실현손익%s] 인버스 부트스트랩(실현표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)",
-                            poolTag, n, minSamples, props.inverseBootstrapSizeMult()),
+                    String.format("[INVERSE·실현손익%s] 인버스 부트스트랩(실현표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)%s",
+                            poolTag, n, minSamples, props.inverseBootstrapSizeMult(),
+                            trBoot == null ? (netTrendClosesBootstrap ? " ·net추세(거래일 부족 — 판정 생략)" : "")
+                                    : trBoot.tag()),
                     n, avg, null, "INVERSE", true);
         }
         return new GateDecision(strategy, false,
@@ -686,27 +688,34 @@ public class StrategyPerformanceGate {
                             regimeTag, n, minSamples, nAll, trBoot.tag()),
                     n, avg, regimeName, market, false);
         }
+        // ⚠️ 차단될 때만 태그를 붙이면 <b>"왜 안 닫혔나"를 알 수 없다</b> — 거래일이 부족해 판정 자체를 못 한 것인지,
+        // 평탄이라 통과한 것인지가 사유만 봐선 구분되지 않는다(실측 2026-09-02: G KOSPI가 열린 채 남았는데 이유 미상).
+        // LOO 태그가 "통과/차단 무관 항상 노출"인 것과 같은 사상 — 아래 부트스트랩·fail-closed 경로에도 붙인다.
+        String bootTrendTag = trBoot == null
+                ? (netTrendClosesBootstrap ? " ·net추세(거래일 부족 — 판정 생략)" : "")
+                : trBoot.tag();
         // INVERSE 부트스트랩: 표본 미달이어도 축소사이징(inverseBootstrapSizeMult)으로 실주문 허용 — 적은 비용으로
         // 실표본을 수집(폭락일에만 쌓이는 인버스 특성 보완). 표본이 inverseMinSamples에 차면 이 분기에 안 오고
         // 위 엄격 경로로 자동 졸업: net ≥ 기준이면 정상 사이징(제한 해제), 미달이면 차단(성과 미달을 부트스트랩으로 우회 불가).
         if ("INVERSE".equals(market) && props.inverseBootstrapSizeMult() > 0) {
             return new GateDecision(strategy, true,
-                    String.format("%s인버스 부트스트랩(표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)",
-                            regimeTag, n, minSamples, props.inverseBootstrapSizeMult()),
+                    String.format("%s인버스 부트스트랩(표본 %d/%d) — 축소진입 ×%.1f(검증 전 실표본 수집)%s",
+                            regimeTag, n, minSamples, props.inverseBootstrapSizeMult(), bootTrendTag),
                     n, avg, regimeName, market, true);
         }
         // 일반 부트스트랩(재검증 다리): since 리셋 등으로 표본 미달이어도 지정 전략은 축소사이징(fallbackSizeMult)으로 실주문 —
         // 로직 변경 후 완전정지 없이 실표본 수집. 표본이 minSamples에 차면 위 엄격 경로로 자동 졸업(미달이면 차단, 우회 불가).
         if (bootstrapStrategies.contains(strategy)) {
             return new GateDecision(strategy, true,
-                    String.format("%s부트스트랩(표본 %d/%d%s) — 축소진입(재검증 중 실표본 수집)",
-                            regimeTag, n, minSamples, sinceReset ? ", since " + since : ""),
+                    String.format("%s부트스트랩(표본 %d/%d%s) — 축소진입(재검증 중 실표본 수집)%s",
+                            regimeTag, n, minSamples, sinceReset ? ", since " + since : "", bootTrendTag),
                     n, avg, regimeName, market, true);
         }
         // fallback 비활성 → 기존 fail-closed
         return new GateDecision(strategy, false,
-                String.format("%s표본 부족(%d/%d%s) — 미검증 전략 실주문 차단",
-                        regimeTag, n, minSamples, sinceReset ? ", since " + since : ""), n, avg, regimeName, market, false);
+                String.format("%s표본 부족(%d/%d%s) — 미검증 전략 실주문 차단%s",
+                        regimeTag, n, minSamples, sinceReset ? ", since " + since : "", bootTrendTag),
+                n, avg, regimeName, market, false);
     }
 
     /** 전략×시장(KOSPI/KOSDAQ) 게이트 상태(가시화/관리 API용) — 시장별 국면 매칭 반영. */
