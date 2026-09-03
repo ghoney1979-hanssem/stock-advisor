@@ -214,8 +214,14 @@ Phase 5는 전부 **인트라데이 horizon**(exit/close)으로 본다. 그런�
 
 ### 데이터 제약 — 먼저 확인할 것
 - 일봉 경로(`outcome_daily_mark`, D0~D+15)는 **`TRADING_MULTIDAY_STRATEGIES` csv에 지정된 전략만** 수집한다.
-  2026-09-03 실측: **C(189)·D(922)·J(283)**만 있고 나머지는 0. P는 방금 추가(진입 대기).
-  → 다른 전략까지 발굴하려면 **그 csv에 먼저 넣어야 하고, forward-only(소급 불가)**다. "측정은 지금 시작" 원칙 적용.
+  ✅ **소급 가능하다** — `POST /admin/backfill-multiday-marks`가 KIS 일봉(~30거래일 창)으로 최근 45캘린더일 진입분을
+  즉시 채운다(null만 채우고 재실행 안전, outcome당 1콜). **forward-only가 아니다** — csv에 전략을 추가한 뒤 백필을
+  돌리면 그날 바로 발굴 대상이 된다.
+  2026-09-03 실행: **3→12개 전략**으로 확대(인버스·M 제외), **3,683건 처리·8분·실패 0**.
+  완주(D+15) 코호트: D 690 · F 464 · H 424 · G 311 · K 276 · J 258 · E 198 · C 175 · B 165 · A 45.
+  ⚠️ L·N은 도입이 최근이라 완주 0 — 15거래일이 지나야 생긴다.
+  ⚠️ **인버스(I)는 대상에서 뺀다** — 당일청산 전용이고 다일 감쇠라 멀티데이 경로가 의미 없다.
+  ⚠️ **~30거래일 창 밖은 영영 못 채운다** — 창이 매일 밀리므로 새 전략을 넣었으면 **그날 바로** 백필할 것.
 - ⚠️ **대조군은 마크가 0행이다**(실측: `control_sample=false` 1,394 outcomes만). 즉 멀티데이엔 **진입-대조군 edge가 없다.**
   Phase 5의 발굴 필터 4번(edge>0)을 그대로 쓸 수 없다 → 아래 대체 반사실을 쓴다.
 
@@ -223,6 +229,7 @@ Phase 5는 전부 **인트라데이 horizon**(exit/close)으로 본다. 그런�
 ```
 multiday-exit-comparison?fullPathsOnly=true      # 전략별 보유D+N/트레일/MA이탈/손절 비교(완주 코호트)
 multiday-marks                                   # 수집 현황(어느 전략이 몇 건인지)
+POST /admin/backfill-multiday-marks              # ⚠️ 새 전략을 csv에 넣었으면 분석 전에 먼저 돌릴 것(소급, ~30거래일 창)
 feature-mining?horizon=nextClose|d2|d3&includeControl=true   # D+1~D+3까지는 feature 축으로도 볼 수 있다
 ```
 ⚠️ **`fullPathsOnly=true` 필수** — 혼합 코호트는 horizon마다 표본이 달라 **코호트 교체의 산물**을 만든다
