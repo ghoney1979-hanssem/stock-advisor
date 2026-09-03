@@ -118,4 +118,81 @@ class MultidayExitTest {
     void 비활성이면_DISABLED() {
         assertThat(p(false).rejectReason(ctx(-5.0, true, true, 50))).isEqualTo("DISABLED");
     }
+
+    // ── 게이트 채점 horizon(2026-09-03) ────────────────────────────────────────────
+    // ⚠️ 분 단위 마크로 채점하면 게이트가 '한 번도 검증한 적 없는 청산'으로 실주문을 열어준다
+    //    (2026-08-18 비-TIME horizon 버그와 같은 유형). 일봉 경로에 라이브와 같은 판정 함수를 적용한다.
+
+    private java.util.List<Long> path(long... closes) {
+        java.util.List<Long> l = new java.util.ArrayList<>();
+        for (long c : closes) l.add(c);
+        return l;
+    }
+
+    @Test
+    void 시뮬은_라이브와_같은_규칙으로_청산가를_돌려준다() {
+        // D+1 10,300(무장 전) · D+2 10,600(+6% 무장) · D+3 10,380(고점 대비 −2.08% → 발동)
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, path(10_300, 10_600, 10_380, 11_000), ARM, DROP, MAX)).isEqualTo(10_380L);
+    }
+
+    @Test
+    void 무장하지_못하면_만기_종가로_청산된다() {
+        // 한 번도 +5%를 못 찍음 → 트레일 미발동 → 마지막 관측일 종가
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, path(10_200, 9_900, 10_100), ARM, DROP, MAX)).isEqualTo(10_100L);
+    }
+
+    @Test
+    void maxHold를_넘는_경로는_잘라서_본다() {
+        // maxHold=2면 D+3의 급등은 안 본다(만기 D+2 종가)
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, path(10_100, 10_200, 20_000), ARM, DROP, 2)).isEqualTo(10_200L);
+    }
+
+    @Test
+    void 경로가_없으면_null이라_채점에서_제외된다() {
+        assertThat(PositionExitService.simulateMultidayExitPrice(10_000, null, ARM, DROP, MAX)).isNull();
+        assertThat(PositionExitService.simulateMultidayExitPrice(10_000, path(), ARM, DROP, MAX)).isNull();
+        assertThat(PositionExitService.simulateMultidayExitPrice(0, path(10_500), ARM, DROP, MAX)).isNull();
+    }
+
+    @Test
+    void 게이트가_멀티데이_전략은_일봉경로로_채점한다() {
+        // 진입 6건(3거래일) — 전부 D+1 10,600(+6% 무장) → D+2 10,380(−2.08% 발동)이면 청산가 10,380 = gross +3.8%.
+        // 분 단위 마크는 일부러 넣지 않는다 — 종전 exit horizon이면 표본 0으로 차단됐을 상황이다.
+        java.util.List<com.stockadvisor.domain.TradeOutcome> rows = new java.util.ArrayList<>();
+        java.util.List<com.stockadvisor.domain.OutcomeDailyMark> marks = new java.util.ArrayList<>();
+        String[] dates = {"20260901", "20260902", "20260903"};
+        for (int i = 0; i < 6; i++) {
+            var o = new com.stockadvisor.domain.TradeOutcome("MULTIDAY_REVERSION_P", null,
+                    String.format("%06d", i), dates[i % 3], 10_000L);
+            org.springframework.test.util.ReflectionTestUtils.setField(o, "id", (long) i);
+            rows.add(o);
+            marks.add(new com.stockadvisor.domain.OutcomeDailyMark((long) i, "MULTIDAY_REVERSION_P", 10_000L, 1, dates[i % 3], 10_600L));
+            marks.add(new com.stockadvisor.domain.OutcomeDailyMark((long) i, "MULTIDAY_REVERSION_P", 10_000L, 2, dates[i % 3], 10_380L));
+        }
+        var repo = org.mockito.Mockito.mock(com.stockadvisor.repository.TradeOutcomeRepository.class);
+        org.mockito.Mockito.when(repo.findByStrategyAndAlertDateGreaterThanEqual(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenReturn(rows);
+        var markRepo = org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeDailyMarkRepository.class);
+        org.mockito.Mockito.when(markRepo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc("MULTIDAY_REVERSION_P"))
+                .thenReturn(marks);
+        var regime = org.mockito.Mockito.mock(MarketRegimeService.class);
+        var cost = org.mockito.Mockito.mock(ExecutionCostModel.class);
+        org.mockito.Mockito.when(cost.estimateRoundTripSlippagePct(org.mockito.ArgumentMatchers.anyLong())).thenReturn(0.0);
+        var props = new com.stockadvisor.config.properties.StrategyPerformanceProperties(
+                true, 20, 5, 0.3, "exit", false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        var gate = new StrategyPerformanceGate(repo, props, regime, cost,
+                org.mockito.Mockito.mock(StrategyHoldTimeProvider.class),
+                org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeSampleRepository.class),
+                java.util.List.of(), 0.22, "", "nextClose", 0.0, false, false, "", "", "", "");
+        gate.configureMultidayScoring("MULTIDAY_REVERSION_P", ARM, DROP, MAX, markRepo);
+
+        var d = gate.evaluate("MULTIDAY_REVERSION_P");
+        assertThat(d.samples()).isEqualTo(6);                       // 분 마크가 없어도 채점된다
+        assertThat(d.netAvgReturnPct()).isEqualTo(3.58);            // (10,380−10,000)/10,000 −0.22 = +3.58%
+        assertThat(d.reason()).contains("멀티데이트레일");            // 어느 horizon으로 쟀는지 드러난다
+        assertThat(d.allowed()).isTrue();
+    }
 }

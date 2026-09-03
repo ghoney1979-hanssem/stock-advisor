@@ -132,6 +132,36 @@ public class StrategyPerformanceGate {
     private int breadthMinSamples = 20;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private MarketBreadthService breadthService;   // 필드주입(생성자 무churn) — 미주입(테스트)이면 폭 레이어 생략
+
+    // ── 멀티데이 채점(2026-09-03) ───────────────────────────────────────────────────
+    // ⚠️ <b>PositionExitService를 주입하지 않는다</b> — Gate → PositionExitService → OrderService → Gate 로
+    // 순환이 생기고, 그건 단위테스트(전부 목)로는 안 잡히고 배포 후 기동 실패로만 드러난다(8/29 생성자 2개 함정과 동류).
+    // 대신 ① <b>판정 규칙</b>은 static {@code PositionExitService.multidayExitReason}을 공유하고
+    //      ② <b>파라미터</b>는 라이브와 <b>같은 프로퍼티 키</b>를 읽어 맞춘다.
+    // 둘 중 하나라도 복제하면 "게이트가 하지 않는 청산을 채점"하게 된다.
+    @Value("${stockadvisor.trading.multiday-exit.strategies:}")
+    private String multidayExitCsv = "";
+    private java.util.Set<String> multidayExitSet = java.util.Set.of();
+    @Value("${stockadvisor.trading.multiday-exit.arm-pct:5.0}")
+    private double multidayArmPct = 5.0;
+    @Value("${stockadvisor.trading.multiday-exit.drop-pct:2.0}")
+    private double multidayDropPct = 2.0;
+    @Value("${stockadvisor.trading.multiday-exit.max-hold-days:15}")
+    private int multidayMaxHoldDays = 15;
+    @jakarta.annotation.PostConstruct
+    void initMultidayExit() { this.multidayExitSet = PolicyGate.parseCsv(multidayExitCsv); }
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.repository.OutcomeDailyMarkRepository dailyMarkRepository;
+
+    /** 테스트용 — 멀티데이 채점 구성. */
+    void configureMultidayScoring(String csv, double armPct, double dropPct, int maxHoldDays,
+                                  com.stockadvisor.repository.OutcomeDailyMarkRepository repo) {
+        this.multidayExitSet = PolicyGate.parseCsv(csv);
+        this.multidayArmPct = armPct;
+        this.multidayDropPct = dropPct;
+        this.multidayMaxHoldDays = maxHoldDays;
+        this.dailyMarkRepository = repo;
+    }
     private static final long BREADTH_FRESH_MINUTES = 40;   // MarketBreadthService.isFresh 와 같은 기준(마감 후·전일분 오발동 방지)
 
     /** 테스트용 — 폭 레이어 구성. */
@@ -488,6 +518,30 @@ public class StrategyPerformanceGate {
                 // 청산방식 조회 실패 → 종전(보유시간 마크)으로 degrade
             }
         }
+        // ── 멀티데이 전략(P 등)은 분 단위 마크로 채점하면 안 된다(2026-09-03) ─────────────────
+        // 실제 청산이 "무장 후 고점 되돌림 / 15거래일 종가"인데 60분 마크로 채점하면 게이트가
+        // <b>한 번도 검증한 적 없는 청산</b>으로 실주문을 열어준다 — 2026-08-18 비-TIME horizon 버그와 같은 유형이고,
+        // 그때 얻은 교훈이 "horizon 규칙은 게이트·집행품질·대조군 분석이 같이 움직여야 한다"였다.
+        // → horizon="multiday": 일봉 마크(outcome_daily_mark)에 <b>라이브와 동일한 판정 함수</b>를 적용해 청산가를 구한다.
+        // ⚠️ 스윙보다 우선(PositionExitService의 분기 순서와 동일하게 맞춘다).
+        // 경로만 미리 모으고 청산가는 outcome 순회에서 계산한다(시뮬에 그 행의 buyPrice가 필요하다).
+        java.util.Map<Long, java.util.List<Long>> multidayPaths = null;
+        if (dailyMarkRepository != null && multidayExitSet.contains(strategy)) {
+            horizon = "multiday";
+            methodTag = "·멀티데이트레일";
+            java.util.Map<Long, java.util.TreeMap<Integer, Long>> byOutcome = new java.util.HashMap<>();
+            for (com.stockadvisor.domain.OutcomeDailyMark m
+                    : dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy)) {
+                if (m.getMarkDays() < 1) continue;   // D0(진입일 종가)은 경로가 아니라 시작점
+                byOutcome.computeIfAbsent(m.getOutcomeId(), k -> new java.util.TreeMap<>())
+                        .put(m.getMarkDays(), m.getClosePrice());
+            }
+            multidayPaths = new java.util.HashMap<>();
+            for (var e : byOutcome.entrySet()) {
+                multidayPaths.put(e.getKey(), new java.util.ArrayList<>(e.getValue().values()));
+            }
+        }
+        final java.util.Map<Long, java.util.List<Long>> mdPaths = multidayPaths;
         // horizon="exit": 전략별 권장 보유시간(PositionExitService가 실제 청산하는 그 마크)의 가격을 OutcomeSample에서
         // 조회해 net을 측정 → "실제로 팔 시점의 수익"으로 검증(당일종가 아님).
         boolean exitMode = "exit".equals(horizon);
@@ -561,7 +615,14 @@ public class StrategyPerformanceGate {
             if (o.isControl()) continue;   // 대조군(미진입) 제외 — 게이트는 '진입 성과'만 검증(스윙 nextClose에서 대조군 오염 방지)
             if (refilter != null && !refilter.test(o)) continue;   // 새 필터라면 걸렀을 구표본 제외(net 정밀 재검증)
             if (marketSplit && !market.equals(o.getEntryMarket())) continue;   // 2D: 다른 시장 제외(양쪽 공통)
-            Long price = exitMode ? exitPriceByOutcome.get(o.getId()) : resultPrice(o, horizon);
+            Long price;
+            if (mdPaths != null) {
+                // 멀티데이: 일봉 경로에 라이브와 동일한 판정 함수를 적용해 청산가를 구한다(마크 미수집이면 null=제외).
+                price = PositionExitService.simulateMultidayExitPrice(o.getBuyPrice(), mdPaths.get(o.getId()),
+                        multidayArmPct, multidayDropPct, multidayMaxHoldDays);
+            } else {
+                price = exitMode ? exitPriceByOutcome.get(o.getId()) : resultPrice(o, horizon);
+            }
             if (price == null || o.getBuyPrice() <= 0) continue;   // exit 마크 미수집 표본은 제외(fail-closed)
             double slip = o.getEntrySlippagePct() != null ? o.getEntrySlippagePct()   // 진입시 실측 스프레드
                     : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());   // 없으면 tick 추정

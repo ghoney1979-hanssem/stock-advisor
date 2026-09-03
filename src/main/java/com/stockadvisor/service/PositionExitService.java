@@ -371,6 +371,40 @@ public class PositionExitService {
     }
 
     /**
+     * 멀티데이 청산가 시뮬(순수, 2026-09-03) — <b>일봉 종가 경로</b>에 위 {@link #multidayExitReason}을 그대로 적용해
+     * "이 규칙으로 팔았다면 얼마였나"를 돌려준다. 게이트 채점 horizon({@code multiday})이 이걸 쓴다.
+     *
+     * <p>⚠️ <b>판정 함수를 재사용하는 게 요점</b> — 시뮬을 따로 구현하면 라이브 청산과 조용히 갈라지고,
+     * 그러면 게이트가 <b>실제로 하지 않는 청산</b>으로 실주문을 열어준다(2026-08-18 비-TIME horizon 버그가 정확히 그것).
+     * 여기선 같은 함수를 호출하므로 규칙이 갈라질 수 없다.</p>
+     *
+     * <p>⚠️ <b>근사</b>: 라이브는 1분마다 현재가를 보지만 이 시뮬은 <b>일봉 종가만</b> 본다 — 장중에 무장·발동했을
+     * 케이스를 놓친다(그래서 시뮬이 라이브보다 늦게 팔고, 대체로 낙관도 비관도 아닌 방향으로 어긋난다).
+     * {@code sessionEnded=true}로 고정하는 것도 같은 이유다(종가 시점 판정).</p>
+     *
+     * @param closesByDay D+1부터 순서대로의 종가(비어 있으면 null)
+     * @return 청산가. 트레일 미발동이면 마지막 관측일 종가(= 만기 종가)
+     */
+    static Long simulateMultidayExitPrice(long buyPrice, java.util.List<Long> closesByDay,
+                                          double armPct, double dropPct, int maxHoldDays) {
+        if (buyPrice <= 0 || closesByDay == null || closesByDay.isEmpty()) return null;
+        long peak = buyPrice;
+        Long last = null;
+        for (int i = 0; i < closesByDay.size(); i++) {
+            int heldDays = i + 1;
+            if (maxHoldDays > 0 && heldDays > maxHoldDays) break;
+            Long c = closesByDay.get(i);
+            if (c == null || c <= 0) continue;
+            last = c;
+            peak = Math.max(peak, c);
+            if (multidayExitReason(buyPrice, c, peak, heldDays, true, armPct, dropPct, maxHoldDays) != null) {
+                return c;
+            }
+        }
+        return last;
+    }
+
+    /**
      * 진입일 이후 경과 <b>거래일</b> 수. {@code daily_price}(하루 1회 갱신)의 실제 거래일을 세고,
      * 미주입·조회실패면 <b>영업일(월~금) 근사</b>로 degrade한다(공휴일을 과대 계산 → 백스톱이 조금 빨라지는 방향).
      */
