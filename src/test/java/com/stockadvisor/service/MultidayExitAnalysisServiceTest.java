@@ -70,7 +70,7 @@ class MultidayExitAnalysisServiceTest {
     @Test
     void buildPaths_outcome별_거래일오름차순_묶기_완주판정() {
         OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
-        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0.22, 3, 20);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0.22, 3, 20, "MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J");
         // 뒤섞인 입력 2 outcomes: #1 완주(D3 도달), #2 미완주(D2까지)
         List<OutcomeDailyMark> marks = List.of(
                 new OutcomeDailyMark(1L, "INDEX_RELATIVE_D", 1000, 2, "20200106", 1200),
@@ -102,7 +102,7 @@ class MultidayExitAnalysisServiceTest {
         }
         OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
         when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
-        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 20);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 20, "MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J");
 
         MultidayExitAnalysisService.MultidayExitComparison mixed = d(svc.compare(false));
         MultidayExitAnalysisService.MultidayExitComparison fixed = d(svc.compare(true));
@@ -134,7 +134,7 @@ class MultidayExitAnalysisServiceTest {
         OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
         when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
         when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
-        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J");
 
         MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
         MultidayExitAnalysisService.MethodResult h1 = hold(c, 1);
@@ -161,7 +161,7 @@ class MultidayExitAnalysisServiceTest {
         OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
         when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
         when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
-        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J");
 
         MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
         MultidayExitAnalysisService.MethodResult h1 = hold(c, 1);
@@ -180,7 +180,7 @@ class MultidayExitAnalysisServiceTest {
         OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
         when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
         // findEntryDatesByStrategy 는 Mockito 기본값(빈 리스트) — 진입일 미상 상황
-        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "MEAN_REVERSION_C,INDEX_RELATIVE_D,VALUE_REVERSAL_J");
 
         MultidayExitAnalysisService.MethodResult h1 = hold(d(svc.compare(true)), 1);
         assertThat(h1.samples()).isEqualTo(6);

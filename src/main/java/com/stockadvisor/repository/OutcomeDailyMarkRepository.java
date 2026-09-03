@@ -20,6 +20,10 @@ public interface OutcomeDailyMarkRepository extends JpaRepository<OutcomeDailyMa
 
     long countByStrategy(String strategy);
 
+    /** 일봉 마크가 실제로 존재하는 전략 목록 — 분석 대상을 하드코딩하지 않기 위한 소스. */
+    @Query("select distinct m.strategy from OutcomeDailyMark m")
+    List<String> findDistinctStrategies();
+
     /**
      * 마크가 있는 outcome 의 <b>진입일</b>(outcomeId, alertDate) 쌍 — 멀티데이 시뮬의 단일일 클러스터 판정용.
      *

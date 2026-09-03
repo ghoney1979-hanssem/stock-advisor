@@ -26,7 +26,11 @@ import java.util.OptionalDouble;
 @Service
 public class MultidayExitAnalysisService {
 
-    private static final String[] STRATEGIES = {"MEAN_REVERSION_C", "INDEX_RELATIVE_D", "VALUE_REVERSAL_J"};
+    // 🐞 2026-09-03: 분석 대상이 {C,D,J} 하드코딩이라, 수집 대상을 12개로 넓히고 백필까지 돌렸는데도
+    //    여전히 셋만 나왔다 — 2026-08-14 exit-hold/exit-method가 A/B/C만 반환하던 것과 <b>같은 유형</b>이다
+    //    (수집은 늘었는데 가시화가 안 따라와, 데이터가 있는데도 "없는 것처럼" 보인다).
+    //    → 대상을 <b>설정(multiday-strategies) ∪ 마크가 실제로 있는 전략</b>에서 도출한다. 설정에서 빠져도
+    //      과거 마크가 있으면 계속 보이고, 새로 추가하면 백필 즉시 나타난다.
     private static final int[] HOLD_DAYS = {1, 3, 5, 10, 15};
     private static final double[] TRAIL_PCT = {5, 8, 10, 12};
     private static final int[] MA_PERIOD = {5, 10};
@@ -35,6 +39,7 @@ public class MultidayExitAnalysisService {
     private static final double MAX_DAY_SHARE_PCT = 80.0;
     private static final int MIN_DISTINCT_DAYS = 3;
 
+    private final java.util.Set<String> configuredStrategies;   // multiday-strategies 설정
     private final OutcomeDailyMarkRepository dailyMarkRepository;
     private final double roundTripPct;
     private final int maxHoldDays;
@@ -43,7 +48,9 @@ public class MultidayExitAnalysisService {
     public MultidayExitAnalysisService(OutcomeDailyMarkRepository dailyMarkRepository,
                                        @Value("${stockadvisor.cost.round-trip-pct:0.22}") double roundTripPct,
                                        @Value("${stockadvisor.trading.multiday-max-hold-days:15}") int maxHoldDays,
-                                       @Value("${stockadvisor.trading.multiday-exit-min-samples:20}") int minSamples) {
+                                       @Value("${stockadvisor.trading.multiday-exit-min-samples:20}") int minSamples,
+                                       @Value("${stockadvisor.trading.multiday-strategies:}") String multidayCsv) {
+        this.configuredStrategies = PolicyGate.parseCsv(multidayCsv);
         this.dailyMarkRepository = dailyMarkRepository;
         this.roundTripPct = roundTripPct;
         this.maxHoldDays = maxHoldDays;
@@ -94,10 +101,21 @@ public class MultidayExitAnalysisService {
      */
     public List<MultidayExitComparison> compare(boolean fullPathsOnly) {
         List<MultidayExitComparison> out = new ArrayList<>();
-        for (String s : STRATEGIES) {
+        for (String s : targetStrategies()) {
             out.add(compareStrategy(s, fullPathsOnly));
         }
         return out;
+    }
+
+    /** 분석 대상 = 설정 ∪ 마크 보유 전략(정렬). 하드코딩 금지 — 수집이 늘면 분석도 따라와야 한다. */
+    private List<String> targetStrategies() {
+        java.util.TreeSet<String> all = new java.util.TreeSet<>(configuredStrategies);
+        try {
+            all.addAll(dailyMarkRepository.findDistinctStrategies());
+        } catch (Exception ignored) {
+            // 조회 실패 → 설정만으로 degrade
+        }
+        return new ArrayList<>(all);
     }
 
     private MultidayExitComparison compareStrategy(String strategy, boolean fullPathsOnly) {
