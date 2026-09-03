@@ -117,6 +117,49 @@ public class PositionExitService {
     void setSessionCloseAggressivePct(double p) { this.sessionCloseAggressivePct = p; }   // 테스트용
 
     private final java.util.Set<String> swingStrategies;   // 오버나잇 스윙 — 장마감 강제청산 대신 익일 종가 청산
+
+    // ── 멀티데이 트레일 청산(2026-09-03, 사용자 지정 — 전략 P) ─────────────────────────────
+    // 스윙(D+1 고정)과 다른 축이다: 여러 거래일을 보유하며 <b>수익률 +arm%에 한 번 도달한 뒤 고점 대비 −drop%</b>면
+    // 매도하고, 미발동이면 max-hold-days(거래일) 백스톱으로 청산한다.
+    //
+    // ⚠️ <b>무장(arm) 요건이 스윙 트레일과의 결정적 차이</b> — 스윙은 `peak > 매수가`이기만 하면 arm돼서
+    // +0.1%만 올라도 −2% 되돌림에 잘린다. 여기선 +5%를 한 번 찍어야 arm되므로 초기 눌림 구간을 통과시킨다
+    // (C의 엣지가 '떨어진 걸 사서 되돌림을 먹는 것'이라 초기 조기컷이 치명적이다).
+    //
+    // ⚠️ <b>안전 오버라이드는 그대로 앞선다</b>(상한가익절 > 손절 > 리스크오프). 즉 서킷 발동일엔 멀티데이
+    // 포지션도 강제청산된다 — 15거래일 보유 전략에는 큰 제약이고(9/2에 실제로 발동했다), 그게 부담이면
+    // 인버스처럼 면제해야 하는데 그건 <b>별도 결정</b>이라 지금은 안전 우선으로 둔다.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.strategies:}")
+    private String multidayExitCsv = "";
+    private volatile java.util.Set<String> multidayExitSet;
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.arm-pct:5.0}")
+    private double multidayArmPct = 5.0;
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.drop-pct:2.0}")
+    private double multidayDropPct = 2.0;
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.max-hold-days:15}")
+    private int multidayMaxHoldDays = 15;
+    /** 거래일 카운트 소스 — {@code daily_price}(16:40 갱신). 미주입/조회실패면 영업일(월~금) 근사로 degrade. */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+
+    /** 테스트용 — 멀티데이 청산 구성. */
+    void configureMultiday(String csv, double armPct, double dropPct, int maxHoldDays) {
+        this.multidayExitCsv = csv;
+        this.multidayExitSet = null;
+        this.multidayArmPct = armPct;
+        this.multidayDropPct = dropPct;
+        this.multidayMaxHoldDays = maxHoldDays;
+    }
+
+    private boolean isMultiday(String strategy) {
+        java.util.Set<String> s = multidayExitSet;
+        if (s == null) {
+            s = PolicyGate.parseCsv(multidayExitCsv);
+            multidayExitSet = s;
+        }
+        return s.contains(strategy);
+    }
+
     // 서킷브레이커 전이 알림용(edge-trigger) — 시장별(KOSPI/KOSDAQ) 발동/해제 시 1회만 통지
     private final java.util.Map<String, Boolean> wasRiskOff = new java.util.concurrent.ConcurrentHashMap<>();
     // 시장폭(breadth) 리스크오프 전이 알림용 — 서킷과 별개 축(진입 차단 전용)
@@ -250,6 +293,11 @@ public class PositionExitService {
                 } else if (inversePos) {
                     // 인버스 전용: 약세 명제 소멸 시 청산, 지속 시 시간 무관 보유. 스윙보다 먼저(인버스는 다일 감쇠 → 무조건 당일 청산).
                     reason = inverseExitReason(pos, sessionEnded, heldMin);
+                } else if (isMultiday(pos.getStrategy())) {
+                    // ②-a 멀티데이 트레일(전략 P) — 스윙보다 먼저 판정(스윙 집합과 겹쳐도 멀티데이가 이긴다).
+                    reason = multidayExitReason(buyPrice, price, pos.getPeakPrice(),
+                            tradingDaysHeld(pos.getOrderDate(), today), sessionEnded,
+                            multidayArmPct, multidayDropPct, multidayMaxHoldDays);
                 } else if (swing) {
                     // ② 스윙(오버나잇): 기본은 익일종가 청산. 트레일%는 fail-closed provider가 결정(검증 전엔 0=보유).
                     //    이익구간(peak>매수)에서만 arm — 초기 눌림을 조기 컷하지 않도록(C 엣지 보존). peak는 위 trackPeak로 당일+익일 갱신.
@@ -290,6 +338,65 @@ public class PositionExitService {
             log.info("포지션 청산 {}건", closed);
         }
         return closed;
+    }
+
+    /**
+     * 멀티데이 트레일 청산 판정(순수, 2026-09-03) — 보유하면 null, 청산이면 사유.
+     *
+     * <p>규칙: <b>수익률이 한 번이라도 +{@code armPct}에 도달</b>(= {@code peak ≥ 매수가×(1+arm/100)})한 뒤
+     * <b>고점 대비 −{@code dropPct}</b>면 매도. 미발동이면 {@code maxHoldDays} <b>거래일</b> 백스톱(그날 장 마감에 청산).</p>
+     *
+     * <p>⚠️ 무장 판정에 <b>현재가가 아니라 고점(peak)</b>을 쓰는 게 요점이다 — 장중에 +6%를 찍고 +3%로 밀린
+     * 포지션은 이미 무장돼야 한다. 현재가로 보면 그 되돌림을 영영 못 잡는다.</p>
+     *
+     * <p>⚠️ 백스톱은 <b>그날 장 마감에만</b> 발사한다({@code sessionEnded}). 장중에 발사하면 15거래일째 아침에
+     * 팔아버려 그날 종가까지의 경로를 통째로 버리는데, 근거 시뮬(일봉 종가)은 <b>종가 청산</b>을 가정했다 —
+     * 시뮬과 실행이 어긋나면 "검증한 적 없는 청산"이 된다(2026-08-18 비-TIME horizon 버그와 같은 유형).</p>
+     *
+     * @param heldDays 진입일 이후 경과 <b>거래일</b> 수(진입 당일=0)
+     */
+    static String multidayExitReason(long buyPrice, long price, Long peak, int heldDays, boolean sessionEnded,
+                                     double armPct, double dropPct, int maxHoldDays) {
+        if (buyPrice <= 0) return null;
+        long p = peak == null ? price : Math.max(peak, price);
+        boolean armed = armPct <= 0 || p >= buyPrice * (1 + armPct / 100.0);
+        if (armed && dropPct > 0 && price <= p * (1 - dropPct / 100.0)) {
+            double gain = (price - buyPrice) * 100.0 / buyPrice;
+            return String.format("멀티데이트레일 -%.1f%%(고점대비, 무장 +%.1f%%, 수익 %+.1f%%)", dropPct, armPct, gain);
+        }
+        if (maxHoldDays > 0 && heldDays >= maxHoldDays && sessionEnded) {
+            return String.format("멀티데이 만기청산(D+%d 종가)", heldDays);
+        }
+        return null;
+    }
+
+    /**
+     * 진입일 이후 경과 <b>거래일</b> 수. {@code daily_price}(하루 1회 갱신)의 실제 거래일을 세고,
+     * 미주입·조회실패면 <b>영업일(월~금) 근사</b>로 degrade한다(공휴일을 과대 계산 → 백스톱이 조금 빨라지는 방향).
+     */
+    private int tradingDaysHeld(String orderDate, String today) {
+        if (orderDate == null || today == null) return 0;
+        if (jdbcTemplate != null) {
+            try {
+                Integer n = jdbcTemplate.queryForObject(
+                        "select count(distinct business_date) from daily_price where business_date > ? and business_date <= ?",
+                        Integer.class, orderDate, today);
+                if (n != null) return n;
+            } catch (Exception ignored) {
+                // degrade — 아래 영업일 근사
+            }
+        }
+        try {
+            java.time.LocalDate a = java.time.LocalDate.parse(orderDate, YYYYMMDD);
+            java.time.LocalDate b = java.time.LocalDate.parse(today, YYYYMMDD);
+            int n = 0;
+            for (java.time.LocalDate d = a.plusDays(1); !d.isAfter(b); d = d.plusDays(1)) {
+                if (d.getDayOfWeek().getValue() <= 5) n++;
+            }
+            return n;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**

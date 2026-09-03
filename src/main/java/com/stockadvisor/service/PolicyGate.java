@@ -31,6 +31,14 @@ public class PolicyGate {
     private final StrategyHoldTimeProvider holdTimeProvider;
     private final java.util.Set<String> swingStrategies;   // 오버나잇 스윙 전략 — 장마감 초과 청산 진입규칙 면제
     private final java.util.Set<String> inverseCodes;      // 인버스 ETF — 시간청산 미적용(지수조건+sessionEnd 백스톱)이라 시간규칙 면제
+    /** 멀티데이 트레일 전략(P 등) — 스윙과 같은 이유로 "장마감 초과 청산" 진입규칙 면제. 필드주입(생성자 무churn). */
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.strategies:}")
+    private String multidayCsv = "";
+    private java.util.Set<String> multidayStrategies = java.util.Set.of();
+    @jakarta.annotation.PostConstruct
+    void initMultiday() { this.multidayStrategies = parseCsv(multidayCsv); }
+    /** 테스트용 — 멀티데이 전략 지정. */
+    void setMultidayStrategies(String csv) { this.multidayStrategies = parseCsv(csv); }
 
     /** 런타임 긴급 정지 스위치(설정 enabled 와 별개). 관리 API 로 토글. */
     private final AtomicBoolean killSwitch = new AtomicBoolean(false);
@@ -109,7 +117,9 @@ public class PolicyGate {
         //    ⚠️ 인버스 ETF도 면제(2026-07-20 실측: 적응형 90분이 이 규칙에 적용돼 15:12 재진입이 오차단) —
         //    인버스 청산은 시간이 아니라 지수조건이고 sessionEnd(15:20) 백스톱이 당일청산을 보장하므로
         //    "청산이 장마감을 넘긴다"는 전제 자체가 성립 안 함. 마감 전 하락 가속(인버스 최적 구간) 진입 보존.
-        if (!swingStrategies.contains(req.strategy()) && !inverseCodes.contains(req.stockCode())) {
+        //    ⚠️ 멀티데이 전략(P 등)도 같은 이유로 면제 — 청산이 트레일/거래일 백스톱이라 "장마감 초과"가 전제부터 성립 안 함.
+        if (!swingStrategies.contains(req.strategy()) && !multidayStrategies.contains(req.strategy())
+                && !inverseCodes.contains(req.stockCode())) {
             int holdMinutes = holdTimeProvider.holdMinutes(req.strategy());
             LocalTime exitBy = req.now().plusMinutes(holdMinutes);
             if (exitBy.isAfter(policy.sessionEndLocalTime())) {
