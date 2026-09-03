@@ -255,6 +255,26 @@ class NetTrendGateTest {
         assertThat(tr.looMax()).isEqualTo(0.0, within(1e-9));   // 그 하루를 빼면 평탄인데도 닫는다
     }
 
+    // ── 전략별 부트스트랩 사이징 배수(2026-09-03) ────────────────────────────────
+
+    @Test
+    void 전략별_사이징배수가_전역값을_대체한다() {
+        // "이 전략만 표본 충족 없이 정상 사이징(×1.0)" — 전역을 올리면 J·G·L까지 함께 올라간다.
+        var g = bootstrapGate(daily("REVERSAL_L", new double[]{1.0, 1.0, 1.0, 1.0, 1.0}, 5), false);
+        g.setBootstrapSizeMultPerStrategy("MULTIDAY_REVERSION_P:1.0");
+        assertThat(g.fallbackSizeMult("MULTIDAY_REVERSION_P")).isEqualTo(1.0);
+        assertThat(g.fallbackSizeMult("REVERSAL_L")).isEqualTo(0.5);   // 미지정은 전역값
+    }
+
+    @Test
+    void 사이징배수_csv_오타는_전역값으로_degrade() {
+        var g = bootstrapGate(daily("REVERSAL_L", new double[]{1.0, 1.0, 1.0, 1.0, 1.0}, 5), false);
+        g.setBootstrapSizeMultPerStrategy("MULTIDAY_REVERSION_P:abc,X:0,Y:-1,Z");
+        assertThat(g.fallbackSizeMult("MULTIDAY_REVERSION_P")).isEqualTo(0.5);
+        assertThat(g.fallbackSizeMult("X")).isEqualTo(0.5);
+        assertThat(g.fallbackSizeMult("Y")).isEqualTo(0.5);
+    }
+
     @Test
     void decide는_추세가_없으면_종전_판정을_그대로_돌려준다() {
         assertThat(StrategyPerformanceGate.decide(true, null)).isTrue();

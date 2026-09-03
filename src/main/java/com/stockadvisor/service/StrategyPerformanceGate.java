@@ -269,6 +269,53 @@ public class StrategyPerformanceGate {
         return props.fallbackSizeMult();
     }
 
+    /**
+     * 전략별 fallback/부트스트랩 사이징 배수(2026-09-03) — 미지정 전략은 전역 {@code fallback-size-mult} = 종전 동작.
+     *
+     * <p><b>왜 전역값으로는 안 되는가</b>: 부트스트랩은 지금 J·G·L·P가 함께 쓰는데, 전역 배수를 올리면
+     * <b>넷이 같이 올라간다</b>. "이 전략만 표본 충족 없이 정상 사이징으로 간다"는 결정은 전략별이라야 표현된다
+     * (전략별 보유시간 캡·손절 하한과 같은 사상).</p>
+     *
+     * <p>⚠️ <b>1.0을 주는 건 "축소 없이 미검증 진입"</b>이라는 뜻이다 — 부트스트랩의 원래 취지(적은 비용으로
+     * 실표본 수집)를 포기하는 선택이므로, 그 전략의 근거가 그만한지 따로 판단해야 한다.</p>
+     *
+     * <p>⚠️ 오타·0·음수는 조용히 무시하고 전역값으로 degrade(설정 실수로 수량이 0이 되는 것보다 낫다).</p>
+     */
+    public double fallbackSizeMult(String strategy) {
+        Double m = bootstrapSizeMultPerStrategy.get(strategy);
+        return m != null ? m : props.fallbackSizeMult();
+    }
+
+    @Value("${stockadvisor.trading.perf-gate.bootstrap-size-mult-per-strategy:}")
+    private String bootstrapSizeMultCsv = "";
+    private java.util.Map<String, Double> bootstrapSizeMultPerStrategy = java.util.Map.of();
+    @jakarta.annotation.PostConstruct
+    void initBootstrapSizeMult() {
+        this.bootstrapSizeMultPerStrategy = parseSizeMults(bootstrapSizeMultCsv);
+    }
+
+    /** 테스트용. */
+    void setBootstrapSizeMultPerStrategy(String csv) {
+        this.bootstrapSizeMultPerStrategy = parseSizeMults(csv);
+    }
+
+    /** "A:1.0,B:0.3" → {A:1.0, B:0.3}. 오타·0·음수는 무시(전역값으로 degrade). */
+    static java.util.Map<String, Double> parseSizeMults(String csv) {
+        java.util.Map<String, Double> m = new java.util.LinkedHashMap<>();
+        if (csv == null) return m;
+        for (String part : csv.split(",")) {
+            String[] kv = part.split(":");
+            if (kv.length != 2 || kv[0].trim().isEmpty()) continue;
+            try {
+                double v = Double.parseDouble(kv[1].trim());
+                if (v > 0) m.put(kv[0].trim(), v);
+            } catch (NumberFormatException ignored) {
+                // degrade — 전역 fallback-size-mult
+            }
+        }
+        return m;
+    }
+
     /** INVERSE 부트스트랩 진입 사이징 배수 — {@code OrderService.submitEntry}가 INVERSE fallback에 적용. */
     public double inverseBootstrapSizeMult() {
         return props.inverseBootstrapSizeMult();

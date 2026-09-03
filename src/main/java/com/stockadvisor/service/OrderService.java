@@ -243,8 +243,11 @@ public class OrderService {
         // ③ fallback(미검증 국면/인버스 부트스트랩) 진입은 사이징 축소 — 통과해도 실돈 노출을 줄임.
         //    INVERSE는 전용 부트스트랩 배수(기본 0.3 = 일반 비중의 30%), 그 외 국면 fallback은 fallbackSizeMult(0.5).
         if (fallbackEntry) {
+            //    2026-09-03: 그 외 fallback은 전략별 배수를 먼저 본다(미지정이면 전역 fallbackSizeMult).
+            //    "이 전략만 표본 충족 없이 정상 사이징(×1.0)" 같은 결정은 전략별이라야 표현된다 — 전역을 올리면
+            //    같은 부트스트랩을 쓰는 다른 전략(J·G·L)까지 함께 올라간다.
             double mult = "INVERSE".equals(market)
-                    ? performanceGate.inverseBootstrapSizeMult() : performanceGate.fallbackSizeMult();
+                    ? performanceGate.inverseBootstrapSizeMult() : performanceGate.fallbackSizeMult(strategy);
             long reduced = Math.max(1, Math.round(qty * mult));
             if (reduced < qty) {
                 log.info("[주문] fallback 축소사이징 [{}] {} {}주→{}주(×{})", strategy, stockCode, qty, reduced, mult);

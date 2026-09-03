@@ -371,6 +371,10 @@ stockadvisor:
       inverse-pooled: ${TRADING_PERF_GATE_INVERSE_POOLED:true}   # INVERSE 버킷을 전략 무관 단일 풀로 채점 — 인버스 손익은 공통 청산 로직이 결정하므로 전략별로 쪼개면 I가 닫혀도 타 전략 경로가 열린 채 남는다(2026-08-20). false=전략별
       strategy-since: ${TRADING_PERF_GATE_STRATEGY_SINCE:}   # 전략별 net 재검증 시작일("STRATEGY:yyyyMMdd,..") — 진입/청산 로직·임계 변경 시 구표본 제외해 새 로직만 채점. 인버스는 inverse-realized-since 사용
       bootstrap-strategies: ${TRADING_PERF_GATE_BOOTSTRAP_STRATEGIES:}   # since 리셋 후 표본 미달이어도 축소사이징(×fallbackSizeMult) 실주문 허용할 전략(csv) — 재검증 중 완전정지 방지. 기본 빈값=fail-closed
+      # 전략별 fallback/부트스트랩 사이징 배수(csv "STRATEGY:배수") — 미지정은 전역 fallback-size-mult.
+      # ⚠️ 1.0을 주면 '축소 없이 미검증 진입'이다 — 부트스트랩의 취지(적은 비용으로 실표본 수집)를 포기하는 선택.
+      # 전역을 올리면 같은 부트스트랩을 쓰는 다른 전략까지 함께 올라가므로 전략별이라야 표현된다.
+      bootstrap-size-mult-per-strategy: ${TRADING_PERF_GATE_BOOTSTRAP_SIZE_MULT_PER_STRATEGY:}
       refilter: ${TRADING_PERF_GATE_REFILTER:}   # 구표본 자동 재필터(조이는 필터 정밀판) — "STRATEGY:feat OP val;.. | .." (OP: >= <= > <). 태깅된 feature(volume_ratio·rec_score·ret5d·exec_strength·per·pbr·atr·dist_high·mom30·breadth·market_cap·change_rate)로 구표본 중 새 필터 통과분만 채점. since 리셋과 달리 유효 구표본 보존
 
     # 국면연동 리스크 관리 (레이어 3 — 하락장 방어). DRY_RUN/LIVE 공통(리스크관리 흐름을 dry-run으로도 검증).
