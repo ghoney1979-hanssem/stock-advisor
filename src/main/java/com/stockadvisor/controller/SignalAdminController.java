@@ -563,13 +563,24 @@ public class SignalAdminController {
     /**
      * 멀티데이(2-3주) 일봉 종가 경로 수집 현황 (2026-08-07, Phase 1 — 측정 검증용).
      * strategy 지정 시 outcome별 D+N 종가 경로(수익률%)까지, 미지정이면 전략별 요약(행수·outcome수·최대 D+N).
+     *
+     * <p>🐞 2026-09-07: 대상이 {@code {C,D,J}} 하드코딩이라, 2026-09-03에 수집을 12전략으로 넓히고 백필까지
+     * 돌렸는데도 <b>여기서는 계속 셋만</b> 보였다. 같은 날 {@code MultidayExitAnalysisService} 는 고쳤는데
+     * 이 엔드포인트를 놓친 것이다(커밋 abd4664). 커버리지를 확인하려고 보는 화면이 커버리지를 감추고 있었다.
+     * → 대상 목록을 <b>서비스와 같은 소스</b>({@code targetStrategies()} = 설정 ∪ 마크 보유 전략)에서 받는다.
+     * 목록을 두 곳에 두면 또 갈라진다.</p>
      */
     @GetMapping("/multiday-marks")
     public Object multidayMarks(@org.springframework.web.bind.annotation.RequestParam(required = false) String strategy) {
         if (dailyMarkRepository == null) return java.util.Map.of("error", "repository unavailable");
-        String[] targets = (strategy != null && !strategy.isBlank())
-                ? new String[]{strategy}
-                : new String[]{"MEAN_REVERSION_C", "INDEX_RELATIVE_D", "VALUE_REVERSAL_J"};
+        List<String> targets;
+        if (strategy != null && !strategy.isBlank()) {
+            targets = List.of(strategy);
+        } else if (multidayExitAnalysisService != null) {
+            targets = multidayExitAnalysisService.targetStrategies();
+        } else {
+            targets = dailyMarkRepository.findDistinctStrategies().stream().sorted().toList();
+        }
         List<java.util.Map<String, Object>> out = new java.util.ArrayList<>();
         for (String s : targets) {
             List<com.stockadvisor.domain.OutcomeDailyMark> marks = dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(s);

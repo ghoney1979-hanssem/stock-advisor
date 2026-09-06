@@ -1,6 +1,7 @@
 package com.stockadvisor.service;
 
 import com.stockadvisor.domain.OutcomeDailyMark;
+import com.stockadvisor.repository.DailyPriceRepository;
 import com.stockadvisor.repository.OutcomeDailyMarkRepository;
 import com.stockadvisor.service.MultidayExitAnalysisService.Path;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,8 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -186,6 +189,126 @@ class MultidayExitAnalysisServiceTest {
         assertThat(h1.samples()).isEqualTo(6);
         assertThat(h1.distinctDays()).isZero();
         assertThat(h1.clustered()).isFalse();
+    }
+
+
+    // ── 유니버스 반사실 (2026-09-07) ───────────────────────────────────
+    // 🔴 계기: 12전략으로 넓힌 멀티데이 비교가 8개 전략에서 "보유 D+15"를 권장했는데, 완주 코호트의 진입일이
+    //    반등 구간(7/20~8/13)에 몰려 있어 그 수치의 정체가 시장 드리프트였다. 같은 진입일로 유니버스를 그냥
+    //    들고 있었으면 D+15가 +8% 수준이라 10전략 중 9개가 유니버스에 졌다. 절대 net만 보는 권장은
+    //    "지수에 지는 규칙"을 채택하게 만든다.
+
+    private MultidayExitAnalysisService withUniverse(OutcomeDailyMarkRepository repo, List<Object[]> universeRows) {
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "INDEX_RELATIVE_D");
+        DailyPriceRepository daily = mock(DailyPriceRepository.class);
+        when(daily.universeForwardReturns(anyString(), anyString(), anyInt(), anyLong(), anyLong()))
+                .thenReturn(universeRows);
+        org.springframework.test.util.ReflectionTestUtils.setField(svc, "dailyPriceRepository", daily);
+        return svc;
+    }
+
+    private static Object[] uni(String date, int k, double retPct) {
+        return new Object[]{date, k, retPct, 1000L};
+    }
+
+    private List<OutcomeDailyMark> spread(String[] days, long[] closes) {
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        long id = 1;
+        for (String d : days) {
+            for (int i = 0; i < 4; i++) marks.addAll(fullPathOn(id++, d, closes));
+        }
+        return marks;
+    }
+
+    private static final String[] SIX_DAYS =
+            {"20260720", "20260721", "20260722", "20260723", "20260724", "20260727"};
+
+    @Test
+    void 시장드리프트가_만든_승자는_유니버스에_져서_권장되지_않는다() {
+        // 6거래일 × 4건, 전부 D+3에 +8% — 절대 net만 보면 훌륭한 방식이다.
+        List<OutcomeDailyMark> marks = spread(SIX_DAYS, new long[]{10_000, 10_200, 10_500, 10_800});
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+
+        // 같은 날 유니버스를 3거래일 들고 있었으면 +10% — 즉 전략은 시장에 2%p 졌다.
+        List<Object[]> universe = new ArrayList<>();
+        for (String d : SIX_DAYS) { universe.add(uni(d, 1, 3.0)); universe.add(uni(d, 3, 10.0)); }
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(withUniverse(repo, universe).compare(true));
+        MultidayExitAnalysisService.MethodResult h3 = hold(c, 3);
+
+        assertThat(h3.avgNetPct()).isCloseTo(8.0, within(1e-6));           // 절대 net은 크게 양수
+        assertThat(h3.clustered()).isFalse();                              // 클러스터 가드는 통과한다
+        assertThat(h3.universeNetPct()).isCloseTo(10.0, within(1e-6));
+        assertThat(h3.excessVsUniversePct()).isCloseTo(-2.0, within(1e-6));
+        assertThat(h3.excessSamples()).isEqualTo(24);
+        assertThat(c.benchmarkAvailable()).isTrue();
+        assertThat(c.recommended()).isEqualTo("유니버스 미달(초과수익>0 방식 없음)");  // 종전이라면 보유 D+3을 권장했다
+    }
+
+    @Test
+    void 유니버스를_이기면_초과수익_최대_방식을_권장한다() {
+        List<OutcomeDailyMark> marks = spread(SIX_DAYS, new long[]{10_000, 10_200, 10_500, 10_800});
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+
+        List<Object[]> universe = new ArrayList<>();
+        for (String d : SIX_DAYS) { universe.add(uni(d, 1, 1.0)); universe.add(uni(d, 3, 5.0)); }
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(withUniverse(repo, universe).compare(true));
+        assertThat(c.benchmarkAvailable()).isTrue();
+        assertThat(c.recommended()).isEqualTo("보유 D+3");
+        assertThat(c.recommendedExcessPct()).isCloseTo(3.0, within(1e-6));
+    }
+
+    @Test
+    void 초과수익은_방식마다_실제_청산거래일로_맞춘다() {
+        // 손절은 D+1에 발동해 나간다. 그걸 "3거래일 들고 있던 시장"과 비교하면 보유기간이 어긋난다.
+        List<OutcomeDailyMark> marks = spread(SIX_DAYS, new long[]{10_000, 9_000, 9_100, 9_200});
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+
+        List<Object[]> universe = new ArrayList<>();
+        for (String d : SIX_DAYS) { universe.add(uni(d, 1, -5.0)); universe.add(uni(d, 3, 10.0)); }
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(withUniverse(repo, universe).compare(true));
+        MultidayExitAnalysisService.MethodResult stop = c.methods().stream()
+                .filter(m -> m.method().equals("손절 -8%")).findFirst().orElseThrow();
+
+        assertThat(stop.avgNetPct()).isCloseTo(-10.0, within(1e-6));        // D+1 종가 9,000에 청산
+        assertThat(stop.universeNetPct()).isCloseTo(-5.0, within(1e-6));    // k=3(+10%)이 아니라 k=1(-5%)로 맞춘다
+        assertThat(stop.excessVsUniversePct()).isCloseTo(-5.0, within(1e-6));
+    }
+
+    @Test
+    void 벤치마크_미가용이면_종전대로_절대net으로_권장하고_그_사실을_노출한다() {
+        String[] days = {"20260801", "20260804", "20260805", "20260806", "20260807", "20260810"};
+        List<OutcomeDailyMark> marks = spread(days, new long[]{10_000, 10_200, 10_200, 10_200});
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(anyString())).thenReturn(marks);
+        when(repo.findEntryDatesByStrategy(anyString())).thenReturn(entryDateRows(marks));
+        // dailyPriceRepository 미주입 → 일봉 미적재 환경과 같다
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "INDEX_RELATIVE_D");
+
+        MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
+        assertThat(c.benchmarkAvailable()).isFalse();
+        assertThat(c.recommendedExcessPct()).isNull();
+        assertThat(c.recommended()).isEqualTo("보유 D+1");                   // 종전 동작 보존
+        assertThat(hold(c, 1).universeNetPct()).isNull();
+    }
+
+    @Test
+    void 분석대상은_설정과_마크보유_전략의_합집합이다() {
+        // 🐞 수집을 넓혀도 분석 대상이 하드코딩이면 데이터가 있는데 "없는 것처럼" 보인다.
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        when(repo.findDistinctStrategies()).thenReturn(List.of("REVERSAL_L", "MEAN_REVERSION_C"));
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 3, 5, "MEAN_REVERSION_C,INDEX_RELATIVE_D");
+
+        assertThat(svc.targetStrategies())
+                .containsExactly("INDEX_RELATIVE_D", "MEAN_REVERSION_C", "REVERSAL_L");
     }
 
     private List<Object[]> entryDateRows(List<OutcomeDailyMark> marks) {
