@@ -139,6 +139,12 @@ public class StrategyPerformanceGate {
     // 대신 ① <b>판정 규칙</b>은 static {@code PositionExitService.multidayExitReason}을 공유하고
     //      ② <b>파라미터</b>는 라이브와 <b>같은 프로퍼티 키</b>를 읽어 맞춘다.
     // 둘 중 하나라도 복제하면 "게이트가 하지 않는 청산을 채점"하게 된다.
+    // 폐기 전략(2026-09-07) — 가시화에서도 제외. 신호가 안 나는 전략이 게이트 화면에만 남으면
+    // "왜 열려 있는데 진입이 없나"로 읽혀 조회가 실제 동작과 엇갈린다(K·E 폐기 시 실제로 겪음).
+    // evaluateAll은 히스테리시스 상태를 갱신하므로, 죽은 전략의 상태를 계속 굴리는 낭비도 함께 없앤다.
+    @Value("${stockadvisor.signal.retired-strategies:}")
+    private String retiredStrategiesCsv = "";
+
     @Value("${stockadvisor.trading.multiday-exit.strategies:}")
     private String multidayExitCsv = "";
     private java.util.Set<String> multidayExitSet = java.util.Set.of();
@@ -827,9 +833,16 @@ public class StrategyPerformanceGate {
     }
 
     /** 전략×시장(KOSPI/KOSDAQ) 게이트 상태(가시화/관리 API용) — 시장별 국면 매칭 반영. */
+    /** 폐기 전략을 뺀 가시화 대상. {@code StrategyEvaluator}가 평가에서 빼는 것과 <b>같은 목록</b>을 읽는다. */
+    private List<String> activeStrategyNames() {
+        java.util.Set<String> retired = PolicyGate.parseCsv(retiredStrategiesCsv);
+        if (retired.isEmpty()) return strategyNames;
+        return strategyNames.stream().filter(n -> !retired.contains(n)).toList();
+    }
+
     public List<GateDecision> evaluateAll() {
         List<GateDecision> out = new java.util.ArrayList<>();
-        for (String strategy : strategyNames) {
+        for (String strategy : activeStrategyNames()) {
             for (String market : List.of("KOSPI", "KOSDAQ", "INVERSE")) {   // INVERSE=인버스 ETF 검증 버킷(하락장 수익)
                 out.add(evaluate(strategy, market));
             }
@@ -840,7 +853,7 @@ public class StrategyPerformanceGate {
     /** 국면 가정 게이트(전략×시장×국면) — "이 국면이면 매수대기인가"를 강세/중립/약세 각각으로 시뮬. INVERSE는 국면무관 1회. */
     public List<GateDecision> evaluateByRegime() {
         List<GateDecision> out = new java.util.ArrayList<>();
-        for (String strategy : strategyNames) {
+        for (String strategy : activeStrategyNames()) {
             for (String market : List.of("KOSPI", "KOSDAQ")) {
                 for (MarketTrend regime : List.of(MarketTrend.BULL, MarketTrend.NEUTRAL, MarketTrend.BEAR)) {
                     out.add(evaluate(strategy, market, regime));
