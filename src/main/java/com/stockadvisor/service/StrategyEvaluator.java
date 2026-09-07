@@ -193,6 +193,11 @@ public class StrategyEvaluator {
     // 지금 안 모으면 그 기간은 영영 반사실을 못 만든다(뉴스·수급은 소급으로 해결됐다).
     // ⚠️ 대가는 **후보당 KIS 1콜 증가**다(호가 조회와 같은 자리). 스캔 부하가 문제되면 false로 되돌리면
     //    종전의 진입-시-lazy 경로가 그대로 살아 있어 진입군 태깅은 유지된다(대조군만 다시 비게 된다).
+    // 폐기 전략(2026-09-07) — 평가 목록에서 통째로 제외해 진입·대조군·스캔 부하를 전부 0으로 만든다.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.retired-strategies:}")
+    private String retiredStrategiesCsv = "";
+    private volatile java.util.Set<String> retiredSet;
+
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.collect-exec-strength-all:false}")
     private boolean collectExecStrengthAll = false;
 
@@ -384,9 +389,39 @@ public class StrategyEvaluator {
      * @param scope        평가할 전략 범위
      * @return 실시간 알림 발송 건수
      */
+    /**
+     * <b>평가 대상 전략 선별</b>(순수) — scope 일치 + <b>폐기 목록 제외</b>.
+     *
+     * <p>⚠️ <b>"DISABLED" 탈락 사유로 끄지 않는 이유</b>: 전략이 평가는 되고 사유만 남으면
+     * {@code tracksControl()=true} 전략에선 그 사유가 <b>대조군 행으로 매일 쌓인다</b>
+     * (E는 {@code NOT_BREAKOUT} 하나로만 7,099행). 폐기의 목적은 표본·스캔 부하를 없애는 것이라
+     * <b>평가 자체를 막아야</b> 한다 — M을 2026-08-29에 끌 때 확인한 것과 같은 이유다.</p>
+     *
+     * <p>⚠️ <b>과거 표본은 지우지 않는다</b> — 재편입 판단 근거로 남긴다. 되돌리려면 csv에서 이름을 빼면 된다.
+     * ⚠️ 폐기해도 {@code TRADING_LIVE_STRATEGIES}·{@code TRADING_MULTIDAY_*} 등에 이름이 남아 있으면
+     * 조회 화면이 엇갈리므로 함께 정리할 것.</p>
+     */
+    static List<TradingStrategy> selectStrategies(List<TradingStrategy> all, StrategyScope scope,
+                                                  java.util.Set<String> retired) {
+        return all.stream()
+                .filter(s -> s.scope() == scope)
+                .filter(s -> retired == null || !retired.contains(s.name()))
+                .toList();
+    }
+
+    /** 폐기 목록(1회 파싱 캐시). */
+    private java.util.Set<String> retiredSet() {
+        java.util.Set<String> r = retiredSet;
+        if (r == null) {
+            r = PolicyGate.parseCsv(retiredStrategiesCsv);
+            retiredSet = r;
+        }
+        return r;
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int evaluateStock(String stockCode, Long disclosureId, String catalyst, StrategyScope scope) {
-        List<TradingStrategy> scoped = strategies.stream().filter(s -> s.scope() == scope).toList();
+        List<TradingStrategy> scoped = selectStrategies(strategies, scope, retiredSet());
         if (scoped.isEmpty()) {
             return 0;
         }
