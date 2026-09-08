@@ -14,8 +14,6 @@ import lombok.NoArgsConstructor;
 /**
  * 가상매수 후 특정 보유시간(mark) 시점의 가격 샘플. 보유시간별 수익 곡선 산출용.
  * 분석 편의를 위해 strategy/buyPrice 를 비정규화해 함께 저장한다.
- *
- * @see com.stockadvisor.service.ExitTimingService
  */
 @Entity
 @Table(name = "outcome_sample", indexes = {

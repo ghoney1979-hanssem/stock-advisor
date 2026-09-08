@@ -46,7 +46,6 @@ import com.stockadvisor.service.OrderService;
 import com.stockadvisor.service.PositionExitService;
 import com.stockadvisor.service.PositionReconcileService;
 import com.stockadvisor.service.ExitStrategyService;
-import com.stockadvisor.service.ExitTimingService;
 import com.stockadvisor.service.MarketSignalService;
 import com.stockadvisor.service.OutcomeAnalysisService;
 import com.stockadvisor.service.SignalAlertService;
@@ -94,7 +93,6 @@ public class SignalAdminController {
     private final StrategyReportService strategyReportService;
     private final WatchlistScanService watchlistScanService;
     private final OutcomeAnalysisService outcomeAnalysisService;
-    private final ExitTimingService exitTimingService;
     private final DailyReportService dailyReportService;
     private final ExitStrategyService exitStrategyService;
     private final KisApiClient kisApiClient;
@@ -160,7 +158,6 @@ public class SignalAdminController {
                                  StrategyReportService strategyReportService,
                                  WatchlistScanService watchlistScanService,
                                  OutcomeAnalysisService outcomeAnalysisService,
-                                 ExitTimingService exitTimingService,
                                  DailyReportService dailyReportService,
                                  ExitStrategyService exitStrategyService,
                                  KisApiClient kisApiClient,
@@ -201,7 +198,6 @@ public class SignalAdminController {
         this.strategyReportService = strategyReportService;
         this.watchlistScanService = watchlistScanService;
         this.outcomeAnalysisService = outcomeAnalysisService;
-        this.exitTimingService = exitTimingService;
         this.dailyReportService = dailyReportService;
         this.exitStrategyService = exitStrategyService;
         this.kisApiClient = kisApiClient;
@@ -739,10 +735,6 @@ public class SignalAdminController {
         return out;
     }
 
-    /**
-     * 적응형 청산 보유시간 — A/B/C 전략별로 현재 적용 중인 보유시간(분)과 그 출처(자동/고정).
-     * 자동이면 exit-timing 권장 마크의 표본수·평균 net 수익도 함께. (실주문·DRY_RUN 청산에 그대로 적용)
-     */
     /** 스윙 트레일링 검증 — 익일보유 vs 트레일 3/5/7% net 비교(스윙 전략). */
     @GetMapping("/swing-trail-analysis")
     public List<SwingTrailAnalysisService.StrategySwingTrail> swingTrailAnalysis() {
@@ -800,6 +792,7 @@ public class SignalAdminController {
         return strategyStopProvider.describe();
     }
 
+    /** 전략별 청산 보유시간(분) — 고정 설정값(2026-09-08 적응형 자동산출 폐기, 지정 없으면 전역 fallback). */
     @GetMapping("/exit-hold")
     public List<StrategyHoldTimeProvider.HoldInfo> exitHold() {
         return strategyHoldTimeProvider.describe();
@@ -821,12 +814,6 @@ public class SignalAdminController {
     @GetMapping("/exit-method")
     public List<ExitStrategyService.BestExit> exitMethod() {
         return exitMethodProvider.describe();
-    }
-
-    /** 당일 청산시점 분석: 전략별 보유시간별 평균수익률·승률 + 권장 청산시점 */
-    @GetMapping("/exit-timing")
-    public List<ExitTimingService.StrategyExitTiming> exitTiming() {
-        return exitTimingService.analyze();
     }
 
     /** 일별 성과 리포트 즉시 발송 (테스트용) */

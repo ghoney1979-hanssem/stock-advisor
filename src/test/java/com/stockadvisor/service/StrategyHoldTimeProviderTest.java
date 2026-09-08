@@ -1,6 +1,5 @@
 package com.stockadvisor.service;
 
-import com.stockadvisor.config.properties.AdaptiveExitProperties;
 import com.stockadvisor.config.properties.TradingPolicyProperties;
 import com.stockadvisor.domain.TradingMode;
 import org.junit.jupiter.api.Test;
@@ -8,13 +7,9 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
- * 적응형 보유시간 선택: 표본 충분한 마크 중 평균 net 수익 최대 마크 채택, 부족하면 고정값 fallback.
+ * 전략별 청산 보유시간 — 고정 설정값(2026-09-08, 적응형 자동산출 폐기). 지정 없으면 전역 fallback.
  */
 class StrategyHoldTimeProviderTest {
 
@@ -25,225 +20,10 @@ class StrategyHoldTimeProviderTest {
                 "15:20", FIXED_HOLD, true, List.of(), 3, 5, 0);
     }
 
-    /** 기존 케이스는 평활 없이(smoothWindow=1) 종전 max-pick 동작을 검증한다. */
-    private AdaptiveExitProperties props(boolean enabled, int minSamples, int maxHold) {
-        return new AdaptiveExitProperties(enabled, minSamples, 30, maxHold, 1);
-    }
-
-    /** 비클러스터 마크(거래일 5·점유율 20%·LOO 부호 유지) — 클러스터 가드에 걸리지 않는 정상 마크. */
-    private ExitTimingService.MarkStat mark(int minutes, int samples, double avgReturn) {
-        return new ExitTimingService.MarkStat(minutes + "분", minutes, samples, avgReturn, 50.0,
-                5, 20.0, "20260801", avgReturn, false);
-    }
-
-    /** 단일일 클러스터 마크 — 수익은 좋아 보이지만 하루가 만든 허수. */
-    private ExitTimingService.MarkStat clusteredMark(int minutes, int samples, double avgReturn) {
-        return new ExitTimingService.MarkStat(minutes + "분", minutes, samples, avgReturn, 50.0,
-                2, 90.0, "20260825", -avgReturn, true);
-    }
-
-    private ExitTimingService.StrategyExitTiming timing(String strategy, ExitTimingService.MarkStat... marks) {
-        return new ExitTimingService.StrategyExitTiming(strategy, 0, List.of(marks), null, null, 0.18);
-    }
-
-    private StrategyHoldTimeProvider provider(AdaptiveExitProperties props,
-                                              List<ExitTimingService.StrategyExitTiming> analysis) {
-        ExitTimingService ets = mock(ExitTimingService.class);
-        when(ets.analyze()).thenReturn(analysis);
-        return new StrategyHoldTimeProvider(ets, policy(), props);
-    }
-
-    @Test
-    void 표본충분_마크중_평균수익최대를_보유시간으로() {
-        // 45분(avg 1.0), 120분(avg 1.5), 240분(avg 5.0 이지만 n=5<20 제외) → 120분 채택
-        StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(
-                timing("MEAN_REVERSION_C",
-                        mark(45, 30, 1.0), mark(120, 30, 1.5), mark(240, 5, 5.0))));
-
-        assertThat(p.holdMinutes("MEAN_REVERSION_C")).isEqualTo(120);
-    }
-
-    @Test
-    void 자격마크_없으면_고정값_fallback() {
-        // 모든 마크 표본 < 20 → 채택 없음 → 고정 60분
-        StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(
-                timing("VOLUME_LEADING_B", mark(45, 5, 2.0), mark(60, 10, 3.0))));
-
-        assertThat(p.holdMinutes("VOLUME_LEADING_B")).isEqualTo(FIXED_HOLD);
-    }
-
-    @Test
-    void 종가권장이면_상한으로_캡() {
-        // EOD(markMinutes=-1)가 최대수익 → maxHold 200 으로 캡
-        StrategyHoldTimeProvider p = provider(props(true, 20, 200), List.of(
-                timing("MOMENTUM_A", mark(45, 30, 1.0),
-                        new ExitTimingService.MarkStat("종가(EOD)", -1, 30, 4.0, 60.0,
-                                5, 20.0, "20260801", 4.0, false))));
-
-        assertThat(p.holdMinutes("MOMENTUM_A")).isEqualTo(200);
-    }
-
-    @Test
-    void 비활성이면_분석없이_고정값() {
-        ExitTimingService ets = mock(ExitTimingService.class);
-        StrategyHoldTimeProvider p = new StrategyHoldTimeProvider(ets, policy(), props(false, 20, 300));
-
-        assertThat(p.holdMinutes("MEAN_REVERSION_C")).isEqualTo(FIXED_HOLD);
-        verify(ets, never()).analyze();   // 비활성이면 분석 호출 안 함
-    }
-
-    @Test
-    void 평활은_단발_스파이크_대신_이웃까지_좋은_구간을_고른다() {
-        // K 실측 재현: 95분만 +0.94이고 이웃(90 −0.44 / 100 −0.56)은 음수 = 표본 노이즈의 상위 극단.
-        // 반면 60~70분은 세 마크가 함께 양호 → 평활(창3) 최대는 65분.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(60, 100, 0.40), mark(65, 100, 0.50), mark(70, 100, 0.55), mark(75, 100, 0.50),
-                mark(90, 100, -0.44), mark(95, 100, 0.94), mark(100, 100, -0.56));
-
-        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 3).markMinutes()).isEqualTo(70);
-        // 평활 없이는 종전대로 단발 스파이크(95분)를 고른다 — 회귀 대조
-        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1).markMinutes()).isEqualTo(95);
-    }
-
-    @Test
-    void 평활해도_표본부족_마크는_곡선에서_제외된다() {
-        // 95분(+9.99%)은 표본 미달이라 후보에서도 이웃 계산에서도 빠진다 → 60~75 구간에서만 선택.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(60, 100, 0.50), mark(65, 100, 0.60), mark(70, 100, 0.55), mark(75, 100, 0.10),
-                mark(95, 5, 9.99));
-
-        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 3).markMinutes()).isEqualTo(65);
-    }
-
-    @Test
-    void describe는_미산출_전략은_고정값으로_채움() {
-        // C만 자동 산출, A·B는 fallback
-        StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(
-                timing("MEAN_REVERSION_C", mark(120, 30, 1.5))));
-
-        List<StrategyHoldTimeProvider.HoldInfo> all = p.describe();
-
-        assertThat(all).hasSize(3);
-        StrategyHoldTimeProvider.HoldInfo c = all.stream()
-                .filter(h -> h.strategy().equals("MEAN_REVERSION_C")).findFirst().orElseThrow();
-        assertThat(c.auto()).isTrue();
-        assertThat(c.holdMinutes()).isEqualTo(120);
-        StrategyHoldTimeProvider.HoldInfo a = all.stream()
-                .filter(h -> h.strategy().equals("MOMENTUM_A")).findFirst().orElseThrow();
-        assertThat(a.auto()).isFalse();
-        assertThat(a.holdMinutes()).isEqualTo(FIXED_HOLD);
-    }
-
-    @Test
-    void 단일일_클러스터_마크는_권장에서_제외된다() {
-        // 300분이 net 2.28로 최고지만 그 수익이 하루가 만든 것(clustered) → 비클러스터 최선인 90분을 고른다.
-        // 실측 REVERSAL_L: 5분 −0.35 → 300분 +2.28 로 단조 상승했으나 상승분 전체가 8/25 하루였다.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(30, 100, 0.12), mark(90, 100, 0.31), mark(180, 100, 0.20),
-                clusteredMark(240, 100, 1.45), clusteredMark(300, 100, 2.28));
-
-        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1).markMinutes()).isEqualTo(90);
-    }
-
-    @Test
-    void 먼_마크의_스파이크가_이웃으로_둔갑하지_않는다() {
-        // 🐞 회귀: 클러스터 마크를 목록에서 빼버리면 남은 목록이 성겨져 평활이 '리스트 이웃'을 평균한다.
-        // 실측 REVERSAL_L에서 110분의 이웃이 35분과 300분(265분 떨어짐)이 되어, 단발 스파이크를 막으려던
-        // 평활이 오히려 300분의 +2.28을 실어 날랐다(110분 평활 1.07).
-        // 여기선 40분과 210분 사이가 전부 클러스터라, 종전 코드였다면 둘이 '이웃'이 됐을 배치를 만든다.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(20, 100, 0.0), mark(30, 100, 0.0),
-                mark(40, 100, 0.10),                        // 종전엔 이웃이 30분과 210분(9.0)이 돼 평활 3.03
-                clusteredMark(50, 100, 0.0), clusteredMark(60, 100, 0.0),
-                clusteredMark(70, 100, 0.0), clusteredMark(80, 100, 0.0),
-                mark(210, 100, 9.0), mark(220, 100, 0.0));  // 먼 스파이크
-
-        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
-
-        // 40분은 210분과 시간축 이웃이 아니므로 그 9.0을 받아선 안 된다.
-        assertThat(best.markMinutes()).isNotEqualTo(40);
-        assertThat(best.clustered()).isFalse();
-    }
-
-    @Test
-    void 클러스터_마크의_값은_이웃_평활에_섞이지_않는다() {
-        // 창의 '위치'는 클러스터 마크가 채우되 '값'은 빠져야 한다 — 안 그러면 고를 수 없는 허수 마크가
-        // 옆 마크를 대신 뽑게 만든다(간접적으로 선택을 좌우).
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(10, 100, 0.20), mark(20, 100, 0.20), mark(30, 100, 0.20),
-                mark(40, 100, 0.0),
-                clusteredMark(50, 100, 9.0),   // 허수 스파이크
-                mark(60, 100, 0.0), mark(70, 100, 0.0));
-
-        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
-
-        // 40·60분이 9.0을 이웃값으로 받으면 그쪽이 뽑힌다. 값을 빼면 20분 구간(0.20)이 이긴다.
-        assertThat(best.markMinutes()).isEqualTo(20);
-    }
-
-    @Test
-    void 종가_EOD는_평활에서_맨_뒤로_정렬된다() {
-        // 종전엔 raw 정렬이라 EOD(-1)가 맨 앞에 와 '5분 마크의 이웃이 종가 보유'가 됐다.
-        // EOD는 가장 긴 보유이므로 맨 뒤여야 한다.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                new ExitTimingService.MarkStat("종가(EOD)", -1, 100, 9.0, 60.0, 5, 20.0, "20260801", 9.0, false),
-                mark(5, 100, 0.0), mark(10, 100, 0.0), mark(15, 100, 0.0),
-                mark(20, 100, 0.30), mark(25, 100, 0.30));
-
-        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
-
-        // EOD가 맨 앞이면 5분이 EOD(9.0)를 이웃으로 받아 뽑혔을 것이다.
-        // 맨 뒤로 가면 EOD와 인접한 25분이 이긴다 — 이건 실제 시간축 이웃이라 정당하다.
-        assertThat(best.markMinutes()).isNotEqualTo(5);
-        assertThat(best.markMinutes()).isEqualTo(25);
-    }
-
-    @Test
-    void 자격마크가_경계에만_있으면_maxpick으로_내려간다() {
-        // 비클러스터가 양 끝(half개)에만 있어 평활로는 못 고르는 경우 — null이 아니라 max-pick으로 회수.
-        List<ExitTimingService.MarkStat> curve = List.of(
-                mark(10, 100, 0.50),
-                clusteredMark(20, 100, 9.0), clusteredMark(30, 100, 9.0),
-                clusteredMark(40, 100, 9.0), clusteredMark(50, 100, 9.0),
-                mark(60, 100, 0.80));
-
-        ExitTimingService.MarkStat best = StrategyHoldTimeProvider.pickBest(curve, 20, 3);
-
-        assertThat(best).isNotNull();
-        assertThat(best.clustered()).isFalse();
-        assertThat(best.markMinutes()).isEqualTo(60);
-    }
-
-    @Test
-    void 자격마크가_전부_클러스터면_fallback() {
-        List<ExitTimingService.MarkStat> curve = List.of(
-                clusteredMark(90, 100, 1.0), clusteredMark(300, 100, 2.0));
-
-        assertThat(StrategyHoldTimeProvider.pickBest(curve, 20, 1)).isNull();
-    }
-
-    @Test
-    void 캡이_걸리면_원시마크와_capped가_노출된다() {
-        // 분석은 295분(n=89)을 골랐는데 maxHold 90 → holdMinutes는 90으로 잘리고,
-        // samples/avgReturnPct는 원시 마크(295분) 값이다. 종전엔 이 캡 사실이 어디에도 안 보였다.
-        StrategyHoldTimeProvider p = provider(props(true, 20, 90), List.of(
-                timing("REVERSAL_L", mark(90, 104, 0.31), mark(295, 89, 1.46))));
-
-        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
-                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
-
-        assertThat(l.holdMinutes()).isEqualTo(90);
-        assertThat(l.rawMarkMinutes()).isEqualTo(295);
-        assertThat(l.capped()).isTrue();
-        assertThat(l.samples()).isEqualTo(89);
-    }
-
-    /** csv 전략별 캡을 주입한 provider — @Value 필드라 테스트에선 리플렉션으로 세팅한다. */
-    private StrategyHoldTimeProvider providerWithCaps(AdaptiveExitProperties props, String csv,
-                                                      List<ExitTimingService.StrategyExitTiming> analysis) {
-        StrategyHoldTimeProvider p = provider(props, analysis);
+    private StrategyHoldTimeProvider providerWithCsv(String csv) {
+        StrategyHoldTimeProvider p = new StrategyHoldTimeProvider(policy());
         try {
-            java.lang.reflect.Field f = StrategyHoldTimeProvider.class.getDeclaredField("maxHoldPerStrategyCsv");
+            java.lang.reflect.Field f = StrategyHoldTimeProvider.class.getDeclaredField("holdMinutesPerStrategyCsv");
             f.setAccessible(true);
             f.set(p, csv);
         } catch (ReflectiveOperationException e) {
@@ -253,52 +33,53 @@ class StrategyHoldTimeProviderTest {
     }
 
     @Test
-    void 전략별_캡이_지정되면_전역캡보다_우선한다() {
-        // 실측 2026-08-31: L은 권장 290분(+1.92%)인데 전역 캡 90이 잘라 90분 +0.43%로 청산·채점됐다.
-        // 전역 캡을 그대로 두고 L만 240분으로 풀면 A(권장 275분, 음수 구간)는 종전대로 90분에 머문다.
-        StrategyHoldTimeProvider p = providerWithCaps(props(true, 20, 90), "REVERSAL_L:240", List.of(
-                timing("REVERSAL_L", mark(90, 120, 0.43), mark(240, 112, 1.51), mark(290, 97, 1.92)),
-                timing("MOMENTUM_A", mark(90, 30, -0.50), mark(275, 28, -1.29))));
+    void 전략별_지정값이_있으면_그값을_반환한다() {
+        StrategyHoldTimeProvider p = providerWithCsv("REVERSAL_L:240, RSI_REVERSAL_G:180");
 
-        assertThat(p.holdMinutes("REVERSAL_L")).isEqualTo(240);   // 전략별 캡 적용
-        assertThat(p.holdMinutes("MOMENTUM_A")).isEqualTo(90);    // 미지정 → 전역 캡 그대로
+        assertThat(p.holdMinutes("REVERSAL_L")).isEqualTo(240);
+        assertThat(p.holdMinutes("RSI_REVERSAL_G")).isEqualTo(180);
     }
 
     @Test
-    void 전략별_캡이_권장마크보다_길면_캡은_안_걸린다() {
-        // 캡은 상한일 뿐이라 권장이 더 짧으면 권장을 그대로 쓴다(캡이 보유시간을 늘리지는 않는다).
-        StrategyHoldTimeProvider p = providerWithCaps(props(true, 20, 90), "REVERSAL_L:240", List.of(
-                timing("REVERSAL_L", mark(120, 100, 1.0))));
+    void 미지정_전략은_전역_고정값() {
+        StrategyHoldTimeProvider p = providerWithCsv("REVERSAL_L:240");
 
-        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
-                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
-
-        assertThat(l.holdMinutes()).isEqualTo(120);
-        assertThat(l.capped()).isFalse();
+        assertThat(p.holdMinutes("MOMENTUM_A")).isEqualTo(FIXED_HOLD);
     }
 
     @Test
-    void 전략별_캡_csv_오타는_무시하고_전역캡으로_degrade() {
-        // 설정 실수로 보유시간이 0이 되면 진입 즉시 청산되므로, 알 수 없는 값은 종전 동작으로 되돌린다.
-        assertThat(StrategyHoldTimeProvider.parseHoldCaps("REVERSAL_L:abc,BAD_ENTRY,MOMENTUM_A:0,:240"))
+    void csv_미지정이면_전_전략_전역_고정값() {
+        StrategyHoldTimeProvider p = new StrategyHoldTimeProvider(policy());
+
+        assertThat(p.holdMinutes("MEAN_REVERSION_C")).isEqualTo(FIXED_HOLD);
+    }
+
+    @Test
+    void describe는_지정전략과_fallback전략을_구분해_노출한다() {
+        StrategyHoldTimeProvider p = providerWithCsv("MEAN_REVERSION_C:120");
+
+        List<StrategyHoldTimeProvider.HoldInfo> all = p.describe();
+
+        StrategyHoldTimeProvider.HoldInfo c = all.stream()
+                .filter(h -> h.strategy().equals("MEAN_REVERSION_C")).findFirst().orElseThrow();
+        assertThat(c.fixed()).isTrue();
+        assertThat(c.holdMinutes()).isEqualTo(120);
+
+        StrategyHoldTimeProvider.HoldInfo a = all.stream()
+                .filter(h -> h.strategy().equals("MOMENTUM_A")).findFirst().orElseThrow();
+        assertThat(a.fixed()).isFalse();
+        assertThat(a.holdMinutes()).isEqualTo(FIXED_HOLD);
+    }
+
+    @Test
+    void csv_오타는_무시하고_전역값으로_degrade() {
+        // 설정 실수로 보유시간이 0이 되면 진입 즉시 청산되므로, 알 수 없는 값은 종전 동작(전역값)으로 되돌린다.
+        assertThat(StrategyHoldTimeProvider.parseHoldMinutes("REVERSAL_L:abc,BAD_ENTRY,MOMENTUM_A:0,:240"))
                 .isEmpty();
-        assertThat(StrategyHoldTimeProvider.parseHoldCaps("REVERSAL_L:240, RSI_REVERSAL_G:180 "))
+        assertThat(StrategyHoldTimeProvider.parseHoldMinutes("REVERSAL_L:240, RSI_REVERSAL_G:180 "))
                 .containsEntry("REVERSAL_L", 240)
                 .containsEntry("RSI_REVERSAL_G", 180);
-        assertThat(StrategyHoldTimeProvider.parseHoldCaps(null)).isEmpty();
-        assertThat(StrategyHoldTimeProvider.parseHoldCaps("")).isEmpty();
-    }
-
-    @Test
-    void 캡에_안_걸리면_capped는_false() {
-        StrategyHoldTimeProvider p = provider(props(true, 20, 300), List.of(
-                timing("REVERSAL_L", mark(90, 104, 0.31))));
-
-        StrategyHoldTimeProvider.HoldInfo l = p.describe().stream()
-                .filter(h -> h.strategy().equals("REVERSAL_L")).findFirst().orElseThrow();
-
-        assertThat(l.holdMinutes()).isEqualTo(90);
-        assertThat(l.rawMarkMinutes()).isEqualTo(90);
-        assertThat(l.capped()).isFalse();
+        assertThat(StrategyHoldTimeProvider.parseHoldMinutes(null)).isEmpty();
+        assertThat(StrategyHoldTimeProvider.parseHoldMinutes("")).isEmpty();
     }
 }
