@@ -1,6 +1,6 @@
 ---
 name: daily-analysis
-description: 주식 자동매매 시스템의 일별 성과·종목선정력 분석. LIVE 실거래 손익, 멀티데이 전략의 유니버스 대비 초과수익, 종목선정 축(Sleeve 포워드 테스트 등)을 점검하고 조치를 제안한다. 인트라데이 청산타이밍·당일 net 튜닝은 다루지 않는다(2026-09-08부로 전 LIVE 전략이 멀티데이/스윙/인버스 전용 청산으로 전환돼 실효가 없다고 판단됨). 최근 배포된 새 엔드포인트가 있으면 자동 반영.
+description: 주식 자동매매 시스템의 일별 성과·종목선정력 분석. LIVE 실거래 손익, 멀티데이 전략의 유니버스 대비 초과수익, 종목선정 축(Sleeve 포워드 테스트 등)을 점검하고 조치를 제안한다. 인트라데이 청산타이밍·당일 net 튜닝은 다루지 않는다(2026-09-08부로 전 LIVE 전략이 멀티데이/스윙/인버스 전용 청산으로 전환돼 실효가 없다고 판단됨). 수급·체결강도·추세 같은 feature는 단일축 필터로 따로 보지 않고 복합 점수로 묶어 판정한다(2026-09-08 사용자 결정). 최근 배포된 새 엔드포인트가 있으면 자동 반영.
 user-invocable: true
 ---
 
@@ -150,6 +150,70 @@ multiday-marks                                   # 수집 현황(전략별 outco
    `financial-spread`는 사용자가 명시적으로 새 축(가설)을 제시했을 때만, 그리고 반드시 `since`/`until`로
    탐색·holdout 구간을 나눠 돌릴 것. 이미 죽은 축(RET계열·거래대금·거래량추세·저PBR·F-Score·골든크로스·
    수급 등)을 별다른 새 근거 없이 재검하지 말 것 — CLAUDE.md에 전부 기각 사유가 기록돼 있다.
+
+### 4-A. 복합 지표 판정 (단일축 필터는 지양 — 2026-09-08 사용자 결정)
+
+⚠️ **원칙 변경**: 수급·체결강도·추세·뉴스·호가불균형·ATR 같은 개별 feature를 **하나씩 따로 켜고 끄는
+단순 필터로 다루지 않는다.** 이 시스템은 지금까지 이런 축들을 하나씩 독립적으로 검정해왔고, CLAUDE.md에
+기록된 실측만 봐도 급증 lift·거래량배수 단조성·`WEAK_VOLUME` 대조군·전역 필터 3종·뉴스 반증·수급 반증까지
+**최소 7개의 독립된 단일축 연구가 전부 같은 결론**("이미 관심을 받은 종목을 사면 진다")에 도달했다. 이건
+"단일축이 전부 무신호"라는 뜻이 아니라 — **서로 다른 방식으로 같은 현상(쏠림/과열)을 재는 상관된 지표들을
+하나씩 따로 봐서 신호 대 잡음비가 낮았다는 뜻**일 가능성이 높다. → 앞으로는 **관련 feature를 묶어 하나의
+복합 점수로 만들고, 그 복합 점수 단위로 성과를 본다.**
+
+**방법(SQL 템플릿 — 아직 전용 엔드포인트가 없다, 필요성이 확인되면 Phase 5-D로 코드화 제안)**:
+
+```sql
+-- "관심집중도" 복합점수 — 개별로 이미 방향이 확인된 지표들을 +1/0으로 합산(0~5).
+-- entered/control 양쪽에 다 태깅되므로 대조군까지 포함해 컷별 성과를 본다(universe-analysis와 같은 사상 —
+-- 반사실은 lift가 아니라 대조군으로 잰다). 임계는 예시 — CLAUDE.md 각 축의 기존 근거값을 따르되
+-- 데이터가 쌓이면 재조정.
+with scored as (
+  select id, control_sample, strategy, alert_date,
+    (case when entry_volume_ratio >= 8 then 1 else 0 end)
+  + (case when entry_change_rate >= 5 then 1 else 0 end)
+  + (case when entry_news_cnt_1h >= 3 then 1 else 0 end)
+  + (case when (coalesce(entry_frgn_ntby_ratio,0)+coalesce(entry_orgn_ntby_ratio,0)) >= 2 then 1 else 0 end)
+  + (case when entry_exec_strength >= 150 then 1 else 0 end)
+    as crowd_score,
+    (price_close - buy_price)::numeric / buy_price * 100 as close_gross,
+    (price_next_close - buy_price)::numeric / buy_price * 100 as nextclose_gross
+  from trade_outcome
+  where alert_date >= 'YYYYMMDD' and price_close is not null
+)
+select crowd_score, control_sample, count(*) n,
+  round(avg(close_gross)::numeric,2) avg_close, round(avg(nextclose_gross)::numeric,2) avg_nextclose
+from scored group by 1,2 order by 1,2;
+```
+
+**읽는 법**: 복합점수가 올라갈수록(더 많은 "관심 신호"가 동시에 켜질수록) `avg_close`/`avg_nextclose`가
+**단조 하락**하는지, 그리고 그 하락이 `control_sample=true`(미진입 포함 전체)에서도 같은 방향인지 본다.
+단조성이 개별 단일축보다 뚜렷하면 복합 점수가 실제로 잡음을 줄인 것 — 이 경우 반대 극단(복합점수 0, "조용한"
+후보)을 종목선정 후보로 검토할 가치가 있다(L/N 전략의 "관심 못 받은 채 조용히 있는 종목" 가설과 같은 방향).
+
+⚠️ **주의사항(단일축보다 더 엄격히 적용할 것)**:
+- **변수가 늘수록 과적합 위험도 늘어난다** — 임계값을 5개 조합하면 우연히 잘 맞는 조합을 찾을 확률이
+  단일축보다 훨씬 높다. 반드시 `since`/`until`로 탐색·holdout을 나누고, holdout에서도 방향이 유지돼야
+  채택 후보로 본다(이 시스템이 이미 여러 번 겪은 실패 패턴 — `TURNOVER LOW`·`GC_RECENCY HIGH`·
+  `FRGN_CHG_3M HIGH` 전부 탐색 구간에서 깨끗했다가 holdout에서 부호가 뒤집혔다).
+- **단일일 클러스터 가드는 그대로 적용**(Phase 2-1) — 복합점수 버킷별로도 `distinctDays`/최대기여일 제외
+  net을 반드시 확인.
+- **왜도 큰 feature를 이진화할 때 임계 선택 자체가 숨은 자유도**다 — 예시 임계(거래량배수≥8, 등락률≥5% 등)는
+  CLAUDE.md에 이미 근거가 있는 값을 재사용했지만, 여러 임계를 시험해보고 제일 잘 맞는 걸 고르면 그것도
+  과적합이다. 임계는 고정하고 결과만 보고할 것.
+- 결과가 나오면 **"복합점수 N에서 net이 M%였다"는 한 줄 보고가 아니라, 단조성·holdout·클러스터 셋 다 통과한
+  뒤에만** Phase 5-B/C 제안으로 올릴 것 — 통과 못 하면 "복합 지표도 무신호"라는 결론 자체가 유효한 산출물이다.
+
+**적용 범위 둘**:
+- **전략 진입-레벨 복합**(위 템플릿, `TradeOutcome.entry_*` 컬럼): 수급·체결강도·뉴스·호가불균형·거래량배수·
+  등락률처럼 진입 순간에 찍히는 지표들의 조합. Phase 5-C 축③의 기본 접근으로 승격.
+- **종목선정-레벨 복합**(`selection-sweep`/`value-sweep`이 쓰는 `daily_price` 기반 `SelectionAxis`,
+  월별 스냅샷): RET_1M/3M/6M·52주고가거리·거래량추세·거래대금·PBR/이익수익률처럼 월 단위로 갱신되는
+  지표들의 조합 — 예: `HIGH_52W_HIGH`(유일 생존 단일축) + 완만한 RET_3M + 적정 거래대금을 함께 요구하면
+  더 나아지는지. 단 이쪽은 **holdout을 이미 3~6회 소진**했으므로(Phase 1 경고) 사용자가 새 조합을 명시적으로
+  요청했을 때만, 그리고 반드시 코드에 정식 축으로 추가해 `since`/`until`로 검증할 것 — SQL로 대충 훑어보고
+  판단하기엔 이미 표본이 오염 위험군이다.
+
 3. **진입필터가 선정력을 더하는가**(`control-analysis?horizon=close`, 보조): 전략별 "진입 vs 미진입(reject
    사유별)" 비교는 "이 전략의 자체 필터가 같은 후보군에서 더 나은 종목을 골랐는가"를 재는 도구다 — 넓게 보면
    이것도 종목선정 품질 진단이다. `hint`에 "미진입이 더 나음(필터 완화 검토)"가 뜨면 그 필터가 오히려
@@ -158,8 +222,9 @@ multiday-marks                                   # 수집 현황(전략별 outco
 4. **feature-mining은 horizon을 바꿔 쓸 것**: `?horizon=exit`은 이제 의미가 없다(Phase 2-3 참조) — `close`/
    `nextClose`/`d2`/`d3` 중 멀티데이 스케일에 가장 가까운 것을 쓴다(정확한 15거래일 반사실은 아직 이 엔드포인트가
    지원 안 함 — Phase 5-D 참조). ⚠️ 2026-08-21 발굴 세션 결론을 잊지 말 것: **"유효한 축은 이미 게이트가 쓰는
-   전략×시장×국면뿐이고, 미탐색 pocket은 없었다."** 새 pocket이 나오면 반드시 시간분할(`since`/`until`)로
-   재확인하고, 통과해도 즉시 채택하지 말고 섀도우로 먼저 검증할 것.
+   전략×시장×국면뿐이고, 미탐색 pocket은 없었다."** 단, feature-mining은 **여전히 단일축**이다 — 새 pocket이
+   나오면 위 4-A 방식으로 다른 지표와 묶어 복합점수로도 재검할 것. 통과해도 즉시 채택하지 말고 섀도우로 먼저
+   검증할 것.
 
 ## Phase 5. 조치 제안
 
@@ -184,7 +249,7 @@ multiday-marks                                   # 수집 현황(전략별 outco
 |---|---|---|---|
 | ① 진입 필터 강도 | `control-analysis`(close, aligned) | reject분이 ENTERED보다 나쁨→필터 유효 / 좋음→과도 | 해당 전략 `SIGNAL_*` 임계 |
 | ② 국면 조건부 | `strategy-gate` 사유·`multiday-exit-comparison` | 특정 국면에서만 약함 | 그 국면 진입 하드컷(`entryTrend`) 또는 게이트 `*_ALLOWED_REGIMES` |
-| ③ 승패 feature | `feature-mining`(close/nextClose/d2/d3) | 특정 feature가 승패를 가름 | 그 feature 상/하한 필터 신설. 왜도 큰 feature는 bin별 net으로 볼 것(평균 비교 금지 — 뉴스경과분에서 반대 결론 낸 전례) |
+| ③ 승패 feature(복합) | `feature-mining` 단일축 + **Phase 4-A 복합점수**(우선) | 단일 feature가 아니라 관련 feature 묶음의 복합점수가 단조성을 보이는가 | 개별 filter가 아니라 복합점수 상/하한. 왜도 큰 feature는 bin별 net으로(평균 비교 금지 — 뉴스경과분에서 반대 결론 낸 전례) |
 
 출력 형식: **[전략] 진단(근거 n·edge/excess) → 보정안(env 이름/코드 위치) → 기대효과 → 리스크·표본충분성**.
 전략마다 가장 임팩트 큰 1~2개만 제시.
@@ -199,6 +264,10 @@ multiday-marks                                   # 수집 현황(전략별 outco
   feature 탐색이 근사치로만 가능하다.
 - 신규 태깅은 forward-only(소급 불가)인 것과 소급 가능한 것을 구분해서 제안할 것 — 소급 가능하면 "먼저
   재고 아니면 버린다"(수급 태깅 사례), forward-only면 "일단 붙이고 판정은 나중에"가 맞다.
+- **복합 점수 전용 엔드포인트 부재** — 4-A는 지금 ad hoc SQL로만 가능하다. 특정 복합 조합이 홀드아웃·클러스터
+  가드를 반복해서 통과하면(우연이 아니라고 볼 근거가 쌓이면), `FeatureMiningService`에 다축 조합 필터를
+  추가하거나 별도 `CompositeScoreService`를 신설해 정식 코드로 승격하는 걸 제안할 것 — SQL 스니펫을 매번
+  손으로 복사해 돌리는 건 재현성이 떨어지고 실수가 잦다.
 
 ## 인버스 분리 표기
 
