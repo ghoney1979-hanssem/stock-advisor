@@ -91,8 +91,20 @@ public class MarketRegimeService {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.market-regime.upgrade-min-hold-minutes:30}")
     private int upgradeMinHoldMinutes = 30;   // 0=디바운스 비활성(종전 동작)
 
-    /** 승격 디바운스 상태 — stable=현재 확정 라벨, pending=승격 후보, pendingSince=후보가 처음 관측된 시각. */
-    record TrendHold(MarketTrend stable, MarketTrend pending, Instant pendingSince) {}
+    /**
+     * 승격 디바운스 상태 — stable=현재 확정 라벨, pending=승격 후보, pendingSince=후보가 처음 관측된 시각,
+     * stableDate=stable이 확정(또는 갱신)된 거래일.
+     *
+     * <p>🐞 <b>개장 후 수십~180분간 전일 라벨이 그대로 남는 버그(2026-09-08 실측·수정)</b>: 이 상태가 날짜와
+     * 무관하게 계속 이월돼, 전일 종가 기준 라벨(예 BEAR)이 오늘 개장 직후 실제로는 강세(시장폭 80%·지수
+     * +2%대)인데도 "승격 후보"로만 취급돼 30분씩 단계별로 재확인을 거쳐야 했다(2026-09-04 KOSDAQ: BEAR→
+     * NEUTRAL→BULL 두 단계를 거치며 개장 후 180분간 오독, 그동안 태깅된 진입 399건이 실제로는 강세장 조건인데
+     * BEAR 버킷으로 채점됨). 디바운스는 "장중 노이즈로 인한 깜빡임"을 막으려던 장치인데, "전일 라벨이 오늘
+     * 가격과 이미 어긋나 있는 것"까지 같은 취급을 받은 게 원인. → {@code stableDate}가 오늘이 아니면(=이 시장의
+     * 확정 라벨을 오늘 아직 한 번도 갱신하지 않았으면) <b>그날의 첫 관측을 디바운스 없이 즉시 채택</b>(최초
+     * 관측과 동일하게 취급). 그 이후 같은 날 안에서의 변동에는 종전대로 비대칭 디바운스가 적용된다.</p>
+     */
+    record TrendHold(MarketTrend stable, MarketTrend pending, Instant pendingSince, LocalDate stableDate) {}
 
     private final Map<String, TrendHold> holdState = new ConcurrentHashMap<>();
 
@@ -103,28 +115,33 @@ public class MarketRegimeService {
 
     /**
      * 승격 디바운스(순수 상태전이, 테스트용 정적). 강등·동일은 즉시 반영하고, 승격만 같은 후보가
-     * minHoldMinutes 이상 지속됐을 때 확정한다. minHoldMinutes≤0 또는 최초 관측이면 그대로 통과.
+     * minHoldMinutes 이상 지속됐을 때 확정한다. minHoldMinutes≤0, 최초 관측, 또는 확정 라벨이 오늘 것이
+     * 아니면(=그날의 첫 관측) 그대로 통과.
      */
-    static TrendHold stabilizeTrend(TrendHold prev, MarketTrend raw, Instant now, int minHoldMinutes) {
+    static TrendHold stabilizeTrend(TrendHold prev, MarketTrend raw, Instant now, int minHoldMinutes, LocalDate today) {
         if (raw == null) return prev;
-        if (minHoldMinutes <= 0 || prev == null || prev.stable() == null) return new TrendHold(raw, null, null);
+        if (minHoldMinutes <= 0 || prev == null || prev.stable() == null || !today.equals(prev.stableDate())) {
+            return new TrendHold(raw, null, null, today);
+        }
         MarketTrend stable = prev.stable();
-        if (raw == stable) return new TrendHold(stable, null, null);              // 후보 소멸 → 대기 해제
-        if (trendRank(raw) < trendRank(stable)) return new TrendHold(raw, null, null);   // 강등 = 즉시(리스크 축소)
+        if (raw == stable) return new TrendHold(stable, null, null, today);              // 후보 소멸 → 대기 해제
+        if (trendRank(raw) < trendRank(stable)) return new TrendHold(raw, null, null, today);   // 강등 = 즉시(리스크 축소)
         if (prev.pending() != raw || prev.pendingSince() == null) {
-            return new TrendHold(stable, raw, now);                               // 새 승격 후보 — 관측 시작
+            return new TrendHold(stable, raw, now, prev.stableDate());                   // 새 승격 후보 — 관측 시작
         }
         if (Duration.between(prev.pendingSince(), now).toMinutes() >= minHoldMinutes) {
-            return new TrendHold(raw, null, null);                                // 지속 확인 → 승격 확정
+            return new TrendHold(raw, null, null, today);                                // 지속 확인 → 승격 확정
         }
-        return new TrendHold(stable, raw, prev.pendingSince());                   // 아직 확정 전 → 기존 라벨 유지
+        return new TrendHold(stable, raw, prev.pendingSince(), prev.stableDate());       // 아직 확정 전 → 기존 라벨 유지
     }
 
     /** 승격 디바운스 적용값. 시장별 상태를 원자적으로 전이시킨다. */
     private MarketTrend stabilized(String market, MarketTrend raw) {
         if (upgradeMinHoldMinutes <= 0 || raw == null) return raw;
         Instant now = Instant.now();
-        TrendHold next = holdState.compute(market, (k, prev) -> stabilizeTrend(prev, raw, now, upgradeMinHoldMinutes));
+        LocalDate today = LocalDate.now(SEOUL);
+        TrendHold next = holdState.compute(market,
+                (k, prev) -> stabilizeTrend(prev, raw, now, upgradeMinHoldMinutes, today));
         return next.stable();
     }
 
