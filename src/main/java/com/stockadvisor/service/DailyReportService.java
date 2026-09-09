@@ -30,7 +30,10 @@ import java.util.stream.Collectors;
  * - 오늘 실매매: LIVE 매수 건별(종목명·전략·체결가) + 청산 결과(익절/손절/미청산)
  * - 전략별 누적 실현손익(원·승률)
  * - 일별 실현손익 그래프(최근 N거래일)
- * - 전략 진단 감시 플래그(섀도우 대조군 기반 — 감시용)
+ *
+ * <p>⚠️ <b>전략 진단 감시 플래그는 2026-09-10 삭제</b>(사용자 요청) — 섀도우 대조군 기반 손실 감지였는데,
+ * 전 LIVE 전략이 멀티데이 청산으로 전환된 뒤로는 그 진단이 쓰는 당일 net(close horizon)이 실제 청산과
+ * 어긋나 리포트에 잘못된 경보를 실었다. 대조군 진단 자체는 {@code /admin/control-diagnosis}에 그대로 있다.</p>
  *
  * <p>섀도우(가상매수) 성과·권장 청산시점은 리포트에서 제외(사용자 요청) — 상세 분석은
  * {@code /admin/strategy-report}·{@code /admin/exit-timing} 등 조회 API로.</p>
@@ -51,20 +54,17 @@ public class DailyReportService {
     private final CompanyRepository companyRepository;
     private final KisApiClient kisApiClient;
     private final DiscordNotifier discordNotifier;
-    private final ControlAnalysisService controlAnalysisService;
     private final Map<String, String> labelByName;
 
     public DailyReportService(OrderRepository orderRepository,
                               CompanyRepository companyRepository,
                               KisApiClient kisApiClient,
                               DiscordNotifier discordNotifier,
-                              ControlAnalysisService controlAnalysisService,
                               List<TradingStrategy> strategies) {
         this.orderRepository = orderRepository;
         this.companyRepository = companyRepository;
         this.kisApiClient = kisApiClient;
         this.discordNotifier = discordNotifier;
-        this.controlAnalysisService = controlAnalysisService;
         this.labelByName = strategies.stream()
                 .collect(Collectors.toMap(TradingStrategy::name, TradingStrategy::label));
     }
@@ -97,9 +97,6 @@ public class DailyReportService {
                 .toList();
         appendCumulative(sb, closedAll);
         appendDailyChart(sb, closedAll);
-
-        // 4) 전략 진단 감시 플래그 (손실 전략만 자동 감지 — 상세 원인·조치는 수동 판단, 자동 조치 아님)
-        appendDiagnosisFlags(sb);
 
         sb.append("\n_").append(Disclaimer.SHORT).append("_");
 
@@ -185,35 +182,6 @@ public class DailyReportService {
         double maxAbs = daily.values().stream().mapToDouble(Math::abs).max().orElse(1.0);
         daily.forEach((d, pnl) -> sb.append(fmtDay(d)).append(" ").append(bar(pnl, maxAbs))
                 .append(String.format(" %+,d원 (%d건)\n", pnl, byDay.get(d).size())));
-    }
-
-    /** 전략 진단 감시 플래그 — 손실 전략만 자동 감지해 알림(감시용). 상세 원인·조치는 수동 판단(자동 조치 아님). */
-    private void appendDiagnosisFlags(StringBuilder sb) {
-        sb.append("\n**[전략 진단 감시 🔍]**\n");
-        try {
-            List<ControlAnalysisService.Diagnosis> ds = controlAnalysisService.diagnose();
-            List<String> losers = new ArrayList<>();
-            List<String> unsampled = new ArrayList<>();
-            for (ControlAnalysisService.Diagnosis d : ds) {
-                if (d.verdict().startsWith("LOSER")) {
-                    losers.add(String.format("%s(%+.2f%%)", label(d.strategy()), d.enteredNet()));
-                } else if ("UNDERSAMPLED".equals(d.verdict())) {
-                    unsampled.add(label(d.strategy()));
-                }
-            }
-            if (losers.isEmpty()) {
-                sb.append("• 🟢 손실 전략 없음\n");
-            } else {
-                sb.append("• 🔴 손실 감지: ").append(String.join(", ", losers)).append("\n");
-                sb.append("• ⚠️ 상세 원인·조치는 수동 판단 필요 (자동 조치 아님) — `/admin/control-diagnosis`\n");
-            }
-            if (!unsampled.isEmpty()) {
-                sb.append("• ⚪ 미검증: ").append(String.join(", ", unsampled)).append("\n");
-            }
-        } catch (Exception e) {
-            sb.append("• 진단 계산 실패\n");
-            log.warn("전략 진단 감시 계산 실패: {}", e.getMessage());
-        }
     }
 
     private long sumPnl(List<Order> list) {

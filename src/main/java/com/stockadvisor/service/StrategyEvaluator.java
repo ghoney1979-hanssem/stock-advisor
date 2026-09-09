@@ -57,6 +57,9 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private UniverseSnapshotService universeSnapshotService;
     private final HotWatchService hotWatchService;        // 티어드 스캔 핫셋 도출(전수 스캔 중 volumeRatio 수집)
+    // LIVE 화이트리스트 조회(알림 대상 판정, 2026-09-10) — 필드주입(생성자 무churn). 미주입(테스트)이면 종전 동작.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.config.properties.TradingPolicyProperties tradingPolicy;
 
     // 대조군 집중: 검증된 승자는 대조군 수집 중단(부하↓), 손실·미검증은 수집(진단). 성과 저하 시 자동 재개.
     private final boolean controlFocusEnabled;
@@ -837,12 +840,33 @@ public class StrategyEvaluator {
             boolean liveSubmitted = orderResult != null
                     && (orderResult.status() == OrderService.ResultStatus.SUBMITTED
                         || orderResult.status() == OrderService.ResultStatus.PENDING_APPROVAL);
-            if (strategy.alerts() || liveSubmitted) {
+            if ((strategy.alerts() && alertWhitelisted(strategy.name())) || liveSubmitted) {
                 discordNotifier.send(buildMessage(stockCode, catalyst, signal, rec, strategy, orderResult));
                 alerts++;
             }
         }
         return alerts;
+    }
+
+    /**
+     * LIVE 화이트리스트 밖 전략의 <b>추천 알림 차단</b>(2026-09-10, 사용자 요청).
+     *
+     * <p>화이트리스트에서 빠진 전략은 실주문을 못 내는데 신호 알림은 계속 나가, 읽는 사람이 "살 수 있는 추천"과
+     * "기록만 남는 섀도우"를 구분할 수 없었다(9/8 B 제외 후 실측). 알림은 <b>지금 실제로 매매하는 전략</b>만 낸다.</p>
+     *
+     * <p>⚠️ {@code liveSubmitted} OR 분기는 그대로 둔다 — 실주문이 나갔는데 신호 알림이 없는 불일치를 막는
+     * 2026-07-24 규칙이 우선이다(화이트리스트 밖 전략은 애초에 실주문이 안 나가므로 실질 충돌은 없다).</p>
+     *
+     * <p>⚠️ 화이트리스트가 <b>비어 있으면 제약 없음</b>(종전 동작) — 코드 기본값·테스트 환경에서 알림이 통째로
+     * 사라지지 않게 degrade open 한다. prod는 8개가 지정돼 있어 그대로 적용된다.</p>
+     */
+    private boolean alertWhitelisted(String strategy) {
+        return alertWhitelisted(tradingPolicy == null ? null : tradingPolicy.liveStrategies(), strategy);
+    }
+
+    /** 위 판정의 순수 정적 부분(테스트용). */
+    static boolean alertWhitelisted(java.util.List<String> whitelist, String strategy) {
+        return whitelist == null || whitelist.isEmpty() || whitelist.contains(strategy);
     }
 
     /** 진입 주문 제출(격리). 주문 실패가 신호 처리/가상매수를 깨지 않도록 예외를 삼킨다. 결과는 알림에 담는다(오류 시 null). */

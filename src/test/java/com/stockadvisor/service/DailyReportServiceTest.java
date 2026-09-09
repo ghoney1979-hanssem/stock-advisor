@@ -36,17 +36,15 @@ class DailyReportServiceTest {
     private final CompanyRepository companyRepo = mock(CompanyRepository.class);
     private final KisApiClient kis = mock(KisApiClient.class);
     private final DiscordNotifier discord = mock(DiscordNotifier.class);
-    private final ControlAnalysisService control = mock(ControlAnalysisService.class);
 
     private DailyReportService svc() {
         TradingStrategy b = mock(TradingStrategy.class);
         when(b.name()).thenReturn("VOLUME_LEADING_B");
         when(b.label()).thenReturn("거래량주도 (B)");
         when(kis.fetchIndexChangeRate(anyString())).thenReturn(1.23);
-        when(control.diagnose()).thenReturn(List.of());
         when(companyRepo.findById("005930")).thenReturn(Optional.of(
                 new Company("005930", "삼성전자", null, "KOSPI")));
-        return new DailyReportService(orderRepo, companyRepo, kis, discord, control, List.of(b));
+        return new DailyReportService(orderRepo, companyRepo, kis, discord, List.of(b));
     }
 
     private Order liveBuy(String code, long qty, long price) {
