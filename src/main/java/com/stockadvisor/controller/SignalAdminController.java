@@ -85,6 +85,9 @@ public class SignalAdminController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.FeatureMiningService featureMiningService;   // feature-space 마이닝(생성적 분석) — 필드주입
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.DailyMarkOhlcBackfillService dailyMarkOhlcBackfillService;   // 일봉마크 OHLC 소급 — 필드주입
+
     private final DisclosurePollingService pollingService;
     private final SignalAlertService signalAlertService;
     private final MarketSignalService marketSignalService;
@@ -426,6 +429,18 @@ public class SignalAdminController {
         return java.util.Map.of("touched", tradeFollowUpService.backfillMultidayMarks());
     }
 
+    /**
+     * 일봉 마크의 <b>시·고·저가 소급 백필</b>(2026-09-10) — {@code daily_price}에서 종가 일치 행만 채운다.
+     *
+     * <p>게이트 net 채점이 손절(장중 저가에서 발사)을 반영하려면 저가가 필요하다. 구표본은 종가만 있어
+     * 이걸 돌리기 전엔 "손절 없는 세계"로 채점된다. 재실행 안전(이미 채워진 행은 건너뜀).</p>
+     */
+    @PostMapping("/backfill-daily-mark-ohlc")
+    public Object backfillDailyMarkOhlc() {
+        if (dailyMarkOhlcBackfillService == null) return java.util.Map.of("error", "service unavailable");
+        return dailyMarkOhlcBackfillService.backfill();
+    }
+
     /** 멀티데이 청산 트리거 시뮬 — 일봉 경로에 보유D+N/트레일%/MA이탈/손절 시뮬해 전략별 net 최대 방식(Phase 2). */
     /**
      * @param fullPathsOnly true면 D+15까지 마크가 다 찬 표본만(고정 코호트) — horizon마다 표본이 바뀌는
@@ -585,11 +600,23 @@ public class SignalAdminController {
             row.put("rows", marks.size());
             row.put("outcomes", marks.stream().map(com.stockadvisor.domain.OutcomeDailyMark::getOutcomeId).distinct().count());
             row.put("maxMarkDays", marks.stream().mapToInt(com.stockadvisor.domain.OutcomeDailyMark::getMarkDays).max().orElse(-1));
+            // 고·저가 커버리지(2026-09-10) — 손절은 <b>장중 저가</b>에서 발사되므로, 이 값이 낮으면 그만큼
+            // net 채점이 "손절 없는 세계"로 degrade돼 있다는 뜻이다(POST /backfill-daily-mark-ohlc 로 채운다).
+            long withOhlc = marks.stream().filter(m -> m.getLowPrice() != null && m.getLowPrice() > 0).count();
+            row.put("ohlcRows", withOhlc);
+            row.put("ohlcCoveragePct", marks.isEmpty() ? 0.0 : Math.round(withOhlc * 10000.0 / marks.size()) / 100.0);
             if (strategy != null && !strategy.isBlank()) {
-                row.put("marks", marks.stream().map(m -> java.util.Map.of(
-                        "outcomeId", m.getOutcomeId(), "d", m.getMarkDays(),
-                        "date", m.getBusinessDate(), "close", m.getClosePrice(),
-                        "retPct", Math.round(m.returnPct() * 100) / 100.0)).toList());
+                row.put("marks", marks.stream().map(m -> {
+                    java.util.Map<String, Object> mk = new java.util.LinkedHashMap<>();
+                    mk.put("outcomeId", m.getOutcomeId());
+                    mk.put("d", m.getMarkDays());
+                    mk.put("date", m.getBusinessDate());
+                    mk.put("close", m.getClosePrice());
+                    mk.put("high", m.getHighPrice());
+                    mk.put("low", m.getLowPrice());
+                    mk.put("retPct", Math.round(m.returnPct() * 100) / 100.0);
+                    return mk;
+                }).toList());
             }
             out.add(row);
         }

@@ -55,14 +55,43 @@ public class OutcomeDailyMark {
     @Column(name = "close_price", nullable = false)
     private long closePrice;
 
+    /**
+     * 해당 거래일 시가·고가·저가 (2026-09-10 신설, nullable → ddl-auto 안전).
+     *
+     * <p><b>왜 종가만으로는 부족한가</b>: 라이브 청산은 <b>매 분</b> 현재가를 보고 손절(−7% 등)·트레일을
+     * 판정하므로 <b>장중 저가</b>에서 발사된다. 종가만으로 채점하면 "장중에 −8%까지 밀렸다가 −2%로 회복한 날"이
+     * 손절 미발동으로 계산돼, 게이트가 <b>실제로는 하지 않는 청산</b>으로 net을 재게 된다
+     * (2026-08-18 비-TIME horizon 버그와 같은 유형). 고가는 상한가익절(+29%) 판정에 쓴다.</p>
+     *
+     * <p>수집은 무료다 — {@code TradeFollowUpService}가 이미 조회하는 KIS 일봉 행에 시·고·저가 들어 있다.
+     * 구표본은 {@code POST /admin/backfill-daily-mark-ohlc}로 {@code daily_price}에서 소급한다.</p>
+     */
+    @Column(name = "open_price")
+    private Long openPrice;
+
+    @Column(name = "high_price")
+    private Long highPrice;
+
+    @Column(name = "low_price")
+    private Long lowPrice;
+
     public OutcomeDailyMark(Long outcomeId, String strategy, long buyPrice,
                             int markDays, String businessDate, long closePrice) {
+        this(outcomeId, strategy, buyPrice, markDays, businessDate, closePrice, null, null, null);
+    }
+
+    public OutcomeDailyMark(Long outcomeId, String strategy, long buyPrice,
+                            int markDays, String businessDate, long closePrice,
+                            Long openPrice, Long highPrice, Long lowPrice) {
         this.outcomeId = outcomeId;
         this.strategy = strategy;
         this.buyPrice = buyPrice;
         this.markDays = markDays;
         this.businessDate = businessDate;
         this.closePrice = closePrice;
+        this.openPrice = openPrice;
+        this.highPrice = highPrice;
+        this.lowPrice = lowPrice;
     }
 
     /** 매수가 대비 수익률(%) */

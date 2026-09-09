@@ -195,4 +195,121 @@ class MultidayExitTest {
         assertThat(d.reason()).contains("멀티데이트레일");            // 어느 horizon으로 쟀는지 드러난다
         assertThat(d.allowed()).isTrue();
     }
+
+    // ── 청산/손절 기준 정합(2026-09-10, 사용자 지시 "net 측정을 청산/손절 기준에 맞게") ─────────────
+    // 라이브는 매 분 상한가익절 > 손절 > 트레일/만기 순으로 본다. 시뮬이 손절을 빼면 게이트가 채점하는 net은
+    // "라이브가 실제로 확정하는 손실"을 포함하지 않는다.
+
+    private static final double STOP = 7.0, LIMIT_UP = 29.0;
+
+    private java.util.List<PositionExitService.DayBar> bars(PositionExitService.DayBar... b) {
+        return java.util.List.of(b);
+    }
+
+    private PositionExitService.DayBar bar(int day, long open, long high, long low, long close) {
+        return new PositionExitService.DayBar(day, close, open, high, low);
+    }
+
+    @Test
+    void 손절은_종가가_아니라_장중_저가에서_발사된다() {
+        // 장중 −8%까지 밀렸다가 종가 −2%로 회복 — 라이브는 이미 손절선(−7%)에서 팔았다.
+        // 종가만 보면 이 경로는 살아남아 net이 실제보다 좋게 나온다(그게 종전 채점의 결함).
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(bar(1, 9_900, 10_000, 9_200, 9_800)), 10_000, ARM, DROP, MAX, STOP, LIMIT_UP))
+                .isEqualTo(9_300L);   // 손절선 체결
+    }
+
+    @Test
+    void 갭하락은_손절가가_아니라_시가_체결이다() {
+        // 시가가 이미 손절선 아래면 손절가에 팔린 척하면 안 된다(하락장 손실 과소평가).
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(bar(1, 9_000, 9_100, 8_800, 8_900)), 10_000, ARM, DROP, MAX, STOP, LIMIT_UP))
+                .isEqualTo(9_000L);
+    }
+
+    @Test
+    void 고저가가_없는_구표본은_종가_판정으로_degrade한다() {
+        // 저가 미수집(구표본) — 장중에 얼마나 밀렸는지 알 수 없으니 종가로만 판정한다.
+        // ⚠️ 이 degrade는 손절 히트를 <b>과소</b> 집계한다(백필로 메운다).
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(PositionExitService.DayBar.ofClose(1, 9_800),
+                             PositionExitService.DayBar.ofClose(2, 10_050)),
+                10_000, ARM, DROP, 2, STOP, LIMIT_UP))
+                .isEqualTo(10_050L);
+        // 같은 구표본이라도 종가가 손절선 아래면 발사된다(종가 체결).
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(PositionExitService.DayBar.ofClose(1, 9_200)),
+                10_000, ARM, DROP, MAX, STOP, LIMIT_UP))
+                .isEqualTo(9_200L);
+    }
+
+    @Test
+    void 상한가익절은_전일종가_대비_고가로_판정한다() {
+        // D0 종가 10,000 → 당일 고가 13,000 = +30% → +29% 문턱 통과. 라이브는 그 지점에서 잠근다.
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(bar(1, 10_100, 13_000, 9_900, 12_000)), 10_000, ARM, DROP, MAX, STOP, LIMIT_UP))
+                .isEqualTo(12_900L);
+    }
+
+    @Test
+    void 저가구간에서는_트레일선이_손절선보다_위라_먼저_발사된다() {
+        // 무장(고점 10,700) 상태에서 저가가 손절선(9,300)까지 밀린 날 — 하락 중이라면 트레일선(10,486)을
+        // 먼저 통과한다. 우선순위 역전이 아니라 <b>시간 순서</b>다.
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(bar(1, 10_100, 10_700, 10_000, 10_600),
+                             bar(2, 10_500, 10_500, 9_000, 9_100)),
+                10_000, ARM, DROP, MAX, STOP, LIMIT_UP))
+                .isEqualTo(10_486L);
+    }
+
+    @Test
+    void 만기는_마크_순번이_아니라_실제_거래일로_센다() {
+        // D+2 마크가 빠진 경로. 순번으로 세면 D+3을 D+2로 착각해 만기(2) 안에 넣어 20,000을 잡는다.
+        assertThat(PositionExitService.simulateMultidayExitPrice(
+                10_000, bars(PositionExitService.DayBar.ofClose(1, 10_100),
+                             PositionExitService.DayBar.ofClose(3, 20_000)),
+                10_000, ARM, DROP, 2, STOP, LIMIT_UP))
+                .isEqualTo(10_100L);
+    }
+
+    @Test
+    void 게이트_채점에_손절이_반영된다() {
+        // 장중 −9%까지 밀렸다가 종가 −1%로 회복한 경로 6건. 종가만 보면 net −1.22%지만,
+        // 라이브는 −7% 손절선에서 이미 팔았으므로 실제 net 은 −7.22% 다.
+        // ⚠️ 이 차이가 게이트 판정을 뒤집는다(열림 → 차단) — 손절 없는 채점이 왜 위험한지가 여기서 드러난다.
+        java.util.List<com.stockadvisor.domain.TradeOutcome> rows = new java.util.ArrayList<>();
+        java.util.List<com.stockadvisor.domain.OutcomeDailyMark> marks = new java.util.ArrayList<>();
+        String[] dates = {"20260901", "20260902", "20260903"};
+        for (int i = 0; i < 6; i++) {
+            var o = new com.stockadvisor.domain.TradeOutcome("MULTIDAY_REVERSION_P", null,
+                    String.format("%06d", i), dates[i % 3], 10_000L);
+            org.springframework.test.util.ReflectionTestUtils.setField(o, "id", (long) i);
+            rows.add(o);
+            marks.add(new com.stockadvisor.domain.OutcomeDailyMark((long) i, "MULTIDAY_REVERSION_P", 10_000L,
+                    1, dates[i % 3], 9_900L, 9_950L, 10_000L, 9_100L));
+        }
+        var repo = org.mockito.Mockito.mock(com.stockadvisor.repository.TradeOutcomeRepository.class);
+        org.mockito.Mockito.when(repo.findByStrategyAndAlertDateGreaterThanEqual(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenReturn(rows);
+        var markRepo = org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeDailyMarkRepository.class);
+        org.mockito.Mockito.when(markRepo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc("MULTIDAY_REVERSION_P"))
+                .thenReturn(marks);
+        var cost = org.mockito.Mockito.mock(ExecutionCostModel.class);
+        org.mockito.Mockito.when(cost.estimateRoundTripSlippagePct(org.mockito.ArgumentMatchers.anyLong())).thenReturn(0.0);
+        var props = new com.stockadvisor.config.properties.StrategyPerformanceProperties(
+                true, 20, 5, 0.3, "exit", false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        var gate = new StrategyPerformanceGate(repo, props,
+                org.mockito.Mockito.mock(MarketRegimeService.class), cost,
+                org.mockito.Mockito.mock(StrategyHoldTimeProvider.class),
+                org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeSampleRepository.class),
+                java.util.List.of(), 0.22, "", "nextClose", 0.0, false, false, "", "", "", "");
+        gate.configureMultidayScoring("MULTIDAY_REVERSION_P", ARM, DROP, MAX, markRepo);
+        gate.configureScoringStop(STOP, LIMIT_UP);
+
+        var d = gate.evaluate("MULTIDAY_REVERSION_P");
+        assertThat(d.samples()).isEqualTo(6);
+        assertThat(d.netAvgReturnPct()).isEqualTo(-7.22);
+        assertThat(d.reason()).contains("손절-7.0%");   // 어떤 규칙으로 쟀는지 사유에 드러난다
+        assertThat(d.allowed()).isFalse();
+    }
 }

@@ -280,8 +280,12 @@ public class TradeFollowUpService {
             DailyPrice row = rowOpt.get();
             long close = parseLong(row.closePrice());
             if (close <= 0) continue;
+            // 시·고·저가도 함께 적재(2026-09-10) — 추가 KIS 호출 0(이미 받아 온 일봉 행이다).
+            // 저가는 손절·트레일이 <b>장중</b>에 발사되는 지점이고 고가는 상한가익절 지점이라,
+            // 이게 없으면 게이트 net 이 "종가에 회복한 손절 케이스"를 놓친다(= 라이브가 안 하는 청산으로 채점).
             dailyMarkRepository.save(new OutcomeDailyMark(
-                    o.getId(), o.getStrategy(), o.getBuyPrice(), n, row.businessDate(), close));
+                    o.getId(), o.getStrategy(), o.getBuyPrice(), n, row.businessDate(), close,
+                    positiveOrNull(row.openPrice()), positiveOrNull(row.highPrice()), positiveOrNull(row.lowPrice())));
         }
     }
 
@@ -324,6 +328,12 @@ public class TradeFollowUpService {
         if (bd.isBefore(today)) return true;
         if (bd.isEqual(today)) return LocalTime.now(SEOUL).isAfter(MARKET_CLOSE);
         return false;
+    }
+
+    /** 파싱 실패·0을 <b>null</b>로 — 시·고·저가는 "없음"과 "0원"을 구분해야 시뮬이 degrade 여부를 안다. */
+    private Long positiveOrNull(String v) {
+        long p = parseLong(v);
+        return p > 0 ? p : null;
     }
 
     private long parseLong(String v) {

@@ -171,7 +171,7 @@ class MultidayExitAnalysisServiceTest {
 
         assertThat(h1.distinctDays()).isEqualTo(6);
         assertThat(h1.clustered()).isFalse();
-        assertThat(c.recommended()).isEqualTo("보유 D+1");   // 비클러스터라 권장으로 채택됨
+        assertThat(c.recommended()).startsWith("라이브규칙");   // 동률이면 현행(라이브 규칙) 유지 — 아래 보유 D+1과 같은 수치다
     }
 
     @Test
@@ -259,7 +259,7 @@ class MultidayExitAnalysisServiceTest {
 
         MultidayExitAnalysisService.MultidayExitComparison c = d(withUniverse(repo, universe).compare(true));
         assertThat(c.benchmarkAvailable()).isTrue();
-        assertThat(c.recommended()).isEqualTo("보유 D+3");
+        assertThat(c.recommended()).startsWith("라이브규칙");   // 라이브 규칙이 D+3과 동률 → 현행 유지
         assertThat(c.recommendedExcessPct()).isCloseTo(3.0, within(1e-6));
     }
 
@@ -296,7 +296,7 @@ class MultidayExitAnalysisServiceTest {
         MultidayExitAnalysisService.MultidayExitComparison c = d(svc.compare(true));
         assertThat(c.benchmarkAvailable()).isFalse();
         assertThat(c.recommendedExcessPct()).isNull();
-        assertThat(c.recommended()).isEqualTo("보유 D+1");                   // 종전 동작 보존
+        assertThat(c.recommended()).startsWith("라이브규칙");        // 절대 net 기준 동률 → 현행 유지
         assertThat(hold(c, 1).universeNetPct()).isNull();
     }
 
@@ -344,5 +344,31 @@ class MultidayExitAnalysisServiceTest {
     private MultidayExitAnalysisService.MethodResult hold(
             MultidayExitAnalysisService.MultidayExitComparison c, int days) {
         return c.methods().stream().filter(m -> m.method().equals("보유 D+" + days)).findFirst().orElseThrow();
+    }
+
+    // ── 라이브 규칙 줄(2026-09-10) ────────────────────────────────────────────────
+    // 대안 방식들은 전부 "손절 없는 세계"의 수치다. 지금 실제로 하는 청산의 net 은 이 줄에서만 보인다.
+
+    @Test
+    void 라이브규칙은_장중저가_손절을_반영한다() {
+        // 종가는 −1%로 회복했지만 장중 −9%까지 밀린 날 — 라이브는 −7% 손절선에서 이미 팔았다.
+        Path p = new Path(1000, new int[]{0, 1}, new long[]{1000, 990}, true, "20260901",
+                new long[]{995, 995}, new long[]{1005, 1000}, new long[]{995, 910});
+        assertThat(MultidayExitAnalysisService.liveRuleExitAt(p, 5, 2, 15, 7, 29, 0).orElseThrow().netPct())
+                .isCloseTo(-7.0, within(1e-6));
+        // 같은 경로라도 고·저가가 없으면(구표본) 종가 판정으로 degrade — 손절 히트를 과소 집계한다.
+        Path noOhlc = path(1000, new int[]{0, 1}, new long[]{1000, 990}, true);
+        assertThat(MultidayExitAnalysisService.liveRuleExitAt(noOhlc, 5, 2, 15, 7, 29, 0).orElseThrow().netPct())
+                .isCloseTo(-1.0, within(1e-6));
+    }
+
+    @Test
+    void 라이브규칙도_미해결_경로는_다른_방식과_같은_규약으로_제외한다() {
+        // 트리거 없이 데이터가 소진됐고 완주도 아님 → "데이터 소진"을 청산으로 오집계하지 않는다.
+        Path partial = path(1000, new int[]{0, 1, 2}, new long[]{1000, 1010, 1020}, false);
+        assertThat(MultidayExitAnalysisService.liveRuleExitAt(partial, 5, 2, 15, 7, 29, 0)).isEmpty();
+        Path complete = path(1000, new int[]{0, 1, 2, 3}, new long[]{1000, 1010, 1020, 1030}, true);
+        assertThat(MultidayExitAnalysisService.liveRuleExitAt(complete, 5, 2, 15, 7, 29, 0).orElseThrow().netPct())
+                .isCloseTo(3.0, within(1e-6));
     }
 }

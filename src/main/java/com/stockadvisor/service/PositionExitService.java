@@ -384,24 +384,144 @@ public class PositionExitService {
      *
      * @param closesByDay D+1부터 순서대로의 종가(비어 있으면 null)
      * @return 청산가. 트레일 미발동이면 마지막 관측일 종가(= 만기 종가)
+     * @deprecated 손절·상한가익절이 빠진 <b>구판</b>이다(순수 시뮬 테스트·호환 전용).
+     *             프로덕션 채점 경로는 반드시 {@link #simulateMultidayExitPrice(long, java.util.List, long, double, double, int, double, double)}
+     *             를 쓸 것 — 손절을 빼고 채점하면 <b>라이브가 실제로 내는 손실을 못 보는 net</b>이 된다.
      */
+    @Deprecated
     static Long simulateMultidayExitPrice(long buyPrice, java.util.List<Long> closesByDay,
                                           double armPct, double dropPct, int maxHoldDays) {
-        if (buyPrice <= 0 || closesByDay == null || closesByDay.isEmpty()) return null;
-        long peak = buyPrice;
-        Long last = null;
+        if (closesByDay == null) return null;
+        java.util.List<DayBar> bars = new java.util.ArrayList<>(closesByDay.size());
         for (int i = 0; i < closesByDay.size(); i++) {
-            int heldDays = i + 1;
-            if (maxHoldDays > 0 && heldDays > maxHoldDays) break;
             Long c = closesByDay.get(i);
-            if (c == null || c <= 0) continue;
-            last = c;
-            peak = Math.max(peak, c);
-            if (multidayExitReason(buyPrice, c, peak, heldDays, true, armPct, dropPct, maxHoldDays) != null) {
-                return c;
+            bars.add(c == null ? null : DayBar.ofClose(i + 1, c));
+        }
+        return simulateMultidayExitPrice(buyPrice, bars, 0, armPct, dropPct, maxHoldDays, 0, 0);
+    }
+
+    /**
+     * 하루치 일봉(거래일 + 시·고·저·종). 시·고·저는 <b>없을 수 있다</b>(구표본) — 그 경우 종가 판정으로 degrade한다.
+     *
+     * @param day   진입일 이후 경과 <b>거래일</b>(D+N의 N). 마크가 중간에 빠진 경로에서도 만기(D+15) 판정이
+     *              어긋나지 않도록 순번이 아니라 실제 거래일을 싣는다.
+     * @param close 종가(필수, ≤0이면 그 날은 건너뜀)
+     */
+    public record DayBar(int day, long close, Long open, Long high, Long low) {
+        public static DayBar ofClose(int day, long close) { return new DayBar(day, close, null, null, null); }
+
+        long effHigh() { return high != null && high > 0 ? high : close; }
+        long effOpen() { return open != null && open > 0 ? open : 0; }
+    }
+
+    /** 시뮬 청산 결과 — 유니버스 벤치마크를 같은 보유기간으로 맞추려면 <b>청산 거래일</b>도 필요하다. */
+    public record MultidayExit(long price, int heldDays, boolean triggered) { }
+
+    /**
+     * 멀티데이 청산가 시뮬 — <b>라이브 청산 규칙 전체</b>(상한가익절 &gt; 손절 &gt; 멀티데이 트레일/만기)를
+     * 일봉 경로에 적용해 "이 규칙으로 팔았다면 얼마였나"를 돌려준다. 게이트 채점 horizon({@code multiday})이 이걸 쓴다.
+     *
+     * <p>🔴 <b>손절이 왜 여기 들어와야 하나</b>(2026-09-10, 사용자 지시 "net 측정을 청산/손절 기준에 맞게"):
+     * 종전 시뮬은 트레일·만기만 봤는데 라이브는 <b>매 분</b> 손절선(전략별 적응형, 미채택 시 −7%)을 함께 본다.
+     * 즉 게이트가 채점하던 net은 <b>라이브가 실제로 확정하는 손실을 포함하지 않은</b> 값이었다 — 깊게 물렸다가
+     * 종가에 회복한 경로가 시뮬에선 살아남지만 실매매에선 이미 잘려 있다. 이건 2026-08-18 비-TIME horizon 버그와
+     * 정확히 같은 유형("검증한 적 없는 청산으로 실주문을 연다")이다.</p>
+     *
+     * <p>⚠️ <b>규칙을 복제하지 않는다</b> — 트레일·만기는 {@link #multidayExitReason}, 손절은
+     * {@link MarketRiskGuard#stopHit}를 그대로 호출한다. 임계값도 라이브와 <b>같은 프로퍼티</b>에서 온다
+     * (손절은 {@code StrategyStopProvider}, 상한가는 {@code trading.limit-up-lock-pct}).</p>
+     *
+     * <p><b>하루 안의 순서 규약</b>(일봉은 고가·저가의 시간 순서를 주지 않는다): TrailingExitSimulator(2026-08-28)와
+     * 같은 <b>"저가 먼저"</b> 규약을 쓴다 — ① 저가로 트레일·손절을 먼저 판정하고 ② 그 다음 고가로 상한가·peak를
+     * 갱신한다. 반대로 하면 "고가가 먼저 왔다"고 가정하는 셈이라 낙관 편향이 된다.</p>
+     *
+     * <p>⚠️ 저가 구간에서 <b>트레일을 손절보다 먼저</b> 보는 것은 우선순위 역전이 아니라 <b>시간 순서</b>다 —
+     * 무장 상태의 트레일선(≥ 매수×1.029)은 손절선(매수×0.93)보다 항상 위라, 하락 중이면 트레일선을 먼저 통과한다.
+     * 둘 다 갭으로 건너뛴 날은 어차피 시가 체결이라 같은 값이 나온다.</p>
+     *
+     * <p>⚠️ <b>갭은 트리거 가격이 아니라 시가 체결</b>이다(하락 갭에서 손절가에 팔린 것처럼 계산하면 하락장 손실이
+     * 조직적으로 과소평가된다 — 같은 이유로 {@code TrailingExitSimulator}도 이 규칙을 쓴다).</p>
+     *
+     * <p>⚠️ <b>남은 근사</b> ① 고·저가 미수집 구표본은 종가로 degrade(=손절 히트 과소) ② 같은 날 고가로 무장한 뒤
+     * 그날 저가에서 발사되는 경로는 놓친다(저가-먼저 규약의 대가) ③ <b>서킷(리스크오프) 강제청산은 미반영</b> —
+     * 그날의 지수 경로가 필요해 일봉 마크만으론 재구성이 안 된다(실제로는 폭락일에 강제청산되므로 시뮬이 그만큼 낙관).</p>
+     *
+     * @param bars       D+1부터 순서대로의 일봉(비어 있으면 null 반환)
+     * @param entryClose 진입일(D0) 종가 — 상한가익절의 전일종가 기준. ≤0이면 매수가로 degrade
+     * @param stopPct    손절선(%). 0이면 손절 미적용(구판 동작)
+     * @param limitUpPct 상한가익절 문턱(당일 등락률 %). 0이면 미적용
+     * @return 청산가. 어떤 트리거도 안 걸리면 마지막 관측일 종가(= 만기 종가)
+     */
+    static Long simulateMultidayExitPrice(long buyPrice, java.util.List<DayBar> bars, long entryClose,
+                                          double armPct, double dropPct, int maxHoldDays,
+                                          double stopPct, double limitUpPct) {
+        MultidayExit e = simulateMultidayExit(buyPrice, bars, entryClose, armPct, dropPct, maxHoldDays,
+                stopPct, limitUpPct);
+        return e == null ? null : e.price();
+    }
+
+    /** 위와 같은 시뮬이되 <b>청산 거래일</b>까지 돌려준다(멀티데이 분석의 유니버스 반사실이 보유기간을 맞추는 데 필요). */
+    static MultidayExit simulateMultidayExit(long buyPrice, java.util.List<DayBar> bars, long entryClose,
+                                             double armPct, double dropPct, int maxHoldDays,
+                                             double stopPct, double limitUpPct) {
+        if (buyPrice <= 0 || bars == null || bars.isEmpty()) return null;
+        long peak = buyPrice;
+        long prevClose = entryClose > 0 ? entryClose : buyPrice;
+        MultidayExit last = null;
+        for (int i = 0; i < bars.size(); i++) {
+            DayBar b = bars.get(i);
+            if (b == null || b.close() <= 0) continue;
+            int heldDays = b.day() > 0 ? b.day() : i + 1;
+            if (maxHoldDays > 0 && heldDays > maxHoldDays) break;
+            long close = b.close();
+            long open = b.effOpen();
+            // ⚠️ 장중 트리거는 <b>실제 고·저가가 있을 때만</b> 판정한다. 종가로 대체해 판정하면 트리거 레벨(=종가보다
+            //    위)로 체결가를 잡게 돼 오히려 낙관이 된다 — 구표본(고·저가 없음)은 종전대로 종가 판정만 받는다.
+            boolean hasLow = b.low() != null && b.low() > 0;
+            boolean hasHigh = b.high() != null && b.high() > 0;
+            last = new MultidayExit(close, heldDays, false);
+
+            // ① 저가 구간 — 트레일(무장분) → 손절. 가격 레벨 순서가 곧 시간 순서다(위 주석 참조).
+            boolean armed = armPct <= 0 || peak >= buyPrice * (1 + armPct / 100.0);
+            if (hasLow) {
+                long low = b.low();
+                if (armed && dropPct > 0) {
+                    long level = Math.round(peak * (1 - dropPct / 100.0));
+                    if (low <= level) return new MultidayExit(fillOnFall(open, level), heldDays, true);
+                }
+                if (MarketRiskGuard.stopHit(buyPrice, low, stopPct)) {
+                    return new MultidayExit(
+                            fillOnFall(open, Math.round(buyPrice * (1 - stopPct / 100.0))), heldDays, true);
+                }
             }
+            // ② 고가 구간 — 상한가익절(전일 종가 대비 당일 등락률 ≥ 문턱). 라이브와 같이 이익 구간에서만 발사.
+            if (hasHigh && limitUpPct > 0 && prevClose > 0) {
+                long level = Math.round(prevClose * (1 + limitUpPct / 100.0));
+                if (b.high() >= level && level > buyPrice) {
+                    return new MultidayExit(open > 0 ? Math.max(open, level) : level, heldDays, true);
+                }
+            }
+            // ③ 종가 판정 — 손절이 먼저(라이브 우선순위), 그 다음 라이브와 같은 트레일/만기 판정 함수.
+            //    peak 는 그날 고가로 갱신한 뒤 판정한다(라이브는 장중 현재가로 peak 를 갱신하므로).
+            peak = Math.max(peak, b.effHigh());
+            if (MarketRiskGuard.stopHit(buyPrice, close, stopPct)
+                    || multidayExitReason(buyPrice, close, peak, heldDays, true, armPct, dropPct, maxHoldDays) != null) {
+                return new MultidayExit(close, heldDays, true);
+            }
+            prevClose = close;
         }
         return last;
+    }
+
+    /**
+     * 하락 트리거 체결가 — 갭으로 레벨 아래에서 출발했으면 시가 체결(트리거가에 팔린 척하지 않는다).
+     *
+     * <p>⚠️ 트리거 레벨은 { Math.round}로 원 단위를 맞춘다(floor는 부동소수 오차 때문에 금액대에 따라
+     * 1원씩 들쭉날쭉해진다 — 실측: 10,000×0.93=9,300.0인데 1,000×0.93=929.9999…). 체결가 근사이지
+     * 트리거 조건이 아니므로 반올림이 맞다.</p>
+     */
+    private static long fillOnFall(long open, long level) {
+        return open > 0 ? Math.min(open, level) : level;
     }
 
     /**

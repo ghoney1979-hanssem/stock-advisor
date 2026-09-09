@@ -156,6 +156,17 @@ public class MarketRiskGuard {
 
     /** 매수가 대비 현재가가 주어진 손절 pct 이하인가 (전략별 적응형 손절용). */
     public boolean catastrophicStopHit(long buyPrice, long currentPrice, double pct) {
+        return stopHit(buyPrice, currentPrice, pct);
+    }
+
+    /**
+     * 손절 판정(순수 정적) — <b>채점 시뮬이 라이브와 같은 규칙을 쓰도록</b> 꺼내 둔 것(2026-09-10).
+     *
+     * <p>{@code PositionExitService.simulateMultidayExitPrice}(게이트 net 채점)가 이걸 호출한다.
+     * 시뮬이 손절식을 복제하면 두 경로가 조용히 갈라지고, 그러면 게이트가 <b>실제로 하지 않는 청산</b>으로
+     * 실주문을 열어준다(2026-08-18 비-TIME horizon 버그와 같은 유형).</p>
+     */
+    public static boolean stopHit(long buyPrice, long currentPrice, double pct) {
         if (pct <= 0 || buyPrice <= 0 || currentPrice <= 0) return false;
         return currentPrice <= buyPrice * (1.0 - pct / 100.0);
     }

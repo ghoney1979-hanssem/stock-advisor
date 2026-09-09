@@ -159,6 +159,30 @@ public class StrategyPerformanceGate {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.repository.OutcomeDailyMarkRepository dailyMarkRepository;
 
+    // ── 손절·상한가익절도 채점에 반영(2026-09-10, 사용자 지시 "net 측정을 청산/손절 기준에 맞게") ──────────
+    // 종전 멀티데이 채점은 트레일·만기만 시뮬했다 — 라이브는 매 분 <b>손절선</b>(전략별 적응형, 미채택 시 −7%)과
+    // <b>상한가익절</b>(+29%)을 함께 보므로, 그 둘이 빠진 net 은 "라이브가 실제로 확정하는 손실"을 포함하지 않는다.
+    // ⚠️ 손절선은 반드시 라이브와 <b>같은 소스</b>(StrategyStopProvider)에서 받는다 — 여기서 상수로 복제하면
+    //    적응형 손절이 갱신될 때 채점만 옛 값에 머물러 두 경로가 조용히 갈라진다.
+    // ⚠️ 필드주입 — 생성자를 늘리면 게이트 단위테스트 다수가 함께 깨지고, 순환 주입 위험도 커진다(8/29 함정).
+    //    미주입(테스트)이면 고정 손절값으로 degrade.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private StrategyStopProvider stopProvider;
+    @Value("${stockadvisor.trading.risk.catastrophic-stop-pct:7.0}")
+    private double fallbackStopPct = 7.0;
+    @Value("${stockadvisor.trading.limit-up-lock-pct:29.0}")
+    private double limitUpLockPct = 29.0;
+
+    /** 채점에 쓸 손절선(%) — 라이브 청산이 쓰는 값과 동일. provider 미주입이면 고정값. */
+    private double scoringStopPct(String strategy) {
+        if (stopProvider == null) return fallbackStopPct;
+        try {
+            return stopProvider.stopPct(strategy);
+        } catch (Exception e) {
+            return fallbackStopPct;   // 표본 조회 실패 → 고정 손절로 degrade(채점이 손절을 통째로 잃지 않게)
+        }
+    }
+
     /** 테스트용 — 멀티데이 채점 구성. */
     void configureMultidayScoring(String csv, double armPct, double dropPct, int maxHoldDays,
                                   com.stockadvisor.repository.OutcomeDailyMarkRepository repo) {
@@ -167,6 +191,13 @@ public class StrategyPerformanceGate {
         this.multidayDropPct = dropPct;
         this.multidayMaxHoldDays = maxHoldDays;
         this.dailyMarkRepository = repo;
+    }
+
+    /** 테스트용 — 채점 손절·상한가 구성(라이브 provider 없이 값만 고정). */
+    void configureScoringStop(double stopPct, double limitUpPct) {
+        this.stopProvider = null;
+        this.fallbackStopPct = stopPct;
+        this.limitUpLockPct = limitUpPct;
     }
     private static final long BREADTH_FRESH_MINUTES = 40;   // MarketBreadthService.isFresh 와 같은 기준(마감 후·전일분 오발동 방지)
 
@@ -531,23 +562,33 @@ public class StrategyPerformanceGate {
         // → horizon="multiday": 일봉 마크(outcome_daily_mark)에 <b>라이브와 동일한 판정 함수</b>를 적용해 청산가를 구한다.
         // ⚠️ 스윙보다 우선(PositionExitService의 분기 순서와 동일하게 맞춘다).
         // 경로만 미리 모으고 청산가는 outcome 순회에서 계산한다(시뮬에 그 행의 buyPrice가 필요하다).
-        java.util.Map<Long, java.util.List<Long>> multidayPaths = null;
+        java.util.Map<Long, java.util.List<PositionExitService.DayBar>> multidayPaths = null;
+        java.util.Map<Long, Long> multidayEntryClose = null;   // D0 종가 — 상한가익절의 전일종가 기준
+        double mdStopPct = 0;
         if (dailyMarkRepository != null && multidayExitSet.contains(strategy)) {
             horizon = "multiday";
-            methodTag = "·멀티데이트레일";
-            java.util.Map<Long, java.util.TreeMap<Integer, Long>> byOutcome = new java.util.HashMap<>();
+            mdStopPct = scoringStopPct(strategy);
+            methodTag = "·멀티데이트레일" + (mdStopPct > 0 ? String.format("+손절-%.1f%%", mdStopPct) : "");
+            java.util.Map<Long, java.util.TreeMap<Integer, PositionExitService.DayBar>> byOutcome = new java.util.HashMap<>();
+            multidayEntryClose = new java.util.HashMap<>();
             for (com.stockadvisor.domain.OutcomeDailyMark m
                     : dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy)) {
-                if (m.getMarkDays() < 1) continue;   // D0(진입일 종가)은 경로가 아니라 시작점
+                if (m.getMarkDays() < 1) {   // D0(진입일 종가)은 경로가 아니라 상한가 판정의 기준일 종가
+                    if (m.getMarkDays() == 0) multidayEntryClose.put(m.getOutcomeId(), m.getClosePrice());
+                    continue;
+                }
                 byOutcome.computeIfAbsent(m.getOutcomeId(), k -> new java.util.TreeMap<>())
-                        .put(m.getMarkDays(), m.getClosePrice());
+                        .put(m.getMarkDays(), new PositionExitService.DayBar(m.getMarkDays(),
+                                m.getClosePrice(), m.getOpenPrice(), m.getHighPrice(), m.getLowPrice()));
             }
             multidayPaths = new java.util.HashMap<>();
             for (var e : byOutcome.entrySet()) {
                 multidayPaths.put(e.getKey(), new java.util.ArrayList<>(e.getValue().values()));
             }
         }
-        final java.util.Map<Long, java.util.List<Long>> mdPaths = multidayPaths;
+        final java.util.Map<Long, java.util.List<PositionExitService.DayBar>> mdPaths = multidayPaths;
+        final java.util.Map<Long, Long> mdEntryClose = multidayEntryClose;
+        final double mdStop = mdStopPct;
         // horizon="exit": 전략별 권장 보유시간(PositionExitService가 실제 청산하는 그 마크)의 가격을 OutcomeSample에서
         // 조회해 net을 측정 → "실제로 팔 시점의 수익"으로 검증(당일종가 아님).
         boolean exitMode = "exit".equals(horizon);
@@ -624,8 +665,10 @@ public class StrategyPerformanceGate {
             Long price;
             if (mdPaths != null) {
                 // 멀티데이: 일봉 경로에 라이브와 동일한 판정 함수를 적용해 청산가를 구한다(마크 미수집이면 null=제외).
+                Long d0 = mdEntryClose.get(o.getId());
                 price = PositionExitService.simulateMultidayExitPrice(o.getBuyPrice(), mdPaths.get(o.getId()),
-                        multidayArmPct, multidayDropPct, multidayMaxHoldDays);
+                        d0 == null ? 0 : d0, multidayArmPct, multidayDropPct, multidayMaxHoldDays,
+                        mdStop, limitUpLockPct);
             } else {
                 price = exitMode ? exitPriceByOutcome.get(o.getId()) : resultPrice(o, horizon);
             }

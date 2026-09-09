@@ -42,6 +42,9 @@ public class MultidayExitAnalysisService {
     private static final double MAX_DAY_SHARE_PCT = 80.0;
     private static final int MIN_DISTINCT_DAYS = 3;
 
+    /** 라이브 청산 규칙 줄의 라벨 접두 — 권장 동률 시 "현행 유지"를 고르는 tie-break 키. */
+    static final String LIVE_RULE_PREFIX = "라이브규칙";
+
     /** (일자,k) 유니버스 평균이 이 종목 수 미만이면 벤치마크로 안 쓴다 — 몇 종목짜리 평균은 잡음이다. */
     private static final int MIN_UNIVERSE_STOCKS = 50;
 
@@ -61,6 +64,33 @@ public class MultidayExitAnalysisService {
 
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.cost.execution.min-turnover-krw:500000000}")
     private long universeMinTurnoverKrw = 500_000_000L;
+
+    // ── 라이브 청산 규칙 파라미터(2026-09-10) ────────────────────────────────────────────
+    // ⚠️ <b>라이브와 같은 프로퍼티 키</b>를 읽는다 — 여기서 상수로 복제하면 임계를 바꿀 때 분석만 옛 값에 머문다.
+    //    손절선은 값이 아니라 <b>provider</b>에서 받는다(전략별 적응형이라 상수화가 불가능).
+    @Value("${stockadvisor.trading.multiday-exit.arm-pct:5.0}")
+    private double liveArmPct = 5.0;
+    @Value("${stockadvisor.trading.multiday-exit.drop-pct:2.0}")
+    private double liveDropPct = 2.0;
+    @Value("${stockadvisor.trading.multiday-exit.max-hold-days:15}")
+    private int liveMaxHoldDays = 15;
+    @Value("${stockadvisor.trading.limit-up-lock-pct:29.0}")
+    private double liveLimitUpPct = 29.0;
+    @Value("${stockadvisor.trading.risk.catastrophic-stop-pct:7.0}")
+    private double fallbackStopPct = 7.0;
+    /** 필드주입 — 기존 5인자 생성자를 쓰는 순수 시뮬 테스트를 건드리지 않는다(미주입이면 고정 손절로 degrade). */
+    @Autowired(required = false)
+    private StrategyStopProvider stopProvider;
+
+    /** 채점에 쓸 손절선(%) — 라이브 청산이 쓰는 값과 동일. */
+    private double liveStopPct(String strategy) {
+        if (stopProvider == null) return fallbackStopPct;
+        try {
+            return stopProvider.stopPct(strategy);
+        } catch (Exception e) {
+            return fallbackStopPct;
+        }
+    }
     private final double roundTripPct;
     private final int maxHoldDays;
     private final int minSamples;
@@ -82,10 +112,21 @@ public class MultidayExitAnalysisService {
      *
      * @param entryDate 진입일(yyyyMMdd) — 단일일 클러스터 판정용. 미상이면 null(그 표본은 일자 집계에서만 빠진다).
      */
-    public record Path(long buy, int[] days, long[] closes, boolean complete, String entryDate) {
+    public record Path(long buy, int[] days, long[] closes, boolean complete, String entryDate,
+                       long[] opens, long[] highs, long[] lows) {
         /** 진입일 없는 호환 생성자 — 순수 시뮬 코어 테스트는 일자가 필요 없다. */
         public Path(long buy, int[] days, long[] closes, boolean complete) {
             this(buy, days, closes, complete, null);
+        }
+
+        /** 종가만 있는 호환 생성자 — 종가 기반 방식(보유·트레일·MA·손절)은 시·고·저가가 필요 없다. */
+        public Path(long buy, int[] days, long[] closes, boolean complete, String entryDate) {
+            this(buy, days, closes, complete, entryDate, null, null, null);
+        }
+
+        /** 인덱스 i의 시·고·저가(미수집이면 null) — 라이브 규칙 시뮬만 쓴다. */
+        Long at(long[] arr, int i) {
+            return arr == null || i >= arr.length || arr[i] <= 0 ? null : arr[i];
         }
     }
 
@@ -205,6 +246,13 @@ public class MultidayExitAnalysisService {
         List<Path> paths = fullPathsOnly ? all.stream().filter(Path::complete).toList() : all;
 
         List<MethodResult> methods = new ArrayList<>();
+        // 🔴 첫 줄은 <b>지금 라이브가 실제로 쓰는 규칙</b>이다(2026-09-10) — 상한가익절 > 손절 > 멀티데이 트레일/만기.
+        // 아래 대안 방식들은 전부 "손절 없는 세계"의 수치라, 이 줄이 없으면 <b>실매매 net을 어디서도 볼 수 없다</b>
+        // (P의 근거 시뮬이 손절을 안 넣었던 것이 정확히 이 공백이었다 — CLAUDE.md "손절이 시뮬과 실매매를 가른다").
+        double liveStop = liveStopPct(strategy);
+        methods.add(agg(String.format(LIVE_RULE_PREFIX + "(트레일 -%.1f%%·손절 -%.1f%%)", liveDropPct, liveStop),
+                liveStop, paths, universe,
+                p -> liveRuleExitAt(p, liveArmPct, liveDropPct, liveMaxHoldDays, liveStop, liveLimitUpPct, roundTripPct)));
         for (int n : HOLD_DAYS) methods.add(agg("보유 D+" + n, n, paths, universe, p -> holdToDayExit(p, n, roundTripPct)));
         for (double t : TRAIL_PCT) methods.add(agg("트레일 " + (int) t + "%", t, paths, universe, p -> trailingExit(p, t, roundTripPct)));
         for (int p : MA_PERIOD) methods.add(agg("MA" + p + " 이탈", p, paths, universe, path -> maExitAt(path, p, roundTripPct)));
@@ -222,16 +270,22 @@ public class MultidayExitAnalysisService {
         List<MethodResult> eligible = methods.stream()
                 .filter(m -> m.samples() >= minSamples && !m.clustered())
                 .toList();
+        //
+        // ⚠️ <b>동률이면 라이브 규칙을 고른다</b>(2026-09-10) — 대안이 현행과 같은 수치일 때 굳이 바꾸면
+        //    검증된 적 없는 청산으로 갈아타는 셈이다("변경은 더 나을 때만"). 아래 tie-break가 그 규칙이다.
         boolean benchmarked = universe.available() && eligible.stream().anyMatch(m -> m.excessVsUniversePct() != null);
+        Comparator<MethodResult> preferLiveOnTie = Comparator.comparing(m -> m.method().startsWith(LIVE_RULE_PREFIX));
         MethodResult best;
         if (benchmarked) {
             best = eligible.stream()
                     .filter(m -> m.excessVsUniversePct() != null && m.excessVsUniversePct() > 0)
                     .filter(m -> m.excessSamples() >= minSamples && !m.excessClustered())
-                    .max(Comparator.comparingDouble(MethodResult::excessVsUniversePct))
+                    .max(Comparator.comparingDouble(MethodResult::excessVsUniversePct).thenComparing(preferLiveOnTie))
                     .orElse(null);
         } else {
-            best = eligible.stream().max(Comparator.comparingDouble(MethodResult::avgNetPct)).orElse(null);
+            best = eligible.stream()
+                    .max(Comparator.comparingDouble(MethodResult::avgNetPct).thenComparing(preferLiveOnTie))
+                    .orElse(null);
         }
 
         String label = best != null ? best.method()
@@ -257,14 +311,21 @@ public class MultidayExitAnalysisService {
             g.sort((a, b) -> Integer.compare(a.getMarkDays(), b.getMarkDays()));
             int[] days = new int[g.size()];
             long[] closes = new long[g.size()];
+            long[] opens = new long[g.size()];
+            long[] highs = new long[g.size()];
+            long[] lows = new long[g.size()];
             boolean complete = false;
             for (int i = 0; i < g.size(); i++) {
-                days[i] = g.get(i).getMarkDays();
-                closes[i] = g.get(i).getClosePrice();
+                OutcomeDailyMark m = g.get(i);
+                days[i] = m.getMarkDays();
+                closes[i] = m.getClosePrice();
+                opens[i] = m.getOpenPrice() == null ? 0 : m.getOpenPrice();
+                highs[i] = m.getHighPrice() == null ? 0 : m.getHighPrice();
+                lows[i] = m.getLowPrice() == null ? 0 : m.getLowPrice();
                 if (days[i] >= maxHoldDays) complete = true;
             }
             paths.add(new Path(g.get(0).getBuyPrice(), days, closes, complete,
-                    entryDates.get(g.get(0).getOutcomeId())));
+                    entryDates.get(g.get(0).getOutcomeId()), opens, highs, lows));
         }
         return paths;
     }
@@ -414,6 +475,34 @@ public class MultidayExitAnalysisService {
 
     static OptionalDouble maExit(Path path, int period, double cost) {
         return toDouble(maExitAt(path, period, cost));
+    }
+
+    /**
+     * <b>라이브 청산 규칙 그대로</b>(상한가익절 &gt; 손절 &gt; 멀티데이 트레일/만기) 시뮬 — 2026-09-10.
+     *
+     * <p>⚠️ 규칙은 {@link PositionExitService#simulateMultidayExit}를 <b>그대로 호출</b>한다(복제 금지).
+     * 여기서 다시 구현하면 라이브·게이트·분석 셋이 조용히 갈라진다.</p>
+     *
+     * <p>미해결 판정도 다른 방식과 같은 규약이다 — 트리거 없이 데이터가 소진됐고 완주도 아니면 제외
+     * ("데이터 소진"을 청산으로 오집계하지 않는다).</p>
+     */
+    static Optional<Exit> liveRuleExitAt(Path p, double armPct, double dropPct, int maxHoldDays,
+                                         double stopPct, double limitUpPct, double cost) {
+        List<PositionExitService.DayBar> bars = new ArrayList<>();
+        long entryClose = 0;
+        for (int i = 0; i < p.days().length; i++) {
+            if (p.days()[i] <= 0) {
+                if (p.days()[i] == 0) entryClose = p.closes()[i];   // D0 종가 = 상한가익절의 전일종가 기준
+                continue;
+            }
+            bars.add(new PositionExitService.DayBar(p.days()[i], p.closes()[i],
+                    p.at(p.opens(), i), p.at(p.highs(), i), p.at(p.lows(), i)));
+        }
+        PositionExitService.MultidayExit e = PositionExitService.simulateMultidayExit(
+                p.buy(), bars, entryClose, armPct, dropPct, maxHoldDays, stopPct, limitUpPct);
+        if (e == null) return Optional.empty();
+        if (!e.triggered() && !p.complete()) return Optional.empty();
+        return Optional.of(new Exit(e.heldDays(), net(p.buy(), e.price(), cost)));
     }
 
     /** 종가 ≤ 매수×(1−stop%) 첫 시점 청산. 미발동+완주면 마지막 종가, 미완주면 제외. */
