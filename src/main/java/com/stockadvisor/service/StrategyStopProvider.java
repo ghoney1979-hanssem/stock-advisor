@@ -81,9 +81,23 @@ public class StrategyStopProvider {
         return i != null && i.auto() ? i.stopPct() : defaultStopPct;
     }
 
-    /** 전략별 현재 적용 손절선(가시화/관리 API용). */
+    /**
+     * 전략별 현재 적용 손절선(가시화/관리 API용).
+     *
+     * <p>🐞 2026-09-10: 적응형을 끄고 고정 손절(−12%)로 전환하자 이 메서드가 <b>빈 배열</b>을 돌려줬다 —
+     * 캐시는 {@link #refresh()}에서만 채워지는데 그 경로가 적응형 전용이라, 손절은 정상 작동하는데
+     * <b>조회 화면만 "손절 설정 없음"처럼</b> 보였다. 이 프로젝트가 반복해 겪은 "가시화가 실동작을 감춘다"
+     * 유형(멀티데이 마크 대상 하드코딩·폐기 전략이 게이트에 남던 것)이라 같은 방식으로 막는다.</p>
+     */
     public List<StopInfo> describe() {
-        if (defaultStopPct > 0 && props.enabled()) refreshIfStale();
+        if (defaultStopPct <= 0) {
+            return List.of(new StopInfo("(전 전략 — 손절 비활성)", 0, false, 0, null));
+        }
+        if (!props.enabled()) {
+            // 적응형 off → 전 전략이 고정값 하나를 쓴다. 전략 목록이 없으므로 합성 행 하나로 명시한다.
+            return List.of(new StopInfo("(전 전략 — 고정 손절)", defaultStopPct, false, 0, null));
+        }
+        refreshIfStale();
         return new ArrayList<>(cache.values());
     }
 

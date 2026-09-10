@@ -104,4 +104,24 @@ class StrategyStopProviderTest {
         StrategyStopProvider p = svc(true, 7.0, List.of(heat("VOLUME_LEADING_B", -5.5, 40)));
         assertThat(p.stopPct("UNKNOWN_X")).isCloseTo(7.0, within(0.01));   // 분석에 없는 전략 → 고정
     }
+
+    @Test
+    void 적응형_off면_describe가_고정손절_한_줄을_돌려준다() {
+        // 🐞 2026-09-10: 적응형을 끄자 캐시가 안 채워져 /admin/exit-stop 이 빈 배열을 돌려줬다 —
+        //    손절은 정상 작동하는데 조회 화면만 "설정 없음"처럼 보이던 가시화 결함.
+        StrategyStopProvider p = svc(false, 12.0, List.of());
+        assertThat(p.stopPct("MOMENTUM_A")).isEqualTo(12.0);
+        assertThat(p.describe()).hasSize(1);
+        assertThat(p.describe().get(0).stopPct()).isEqualTo(12.0);
+        assertThat(p.describe().get(0).auto()).isFalse();
+        assertThat(p.describe().get(0).strategy()).contains("고정");
+    }
+
+    @Test
+    void 손절_마스터_비활성이면_그_사실이_describe에_드러난다() {
+        StrategyStopProvider p = svc(true, 0.0, List.of());
+        assertThat(p.stopPct("MOMENTUM_A")).isEqualTo(0.0);
+        assertThat(p.describe()).hasSize(1);
+        assertThat(p.describe().get(0).stopPct()).isEqualTo(0.0);
+    }
 }
