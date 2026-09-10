@@ -80,12 +80,22 @@ SSH 한 번에 여러 curl을 묶어 호출(왕복 절감). 수집 대상 GET �
 보완)에 상태 판정 수정안으로 올린다.
 
 ```sql
--- ① 라벨-현실 불일치일: 그날 시장별 최빈 라벨 vs 실제(그날 진입 태그의 시장폭 평균·지수 등락 평균).
---    BEAR 라벨인데 시장폭≥55 또는 지수≥+0.5  /  BULL 라벨인데 시장폭<40 또는 지수≤-1.0  → 불일치 후보
-select alert_date, entry_market, mode() within group (order by entry_market_trend) label,
+-- ① 라벨-현실 불일치: 🔴 반드시 **시간대별로** 볼 것 — `entry_market_change`/`entry_market_breadth_pct`는
+--    "진입이 일어난 그 순간"의 값이라, 하루로 평균내면 **진입이 몰린 시간대(보통 오전)로 끌려간다.**
+--    ⚠️ 2026-09-10 실측 사고: 하루 평균으로 보고 "양 시장 BULL 라벨인데 시장폭 23~26%·지수 −0.8% → 불일치"로
+--    보고했는데, 그날은 오전 코스닥 −1.75%까지 밀렸다가 **종가 +0.78%로 회복**한 날이었다(코스피 −0.25%).
+--    시간대로 쪼개니 라벨도 09 BULL → 10 BEAR → 12시 이후 BULL 로 **반전을 제때 추적**하고 있었다 —
+--    오독한 건 엔진이 아니라 하루 평균으로 뭉갠 분석이었다. 사용자가 종가와 다르다고 지적해 발견.
+select alert_date, entry_market, to_char(alert_time at time zone 'Asia/Seoul','HH24') hh,
+  mode() within group (order by entry_market_trend) label,
   round(avg(entry_market_breadth_pct)::numeric,1) breadth, round(avg(entry_market_change)::numeric,2) idx_chg, count(*) n
 from trade_outcome where alert_date>='YYYYMMDD' and entry_market in ('KOSPI','KOSDAQ') and entry_market_trend is not null
-group by 1,2 order by 1,2;
+group by 1,2,3 order by 1,2,3;
+-- 판정: **같은 시각의** 라벨 vs 지수·시장폭을 비교한다. BEAR 라벨인데 그 시각 시장폭≥55 또는 지수≥+0.5 /
+--       BULL 라벨인데 그 시각 시장폭<40 또는 지수≤-1.0 이 **여러 시간대에 걸쳐 지속**되면 불일치.
+--       한두 시간대만 어긋나는 건 장중 반전을 추적하는 정상 동작이다(강등 즉시·승격 30분 디바운스).
+-- ⚠️ 종가 등락률과 대조하려면 별도 소스를 볼 것(`market-regime`의 프록시 종가 또는 KIS 지수) —
+--    이 컬럼들로는 종가를 알 수 없다.
 
 -- ② 장중 라벨 플립: (날짜,시장)에 라벨이 2개 이상 → 그날 게이트 표본 풀이 바뀐 것.
 -- (쉘 따옴표 중첩 문제를 피하려면 SQL을 파일로 저장해 scp 후 psql -f로 실행할 것)
