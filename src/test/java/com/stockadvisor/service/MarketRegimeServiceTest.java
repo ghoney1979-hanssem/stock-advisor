@@ -269,4 +269,28 @@ class MarketRegimeServiceTest {
         assertThat(MarketRegimeService.gapPct(100_000.0, null)).isNull();     // 전일종가 미상
         assertThat(MarketRegimeService.gapPct(100_000.0, 0.0)).isNull();      // 0 방어
     }
+
+    @Test
+    void 시장폭이_낮으면_지수와_무관하게_강등된다() {
+        // 실측 2026-09-10: 양 시장 BULL 라벨인데 시장폭 23.4%/26.4%, 지수 -0.8%(강등 문턱 -2% 미달).
+        // MA3 기저가 3일 상승이라 규칙상 정상이지만, 종목 4분의 3이 내리는 날을 BULL로 두면
+        // 노출상한(BULL 100%)이 열리고 bear-block도 안 걸린다.
+        assertThat(MarketRegimeService.adjustTrend(MarketTrend.BULL, -0.8, 26.4, true, 2.0, 2.0, 30.0))
+                .isEqualTo(MarketTrend.NEUTRAL);
+        // 문턱 이상이면 종전대로 유지
+        assertThat(MarketRegimeService.adjustTrend(MarketTrend.BULL, -0.8, 45.0, true, 2.0, 2.0, 30.0))
+                .isEqualTo(MarketTrend.BULL);
+        // 0=비활성이면 종전 동작
+        assertThat(MarketRegimeService.adjustTrend(MarketTrend.BULL, -0.8, 26.4, true, 2.0, 2.0, 0))
+                .isEqualTo(MarketTrend.BULL);
+    }
+
+    @Test
+    void 시장폭_미상이거나_신선도_만료면_강등하지_않는다() {
+        // degrade open — 스냅샷이 없다고 강등하면 재시작 직후마다 라벨이 흔들린다.
+        assertThat(MarketRegimeService.adjustTrend(MarketTrend.BULL, -0.8, null, true, 2.0, 2.0, 30.0))
+                .isEqualTo(MarketTrend.BULL);
+        assertThat(MarketRegimeService.adjustTrend(MarketTrend.BULL, -0.8, 26.4, false, 2.0, 2.0, 30.0))
+                .isEqualTo(MarketTrend.BULL);
+    }
 }

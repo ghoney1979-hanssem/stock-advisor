@@ -371,4 +371,24 @@ class MultidayExitAnalysisServiceTest {
         assertThat(MultidayExitAnalysisService.liveRuleExitAt(complete, 5, 2, 15, 7, 29, 0).orElseThrow().netPct())
                 .isCloseTo(3.0, within(1e-6));
     }
+
+    @Test
+    void 분석지평을_주면_경로를_잘라_모든_표본을_같은_창에서_해소한다() {
+        // 🔴 2026-09-10: 보유 상한을 60거래일 존버로 늘리자 완주 정의가 D+60이 돼 fullPathsOnly 표본이 0이 됐고,
+        //    혼합 모드는 미결(=지고 있는) 경로를 빼서 낙관 편향됐다. 지평을 인자로 받아 그 창에서 전부 해소시킨다.
+        List<OutcomeDailyMark> marks = new ArrayList<>();
+        for (int d = 0; d <= 20; d++) marks.add(new OutcomeDailyMark(1L, "INDEX_RELATIVE_D", 1000, d, "2026090" + (d % 10), 1000 + d));
+        OutcomeDailyMarkRepository repo = mock(OutcomeDailyMarkRepository.class);
+        MultidayExitAnalysisService svc = new MultidayExitAnalysisService(repo, 0, 60, 20, "INDEX_RELATIVE_D");
+
+        // 설정 지평(60)이면 경로가 20까지뿐이라 미완주
+        Path wide = svc.buildPaths(marks, Map.of()).get(0);
+        assertThat(wide.complete()).isFalse();
+        assertThat(wide.days()[wide.days().length - 1]).isEqualTo(20);
+
+        // 지평 15면 D+15에서 잘리고 완주로 판정된다 → 모든 방식이 같은 창에서 해소
+        Path cut = svc.buildPaths(marks, Map.of(), 15).get(0);
+        assertThat(cut.complete()).isTrue();
+        assertThat(cut.days()[cut.days().length - 1]).isEqualTo(15);
+    }
 }

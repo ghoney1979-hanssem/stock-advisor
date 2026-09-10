@@ -177,11 +177,28 @@ public class MultidayExitAnalysisService {
      * 그 교란 없이 <b>보유기간만</b>의 효과를 본다. 대가는 표본 급감(D 898→174)이라 둘을 함께 볼 것.</p>
      */
     public List<MultidayExitComparison> compare(boolean fullPathsOnly) {
+        return compare(fullPathsOnly, 0);
+    }
+
+    /**
+     * @param horizonDays <b>분석 지평</b>(거래일). 0이면 설정값({@code trading.multiday-max-hold-days})을 쓴다.
+     *
+     * <p>🔴 <b>왜 수집 상한과 분리해야 하나</b>(2026-09-10): 보유 상한을 60거래일 "존버"로 늘리자 이 엔드포인트가
+     * <b>두 모드 다 못 쓰게 됐다</b> — ① {@code fullPathsOnly=true}는 완주 정의가 "D+60 도달"이 돼 13전략 전부
+     * 표본 0 ② 혼합 모드는 미결(트리거 미발동) 경로를 표본에서 빼는데, 실측상 <b>미결분이 지고 있는 쪽</b>
+     * (평균 −2.34%·흑자 26%)이라 남는 수치가 낙관으로 편향된다. 실제로 같은 표본을 D+15로 캡해 전부 해소시키면
+     * D +0.87→+0.40 · G +0.12→−0.39 · B −1.73→−2.22 로 내려간다.</p>
+     *
+     * <p>→ 지평을 인자로 받아 <b>경로를 그 거래일에서 자르고</b>(완주 판정·라이브 규칙 만기 모두 그 값 기준)
+     * 모든 표본을 같은 지평에서 해소시킨다. 수집은 60까지 계속하되 <b>분석은 원하는 창에서</b> 할 수 있다.</p>
+     */
+    public List<MultidayExitComparison> compare(boolean fullPathsOnly, int horizonDays) {
+        int h = horizonDays > 0 ? horizonDays : maxHoldDays;
         List<String> targets = targetStrategies();
         UniverseHoldIndex universe = buildUniverse(targets);
         List<MultidayExitComparison> out = new ArrayList<>();
         for (String s : targets) {
-            out.add(compareStrategy(s, fullPathsOnly, universe));
+            out.add(compareStrategy(s, fullPathsOnly, universe, h));
         }
         return out;
     }
@@ -234,14 +251,15 @@ public class MultidayExitAnalysisService {
         return new ArrayList<>(all);
     }
 
-    private MultidayExitComparison compareStrategy(String strategy, boolean fullPathsOnly, UniverseHoldIndex universe) {
+    private MultidayExitComparison compareStrategy(String strategy, boolean fullPathsOnly, UniverseHoldIndex universe,
+                                                   int horizonDays) {
         Map<Long, String> entryDates = new LinkedHashMap<>();
         for (Object[] row : safeEntryDates(strategy)) {
             if (row != null && row.length >= 2 && row[0] != null) {
                 entryDates.put(((Number) row[0]).longValue(), (String) row[1]);
             }
         }
-        List<Path> all = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy), entryDates);
+        List<Path> all = buildPaths(dailyMarkRepository.findByStrategyOrderByOutcomeIdAscMarkDaysAsc(strategy), entryDates, horizonDays);
         int fullPaths = (int) all.stream().filter(Path::complete).count();
         List<Path> paths = fullPathsOnly ? all.stream().filter(Path::complete).toList() : all;
 
@@ -252,7 +270,7 @@ public class MultidayExitAnalysisService {
         double liveStop = liveStopPct(strategy);
         methods.add(agg(String.format(LIVE_RULE_PREFIX + "(트레일 -%.1f%%·손절 -%.1f%%)", liveDropPct, liveStop),
                 liveStop, paths, universe,
-                p -> liveRuleExitAt(p, liveArmPct, liveDropPct, liveMaxHoldDays, liveStop, liveLimitUpPct, roundTripPct)));
+                p -> liveRuleExitAt(p, liveArmPct, liveDropPct, horizonDays, liveStop, liveLimitUpPct, roundTripPct)));
         for (int n : HOLD_DAYS) methods.add(agg("보유 D+" + n, n, paths, universe, p -> holdToDayExit(p, n, roundTripPct)));
         for (double t : TRAIL_PCT) methods.add(agg("트레일 " + (int) t + "%", t, paths, universe, p -> trailingExit(p, t, roundTripPct)));
         for (int p : MA_PERIOD) methods.add(agg("MA" + p + " 이탈", p, paths, universe, path -> maExitAt(path, p, roundTripPct)));
@@ -302,8 +320,18 @@ public class MultidayExitAnalysisService {
 
     /** outcomeId별 일봉 마크를 경로로 묶는다. entryDates는 클러스터 판정용(없으면 진입일 null). */
     List<Path> buildPaths(List<OutcomeDailyMark> marks, Map<Long, String> entryDates) {
+        return buildPaths(marks, entryDates, maxHoldDays);
+    }
+
+    /**
+     * @param horizonDays 이 거래일에서 <b>경로를 자른다</b> — 완주(complete) 판정도 이 값 기준이다.
+     *                    수집 상한(60)과 분리해야 "존버 전환 후 완주 코호트 0" 문제를 피할 수 있다.
+     */
+    List<Path> buildPaths(List<OutcomeDailyMark> marks, Map<Long, String> entryDates, int horizonDays) {
+        int horizon = horizonDays > 0 ? horizonDays : maxHoldDays;
         Map<Long, List<OutcomeDailyMark>> byOutcome = new LinkedHashMap<>();
         for (OutcomeDailyMark m : marks) {
+            if (m.getMarkDays() > horizon) continue;   // 지평 밖 마크는 아예 안 본다(모든 방식에 일관 적용)
             byOutcome.computeIfAbsent(m.getOutcomeId(), k -> new ArrayList<>()).add(m);
         }
         List<Path> paths = new ArrayList<>();
@@ -322,7 +350,7 @@ public class MultidayExitAnalysisService {
                 opens[i] = m.getOpenPrice() == null ? 0 : m.getOpenPrice();
                 highs[i] = m.getHighPrice() == null ? 0 : m.getHighPrice();
                 lows[i] = m.getLowPrice() == null ? 0 : m.getLowPrice();
-                if (days[i] >= maxHoldDays) complete = true;
+                if (days[i] >= horizon) complete = true;
             }
             paths.add(new Path(g.get(0).getBuyPrice(), days, closes, complete,
                     entryDates.get(g.get(0).getOutcomeId()), opens, highs, lows));

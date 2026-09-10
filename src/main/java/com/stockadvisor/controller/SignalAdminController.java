@@ -445,12 +445,19 @@ public class SignalAdminController {
     /**
      * @param fullPathsOnly true면 D+15까지 마크가 다 찬 표본만(고정 코호트) — horizon마다 표본이 바뀌는
      *                      코호트 편향 없이 "보유기간만"의 효과를 본다. 대가는 표본 급감이라 기본(false)과 함께 볼 것.
+     * @param horizonDays 분석 지평(거래일). 0=설정값({@code trading.multiday-max-hold-days}).
+     *
+     *                    <p>🔴 보유 상한을 60거래일 존버로 늘린 뒤로는 <b>이 파라미터 없이는 판정이 안 된다</b>
+     *                    (2026-09-10): {@code fullPathsOnly=true}는 완주 정의가 D+60이 돼 전 전략 표본 0,
+     *                    혼합 모드는 미결(=지고 있는) 경로를 빼서 낙관 편향된다. {@code horizonDays=15}처럼
+     *                    지평을 명시하면 모든 표본이 같은 창에서 해소된다.</p>
      */
     @GetMapping("/multiday-exit-comparison")
     public Object multidayExitComparison(
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean fullPathsOnly) {
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean fullPathsOnly,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "0") int horizonDays) {
         if (multidayExitAnalysisService == null) return java.util.Map.of("error", "service unavailable");
-        return multidayExitAnalysisService.compare(fullPathsOnly);
+        return multidayExitAnalysisService.compare(fullPathsOnly, horizonDays);
     }
 
     /**

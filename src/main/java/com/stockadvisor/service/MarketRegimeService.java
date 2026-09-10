@@ -75,6 +75,9 @@ public class MarketRegimeService {
     private double intradayDemotePct = 2.0;    // 0=강등 보정 비활성
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.market-regime.intraday-promote-pct:2.0}")
     private double intradayPromotePct = 2.0;   // 0=승격 보정 비활성
+    // 시장폭 기반 강등(2026-09-10) — 상승비율이 이 값 미만이면 지수 무관 1단계 강등. 코드 기본 0=비활성(종전 동작).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.market-regime.demote-breadth-max-pct:0}")
+    private double demoteBreadthMaxPct = 0;
     private static final double PROMOTE_BREADTH_MIN = 60.0;   // 승격 합의용 breadth 상승비율 하한
     private static final long BREADTH_FRESH_MIN = 40;         // breadth 신선도(분)
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -148,10 +151,32 @@ public class MarketRegimeService {
     /** 순수 보정 판정(테스트용 정적) — base 라벨을 당일 지수 등락·breadth 합의로 강등/승격. */
     static MarketTrend adjustTrend(MarketTrend base, Double dayChgPct, Double breadthAdvPct, boolean breadthFresh,
                                    double demotePct, double promotePct) {
+        return adjustTrend(base, dayChgPct, breadthAdvPct, breadthFresh, demotePct, promotePct, 0);
+    }
+
+    /**
+     * @param demoteBreadthMax <b>시장폭 기반 강등</b> 문턱(%, 0=비활성, 2026-09-10). 상승비율이 이 값 미만이면
+     *                         지수 등락과 무관하게 1단계 강등한다.
+     *
+     *                         <p>왜: 승격에는 이미 breadth 합의 요건(≥{@value #PROMOTE_BREADTH_MIN}%)이 있는데
+     *                         <b>강등에는 없었다</b> — 지수 문턱(−2%)만 봤다. 실측 2026-09-10: 양 시장이 BULL
+     *                         라벨인데 시장폭이 <b>23.4% / 26.4%</b>였고 지수는 −0.8%라 강등 문턱에 못 미쳤다.
+     *                         MA3 기저가 3일 상승이라 규칙상 정상 동작이지만, 종목 4분의 3이 내리는 날을
+     *                         BULL로 두면 노출상한(BULL 100%)이 열리고 bear-block도 안 걸린다.</p>
+     *
+     *                         <p>⚠️ 비대칭 원칙 그대로 — 강등은 한 지표만으로 즉시(리스크 축소는 빠르게),
+     *                         승격은 지수 <b>AND</b> breadth 합의(확대는 느리게).</p>
+     *                         <p>⚠️ 신선도 만료·미상이면 미적용(degrade open) — 스냅샷이 없다고 강등하지 않는다.</p>
+     */
+    static MarketTrend adjustTrend(MarketTrend base, Double dayChgPct, Double breadthAdvPct, boolean breadthFresh,
+                                   double demotePct, double promotePct, double demoteBreadthMax) {
         if (base == null || dayChgPct == null) return base;
         if (demotePct > 0 && dayChgPct <= -demotePct) {
             int steps = dayChgPct <= -2 * demotePct ? 2 : 1;
             return demote(base, steps);
+        }
+        if (demoteBreadthMax > 0 && breadthFresh && breadthAdvPct != null && breadthAdvPct < demoteBreadthMax) {
+            return demote(base, 1);
         }
         if (promotePct > 0 && dayChgPct >= promotePct
                 && breadthFresh && breadthAdvPct != null && breadthAdvPct >= PROMOTE_BREADTH_MIN) {
@@ -286,7 +311,7 @@ public class MarketRegimeService {
             fresh = breadthService.isFresh(BREADTH_FRESH_MIN);
         }
         MarketTrend adjusted = adjustTrend(base.trend(), dayChangeOf(market), adv, fresh,
-                intradayDemotePct, intradayPromotePct);
+                intradayDemotePct, intradayPromotePct, demoteBreadthMaxPct);
         // 승격 디바운스 — 기저(MA3) 라벨 변화와 intraday 보정을 모두 통과한 최종값에 적용해, 소비처가 보는
         // 라벨이 장중에 잘게 흔들리지 않게 한다(강등은 즉시라 리스크 대응 속도는 그대로).
         return stabilized(market, adjusted);
