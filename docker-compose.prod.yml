@@ -76,6 +76,10 @@ services:
       TRADING_RISK_HIGH_VOL_MULT: ${TRADING_RISK_HIGH_VOL_MULT:-0.5}
       TRADING_RISK_BREADTH_ADV_PCT: ${TRADING_RISK_BREADTH_ADV_PCT:-15.0}
       TRADING_RISK_BREADTH_MEDIAN_PCT: ${TRADING_RISK_BREADTH_MEDIAN_PCT:-3.0}
+      # 고정 catastrophic 손절(%) — 적응형(TRADING_ADAPTIVE_STOP_ENABLED)이 꺼져 있거나 승자 표본이
+      # 부족한 전략의 손절선. ⚠️ 2026-09-10까지 compose 패스스루가 없어 prod에서 튜닝이 불가능했다
+      # (yml 기본 7.0이 그대로 박혀 있었고, 적응형 하한 7.0과 값이 같아 드러나지 않았다).
+      TRADING_RISK_CATASTROPHIC_STOP_PCT: ${TRADING_RISK_CATASTROPHIC_STOP_PCT:-7.0}
       # 개장 창 노출 상한(0=비활성) — 리스크 예산 선착순 배분 완화. 켜려면 .env에 25 등 지정
       TRADING_RISK_OPENING_EXPOSURE_CAP_PCT: ${TRADING_RISK_OPENING_EXPOSURE_CAP_PCT:-0}
       TRADING_RISK_OPENING_WINDOW_MINUTES: ${TRADING_RISK_OPENING_WINDOW_MINUTES:-30}
