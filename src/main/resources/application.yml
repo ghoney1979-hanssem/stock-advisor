@@ -391,6 +391,9 @@ stockadvisor:
       high-vol-exposure-mult: ${TRADING_RISK_HIGH_VOL_MULT:0.5}   # 고변동 국면이면 상한에 곱하는 계수
       crash-halt-pct: ${TRADING_RISK_CRASH_HALT_PCT:3.0}          # 지수 장중 고점대비 -이값%p 급락+절대 -이값% 이하 → 서킷 발동. 0=비활성
       rebound-pct: ${TRADING_RISK_REBOUND_PCT:2.0}                # 발동 후 지수가 장중 저점 대비 +이값%p 반등하면 재개(예 -6%→-4%). 절대수준 복귀 안 기다림
+      # 서킷 발동 시 보유 포지션 강제청산 여부(2026-09-12). false면 서킷은 <b>신규진입 차단만</b> 하고 청산은 손절·트레일·만기에만 맡긴다.
+      # 코드 기본 true(종전 동작), prod는 false — 근거는 CLAUDE.md "서킷 강제청산 폐지" 항목(9/11 실측: 9종목 전부 장중 저가 체결).
+      riskoff-force-exit-enabled: ${TRADING_RISK_RISKOFF_FORCE_EXIT_ENABLED:true}
       max-positions-per-sector: ${TRADING_RISK_MAX_POSITIONS_PER_SECTOR:3}  # 한 업종당 최대 동시 보유 종목 수(동반급락 분산). 0=무제한
       catastrophic-stop-pct: ${TRADING_RISK_CATASTROPHIC_STOP_PCT:7.0}  # 개별 손절 하한(%) — 매수가 -이값% 이하 즉시 청산(재난방지 바닥, 튜닝SL 아님). 0=비활성
       breadth-riskoff-adv-pct: ${TRADING_RISK_BREADTH_ADV_PCT:15.0}      # 시장폭 리스크오프 — 해당 시장 상승비율 <이값% AND 아래 중앙 조건이면 신규진입 차단(강제청산 없음). 0=비활성

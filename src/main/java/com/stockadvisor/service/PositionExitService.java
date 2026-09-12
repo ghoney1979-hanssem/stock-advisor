@@ -126,9 +126,10 @@ public class PositionExitService {
     // +0.1%만 올라도 −2% 되돌림에 잘린다. 여기선 +5%를 한 번 찍어야 arm되므로 초기 눌림 구간을 통과시킨다
     // (C의 엣지가 '떨어진 걸 사서 되돌림을 먹는 것'이라 초기 조기컷이 치명적이다).
     //
-    // ⚠️ <b>안전 오버라이드는 그대로 앞선다</b>(상한가익절 > 손절 > 리스크오프). 즉 서킷 발동일엔 멀티데이
-    // 포지션도 강제청산된다 — 15거래일 보유 전략에는 큰 제약이고(9/2에 실제로 발동했다), 그게 부담이면
-    // 인버스처럼 면제해야 하는데 그건 <b>별도 결정</b>이라 지금은 안전 우선으로 둔다.
+    // ⚠️ <b>안전 오버라이드는 그대로 앞선다</b>(상한가익절 > 손절 > 리스크오프). 단 리스크오프 강제청산은
+    // 2026-09-12부터 {@code trading.risk.riskoff-force-exit-enabled}로 끌 수 있고 <b>prod는 꺼져 있다</b> —
+    // 서킷은 정의상 "장중저점 근처 + 반등 미달"일 때만 참이라 <b>항상 저점에서 발사</b>되는데, 멀티데이는
+    // 그 되돌림을 먹으려고 며칠을 보유하는 전략이라 둘이 정면으로 충돌한다. 실측 근거는 아래 필드 주석 참조.
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.multiday-exit.strategies:}")
     private String multidayExitCsv = "";
     private volatile java.util.Set<String> multidayExitSet;
@@ -164,6 +165,37 @@ public class PositionExitService {
     private final java.util.Map<String, Boolean> wasRiskOff = new java.util.concurrent.ConcurrentHashMap<>();
     // 시장폭(breadth) 리스크오프 전이 알림용 — 서킷과 별개 축(진입 차단 전용)
     private final java.util.Map<String, Boolean> wasBreadthOff = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 서킷(리스크오프) 발동 시 보유 포지션을 강제청산할지. {@code false}면 서킷은 <b>신규진입 차단만</b> 하고
+     * 청산은 손절·트레일·만기에만 맡긴다(전이 Discord 알림은 그대로 나간다 — 진입 차단이 실제로 걸리므로).
+     * <p>
+     * ⚠️ <b>끈 이유(2026-09-12 사용자 결정, "손절에서만 정리")</b> — 서킷 재개 조건이 "장중 저점 대비 반등
+     * {@code rebound-pct}%p 미만"이라, 발동이 참인 동안은 지수가 <b>정의상 그날 저점 부근</b>이다. 즉 이
+     * 강제청산은 구조적으로 바닥에서 판다. 2026-09-11 09:01 실측: 코스피 −3.09%(장중저점)에서 멀티데이 10건이
+     * 개장 1분 만에 전량 청산됐고 <b>9종목 전부 그날 장중 저가 ±0.5% 안에서 체결</b>(002350은 정확히 저가).
+     * 확정 −62,340원 vs 같은 종목 종가 보유 −47,770원 = <b>+14,570원(23%) 더 잃었다</b>. 그날 코스피는
+     * −3.09% → 종가 −1.73%로 회복했는데 그 회복을 통째로 놓쳤다. G의 9/7 이후 실현손실 −101,299원 중
+     * <b>63%(−63,496원)가 이 한 번</b>이다.
+     * <p>
+     * ⚠️ <b>꼬리 방어를 포기한 것이 아니다</b> — 손절({@code catastrophic-stop-pct}, prod −12%)이 그대로 매 분
+     * 작동한다. 바뀐 건 "지수가 빠졌다는 이유로 개별 종목을 저점에 던지는 것"을 그만둔 것뿐이다. 반대로
+     * <b>대가는 명확하다</b>: 진짜 시스템 리스크(연쇄 폭락)에서 포지션이 손절선까지 그대로 내려간다 —
+     * 서킷이 −3%에서 끊어주던 것을 이제 −12%까지 안고 간다. 폭락이 며칠 이어지면 그 차이가 실현된다.
+     * <p>
+     * ⚠️ 신규진입 차단은 <b>그대로 유지</b>된다({@code OrderService}가 {@code riskGuard.allowEntry}로 판정) —
+     * 폭락일에 새로 사는 것과 이미 산 것을 저점에 파는 것은 다른 문제이고, 전자는 막는 게 맞다.
+     * <p>
+     * ⚠️ 되돌리려면 prod {@code .env}의 {@code TRADING_RISK_RISKOFF_FORCE_EXIT_ENABLED}를 true로 두고 컨테이너만
+     * 재생성하면 된다(이미지 불변). 코드 기본값은 종전 동작(true) 그대로라 테스트·로컬은 안 바뀐다.
+     */
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.risk.riskoff-force-exit-enabled:true}")
+    private boolean riskOffForceExitEnabled = true;
+
+    /** 테스트용 — 리스크오프 강제청산 on/off. */
+    void configureRiskOffForceExit(boolean enabled) {
+        this.riskOffForceExitEnabled = enabled;
+    }
 
     // 인버스 ETF 코드 — 급락(서킷)이 기회라 리스크오프 강제청산에서 면제(승자 보유). 손절·시간청산은 그대로.
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.inverse-codes:114800,251340}")
@@ -287,8 +319,10 @@ public class PositionExitService {
                     reason = String.format("상한가익절 (+%.1f%%)", dayChgPct);
                 } else if (stopPct > 0 && riskGuard.catastrophicStopHit(buyPrice, price, stopPct)) {
                     reason = String.format("손절 -%.1f%%", stopPct);
-                } else if (posRiskOff.off() && !isInverse(pos.getStockCode())) {
-                    // 인버스는 급락(리스크오프)이 기회 → 강제청산 면제(손절·시간청산은 아래에서 적용)
+                } else if (riskOffForceExitEnabled && posRiskOff.off() && !isInverse(pos.getStockCode())) {
+                    // 인버스는 급락(리스크오프)이 기회 → 강제청산 면제(손절·시간청산은 아래에서 적용).
+                    // riskOffForceExitEnabled=false(prod)면 전 종목이 여기를 건너뛰고 아래 정상 청산 분기로 간다
+                    // — 서킷은 신규진입 차단만 하고, 정리는 손절(-12%)·트레일·만기가 맡는다. 필드 주석 참조.
                     reason = "리스크오프(" + posRiskOff.reason() + ")";
                 } else if (inversePos) {
                     // 인버스 전용: 약세 명제 소멸 시 청산, 지속 시 시간 무관 보유. 스윙보다 먼저(인버스는 다일 감쇠 → 무조건 당일 청산).

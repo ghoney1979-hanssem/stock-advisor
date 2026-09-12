@@ -527,6 +527,48 @@ class PositionExitServiceTest {
     }
 
     @Test
+    void 강제청산_끄면_서킷에도_보유유지하되_발동알림은_그대로() {
+        // 2026-09-12: 서킷은 정의상 "장중저점 근처"에서만 참이라 강제청산이 구조적으로 바닥에서 판다
+        // (9/11 실측 9종목 전부 장중 저가 체결). prod는 이 knob을 꺼서 정리를 손절·트레일·만기에만 맡긴다.
+        // ⚠️ 진입 차단(OrderService)과 전이 알림은 그대로 유지 — 끈 것은 '이미 산 것을 저점에 던지는 것'뿐.
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(10);    // 보유 10분(미경과) — 서킷 말고는 청산 사유 없음
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(68_000L);   // -2.9%: 손절(-7%) 미달
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), riskGuard(true), timeMethod(), "", stopProvider());
+        svc.configureRiskOffForceExit(false);
+
+        assertThat(svc.closeDuePositions()).isEqualTo(0);   // 서킷 ON인데도 보유 유지
+        verify(pos, never()).closePosition(org.mockito.ArgumentMatchers.anyLong());
+        // 알림은 그대로(시장별로 전이하므로 atLeastOnce) — 진입 차단은 여전히 실동작이라 통지 가치가 있다
+        verify(orderService, org.mockito.Mockito.atLeastOnce())
+                .notifyEvent(org.mockito.ArgumentMatchers.contains("서킷브레이커 발동"));
+    }
+
+    @Test
+    void 강제청산_꺼도_손절선_도달하면_청산() {
+        // 회귀 방지: 위 knob은 '리스크오프 사유'만 끈다 — 꼬리 방어(손절)는 서킷 중에도 그대로 작동해야 한다.
+        OrderRepository repo = mock(OrderRepository.class);
+        OrderService orderService = mock(OrderService.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order pos = openPosition(10);
+        when(repo.findOpenBuyPositions()).thenReturn(List.of(pos));
+        when(kis.fetchLatestClose("005930")).thenReturn(64_000L);   // 매수 70,000 대비 -8.6%
+        when(orderService.submit(any())).thenReturn(OrderService.OrderResult.dryRun(2L));
+        MarketRiskGuard rg = riskGuard(true);                        // 서킷 ON이지만 강제청산은 꺼져 있다
+        when(rg.catastrophicStopHit(70_000L, 64_000L, 7.0)).thenReturn(true);
+        PositionExitService svc = new PositionExitService(repo, orderService, kis, policy("23:59", 60),
+                holdProvider(60), rg, timeMethod(), "", stopProvider());
+        svc.configureRiskOffForceExit(false);
+
+        assertThat(svc.closeDuePositions()).isEqualTo(1);
+    }
+
+    @Test
     void 서킷브레이커_발동시_미청산_0이어도_알림_발송() {
         // 회귀 방지: 서킷 알림이 open.isEmpty() 조기반환 뒤에 있어 미청산 0일 때 미발송됐던 버그.
         OrderRepository repo = mock(OrderRepository.class);
