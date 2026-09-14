@@ -77,6 +77,37 @@ class DailyReportServiceTest {
     }
 
     @Test
+    void 폐기_전략은_전략별_누적_실현손익에서_제외된다() {
+        TradingStrategy b = mock(TradingStrategy.class);
+        when(b.name()).thenReturn("VOLUME_LEADING_B");
+        when(b.label()).thenReturn("거래량주도 (B)");
+        TradingStrategy e = mock(TradingStrategy.class);
+        when(e.name()).thenReturn("BREAKOUT_E");
+        when(e.label()).thenReturn("신고가 돌파 (E)");
+        when(kis.fetchIndexChangeRate(anyString())).thenReturn(1.23);
+        DailyReportService svc = new DailyReportService(orderRepo, companyRepo, kis, discord, List.of(b, e));
+        org.springframework.test.util.ReflectionTestUtils.setField(svc, "retiredStrategiesCsv", "BREAKOUT_E,OPENING_GAP_K");
+
+        Order activeWin = liveBuy("005930", 4, 67_200);
+        activeWin.closePosition(1_200);
+        Order retiredLoss = new Order("BREAKOUT_E:004090:" + TODAY, "BREAKOUT_E", "004090",
+                OrderSide.BUY, 10, 10_000, TradingMode.LIVE, TODAY);
+        retiredLoss.markFilled(10, 10_000);
+        retiredLoss.closePosition(-5_000);
+        when(orderRepo.findByModeAndSideAndOrderDateGreaterThanEqual(eq(TradingMode.LIVE), eq(OrderSide.BUY), any()))
+                .thenReturn(List.of());
+        when(orderRepo.findByModeAndSideAndClosed(TradingMode.LIVE, OrderSide.BUY, true))
+                .thenReturn(List.of(activeWin, retiredLoss));
+
+        String msg = svc.sendDailyReport();
+
+        assertThat(msg).contains("거래량주도 (B)");
+        assertThat(msg).doesNotContain("신고가 돌파 (E)");
+        assertThat(msg).contains("+1,200원");
+        assertThat(msg).doesNotContain("-5,000원");
+    }
+
+    @Test
     void 미청산_포지션은_경고와_함께_표시된다() {
         Order open = liveBuy("005930", 2, 115_100);   // 청산 안 됨
         when(orderRepo.findByModeAndSideAndOrderDateGreaterThanEqual(eq(TradingMode.LIVE), eq(OrderSide.BUY), any()))

@@ -12,6 +12,7 @@ import com.stockadvisor.repository.OrderRepository;
 import com.stockadvisor.strategy.TradingStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.ZoneId;
@@ -55,6 +56,15 @@ public class DailyReportService {
     private final KisApiClient kisApiClient;
     private final DiscordNotifier discordNotifier;
     private final Map<String, String> labelByName;
+
+    /**
+     * 폐기 전략(예: BREAKOUT_E·OPENING_GAP_K, {@code signal.retired-strategies})은 더 이상 신호가
+     * 나지 않지만 과거 청산 기록은 trade_order에 남아 있다 — 전략별 누적 실현손익 알람에서 제외해
+     * 지금 운용 중인 전략만 보이게 한다. {@link StrategyEvaluator}가 쓰는 것과 같은 프로퍼티를
+     * 재사용해, 앞으로 다른 전략이 폐기돼도 이 필터가 자동으로 따라간다.
+     */
+    @Value("${stockadvisor.signal.retired-strategies:}")
+    private String retiredStrategiesCsv = "";
 
     public DailyReportService(OrderRepository orderRepository,
                               CompanyRepository companyRepository,
@@ -139,14 +149,18 @@ public class DailyReportService {
         sb.append("\n");
     }
 
-    /** 전략별 누적 실현손익(원) — 막대(🟩/🟥) + 건수·승률. */
+    /** 전략별 누적 실현손익(원) — 막대(🟩/🟥) + 건수·승률. 폐기 전략은 제외. */
     private void appendCumulative(StringBuilder sb, List<Order> closed) {
         sb.append("\n**[전략별 누적 실현손익 📊]**\n");
-        if (closed.isEmpty()) {
+        java.util.Set<String> retired = PolicyGate.parseCsv(retiredStrategiesCsv);
+        List<Order> active = closed.stream()
+                .filter(o -> !retired.contains(o.getStrategy()))
+                .toList();
+        if (active.isEmpty()) {
             sb.append("• 청산 완료 실매매 없음\n");
             return;
         }
-        Map<String, List<Order>> byStrat = closed.stream()
+        Map<String, List<Order>> byStrat = active.stream()
                 .collect(Collectors.groupingBy(Order::getStrategy, TreeMap::new, Collectors.toList()));
         double maxAbs = byStrat.values().stream()
                 .mapToDouble(list -> Math.abs(sumPnl(list))).max().orElse(1.0);
