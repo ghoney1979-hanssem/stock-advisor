@@ -88,12 +88,25 @@ public class FeatureMiningService {
      *                                                      ⚠️ 축마다 태깅 시작일이 달라(뉴스 8/22·호가불균형 8/22·체결강도 8/25 등)
      *                                                      정렬 없이 빼면 edge가 "조건 차이"가 아니라 <b>기간 차이</b>를 잰다 — 아래 {@link #overlapWindow} 참조
      */
+    /**
+     * @param edgeDailyPct      <b>일별 가중</b> edge(진입건수 가중) — {@code edgeVsControlPct}(pooled)가 날짜 구성
+     *                          차이에 왜곡되는 것을 보정한 값. 상세·실측 규모는 {@link DailyWeightedEdge}
+     * @param edgeDailyEqualPct 거래일 동일가중 edge — 위와 어긋나면 추정 불안정 신호
+     * @param edgeDaysBoth      edge가 실제로 계산된 거래일 수(진입·대조군 양쪽에 표본이 있는 날)
+     * @param edgeDaysEntered   진입군에 표본이 있는 거래일 수 — {@code edgeDaysBoth}와 벌어질수록 신뢰도 낮음
+     *
+     * <p>🔴 2026-09-14: {@code overlapWindow}(2026-08-25)는 "창이 겹치는가"만 보고 <b>창 안의 날짜 구성</b>은
+     * 보지 않는다. 실측에서 가중 방식만 바꿔도 edge가 최대 2.06%p 움직이고 부호가 뒤집혔다 —
+     * pocket을 채택·기각할 땐 <b>두 값이 같은 부호인지</b>와 {@code edgeDaysBoth}를 함께 볼 것.</p>
+     */
     public record Bucket(String feature, String range, int n, int distinctDays, double maxDaySharePct,
                          String topDay, Double netExTopDayPct,
                          double netAvgPct, double winRatePct, boolean clustered, String topStrategy,
                          int controlN, Double controlNetPct, Double edgeVsControlPct,
                          int controlTotalN, double controlCoveragePct,
-                         String edgeFrom, String edgeTo, int edgeEnteredN, Double edgeEnteredNetPct) {}
+                         String edgeFrom, String edgeTo, int edgeEnteredN, Double edgeEnteredNetPct,
+                         Double edgeDailyPct, Double edgeDailyEqualPct,
+                         int edgeDaysBoth, int edgeDaysEntered) {}
 
     public record FeatureMining(String feature, List<Bucket> buckets) {}
 
@@ -371,10 +384,33 @@ public class FeatureMiningService {
             alignedNet = round2(as / gw.size());
         }
         Double edge = (controlNet == null || alignedNet == null) ? null : round2(alignedNet - controlNet);
+        // 일별 가중 edge(2026-09-14) — pooled(위 edge)가 날짜 구성 차이에 왜곡되는 것을 보정.
+        // 커버리지 가드를 통과한 경우에만 낸다(신뢰 못 할 대조군으로 두 번째 숫자를 만들지 않는다).
+        DailyWeightedEdge.Result dw = trustworthy
+                ? DailyWeightedEdge.of(byDay(gw, netByOutcome), byDay(cw, netByOutcome), true)
+                : DailyWeightedEdge.EMPTY;
         return new Bucket(feature, range, n, days.size(), round2(maxShare), topDay, netExTop,
                 enteredNet, round2(100.0 * wins / n), clustered, top,
                 resolved, controlNet, edge, cw.size(), round2(coverage),
-                win == null ? null : win[0], win == null ? null : win[1], gw.size(), alignedNet);
+                win == null ? null : win[0], win == null ? null : win[1], gw.size(), alignedNet,
+                dw.weightedPct(), dw.equalPct(), dw.daysBoth(), dw.daysEntered());
+    }
+
+    /**
+     * 일자 -&gt; {건수, net합} ({@link DailyWeightedEdge} 입력). net 미해결(해당 horizon 가격 없음) 행은 제외 —
+     * 그 행은 pooled 계산에서도 빠지므로 두 지표의 모집단이 어긋나지 않게 한다.
+     */
+    private static Map<String, double[]> byDay(List<TradeOutcome> rows, Map<Long, Double> netByOutcome) {
+        Map<String, double[]> m = new LinkedHashMap<>();
+        for (TradeOutcome o : rows) {
+            String d = o.getAlertDate();
+            Double net = netByOutcome.get(o.getId());
+            if (d == null || net == null) continue;
+            double[] v = m.computeIfAbsent(d, k -> new double[2]);
+            v[0]++;
+            v[1] += net;
+        }
+        return m;
     }
 
     private static List<String> datesOf(List<TradeOutcome> rows) {

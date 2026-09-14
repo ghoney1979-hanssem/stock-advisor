@@ -69,6 +69,16 @@ public class ControlAnalysisService {
      * {@code NOT_WEAK} n=61(<b>1거래일</b>)을 그대로 빼서 edge를 +1.85%p로 보고했는데, 같은 날로 맞추면
      * <b>+0.69%p</b>였다. {@code FeatureMiningService.overlapWindow}가 2026-08-25에 받은 것과 같은 수정이며,
      * 새 대조군 사유가 추가될 때마다 도입 직후엔 <b>구조적으로 부풀려지므로</b> 이 정렬이 필수다.</p>
+     *
+     * @param edgeDailyPct      <b>일별 가중</b> edge(진입건수 가중) — {@code edgeVsEnteredPct}(pooled)가
+     *                          날짜 구성 차이에 왜곡되는 것을 보정한 값. 상세는 {@link DailyWeightedEdge}
+     * @param edgeDailyEqualPct 거래일 동일가중 edge — 위와 어긋나면 추정 불안정 신호
+     * @param edgeDaysBoth      edge가 실제로 계산된 거래일 수(양쪽에 표본이 있는 날)
+     * @param edgeDaysEntered   ENTERED에 표본이 있는 거래일 수 — {@code edgeDaysBoth}와 벌어질수록 신뢰도 낮음
+     *
+     * <p>🔴 2026-09-14 추가(edgeDaily*): pooled와 일별가중이 <b>부호까지 갈린다</b>(실측 최대 2.06%p).
+     * 그래서 {@code hint}·{@code diagnose}는 <b>둘 다 양수일 때만</b> "필터 완화"를 제안한다 — 필터 완화는
+     * 리스크를 <b>늘리는</b> 방향이라, 두 추정치가 엇갈리면 침묵하는 쪽이 안전하다(이 시스템의 비대칭 원칙).</p>
      */
     public record Stat(String group, int samples, Double avgNetReturnPct, Double winRatePct,
                        int distinctDays, Double maxDaySharePct, String topDay, Double netExTopDayPct,
@@ -76,7 +86,9 @@ public class ControlAnalysisService {
                        String alignedFrom, String alignedTo,
                        Integer alignedSamples, Double alignedNetPct,
                        Integer alignedEnteredSamples, Double alignedEnteredNetPct,
-                       Double edgeVsEnteredPct) {}
+                       Double edgeVsEnteredPct,
+                       Double edgeDailyPct, Double edgeDailyEqualPct,
+                       int edgeDaysBoth, int edgeDaysEntered) {}
     public record StrategyControl(String strategy, String horizon, Stat entered, List<Stat> rejectedByReason,
                                   String hint) {}
 
@@ -195,11 +207,14 @@ public class ControlAnalysisService {
         for (Stat r : sc.rejectedByReason()) {
             // 클러스터된 탈락 버킷은 비교 대상에서 제외 — "하루 이벤트가 만든 net"으로 필터를 흔들지 않는다.
             // 그리고 비교는 '겹치는 거래일 구간'으로 정렬된 edge로 한다(기간 차이 ≠ 조건 차이, 2026-08-27).
+            // ⚠️ pooled(edgeVsEnteredPct) 와 일별가중(edgeDailyPct) 이 <b>둘 다</b> 양수일 때만 제안한다
+            //    (2026-09-14) — 필터 완화는 리스크를 늘리는 방향이라 두 추정치가 엇갈리면 침묵이 안전하다.
             if (r.samples() >= MIN_SAMPLES && !r.clustered()
-                    && r.edgeVsEnteredPct() != null && r.edgeVsEnteredPct() > 0) {
-                better.add(String.format("%s(%+.2f%% vs 진입 %+.2f%%, n%d, %s~%s)", r.group(),
-                        r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(),
-                        r.alignedFrom(), r.alignedTo()));
+                    && r.edgeVsEnteredPct() != null && r.edgeVsEnteredPct() > 0
+                    && r.edgeDailyPct() != null && r.edgeDailyPct() > 0) {
+                better.add(String.format("%s(%+.2f%% vs 진입 %+.2f%%, n%d, %s~%s, 일별가중 edge %+.2f%%p/%d일)",
+                        r.group(), r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(),
+                        r.alignedFrom(), r.alignedTo(), r.edgeDailyPct(), r.edgeDaysBoth()));
             }
         }
         if (!better.isEmpty()) {
@@ -228,7 +243,7 @@ public class ControlAnalysisService {
     private Stat toStat(String group, Acc a, Acc entered) {
         if (a == null || a.count == 0) {
             return new Stat(group, 0, null, null, 0, null, null, null, false,
-                    null, null, null, null, null, null, null);
+                    null, null, null, null, null, null, null, null, null, 0, 0);
         }
         int n = a.count;
         int days = a.cntByDay.size();
@@ -264,10 +279,26 @@ public class ControlAnalysisService {
             if (aNet != null && eNet != null) edge = round2(aNet - eNet);
         }
 
+        // 일별 가중 edge — pooled(위 edge)가 날짜 구성 차이에 왜곡되는 것을 보정한다(2026-09-14).
+        // 부호 규약이 "거른 게 더 나았다=양수"라 enteredMinusOther=false 로 넘긴다.
+        DailyWeightedEdge.Result dw = entered == null ? DailyWeightedEdge.EMPTY
+                : DailyWeightedEdge.of(byDay(entered), byDay(a), false);
+
         return new Stat(group, n, round2(net), round2(100.0 * a.wins / n),
                 days, round2(share), topDay, round2(netExTop), clustered,
                 win == null ? null : win[0], win == null ? null : win[1],
-                aN, aNet, eN, eNet, edge);
+                aN, aNet, eN, eNet, edge,
+                dw.weightedPct(), dw.equalPct(), dw.daysBoth(), dw.daysEntered());
+    }
+
+    /** 누적기를 일자 -&gt; {건수, net합} 으로 — {@link DailyWeightedEdge} 입력 형태. */
+    private static Map<String, double[]> byDay(Acc a) {
+        Map<String, double[]> m = new LinkedHashMap<>();
+        for (Map.Entry<String, int[]> e : a.cntByDay.entrySet()) {
+            double[] s = a.sumByDay.get(e.getKey());
+            m.put(e.getKey(), new double[]{e.getValue()[0], s == null ? 0 : s[0]});
+        }
+        return m;
     }
 
     /**
@@ -334,8 +365,11 @@ public class ControlAnalysisService {
             // ⚠️ 비교는 반드시 '겹치는 거래일 구간'으로 정렬된 값으로 — 전체 구간끼리 빼면 기간 차이를 조건 차이로 오독한다.
             // 정렬값이 없으면(진입일 미상 등) 비교를 생략한다: 부풀려진 숫자로 필터를 흔드는 것보다 침묵이 낫다.
             if (r.samples() < 10 || r.edgeVsEnteredPct() == null || r.edgeVsEnteredPct() <= 0) continue;
-            better.add(String.format("%s(%.2f%%>%.2f%%, n=%d, %s~%s)", r.group(),
-                    r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(), r.alignedFrom(), r.alignedTo()));
+            // 2026-09-14: pooled 만으로는 부호가 뒤집힐 수 있다 — 일별가중도 양수여야 제안한다(fail-closed).
+            if (r.edgeDailyPct() == null || r.edgeDailyPct() <= 0) continue;
+            better.add(String.format("%s(%.2f%%>%.2f%%, n=%d, %s~%s, 일별가중 %+.2f%%p/%d일)", r.group(),
+                    r.alignedNetPct(), r.alignedEnteredNetPct(), r.alignedSamples(), r.alignedFrom(), r.alignedTo(),
+                    r.edgeDailyPct(), r.edgeDaysBoth()));
         }
         return better.isEmpty() ? "진입분이 우위 — 현 필터 유지"
                 : "⚠️ 미진입이 더 나음(필터 완화 검토): " + String.join(", ", better);
