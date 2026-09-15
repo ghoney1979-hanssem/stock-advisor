@@ -88,6 +88,9 @@ public class SignalAdminController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.DailyMarkOhlcBackfillService dailyMarkOhlcBackfillService;   // 일봉마크 OHLC 소급 — 필드주입
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.DailyMarkHistoryBackfillService dailyMarkHistoryBackfillService;   // 일봉마크 D+30 천장 제거 — 필드주입
+
     private final DisclosurePollingService pollingService;
     private final SignalAlertService signalAlertService;
     private final MarketSignalService marketSignalService;
@@ -439,6 +442,24 @@ public class SignalAdminController {
     public Object backfillDailyMarkOhlc() {
         if (dailyMarkOhlcBackfillService == null) return java.util.Map.of("error", "service unavailable");
         return dailyMarkOhlcBackfillService.backfill();
+    }
+
+    /**
+     * 일봉 마크의 <b>D+30 천장 제거</b> — {@code daily_price}에서 누락 마크를 소급 적재(KIS 호출 0).
+     *
+     * <p>마크 수집이 KIS 일봉(~30거래일 창)에서 오는 탓에 보유 상한 60거래일을 <b>측정할 수 없던</b> 상태를
+     * 해소한다. 수정주가·거래일 정렬 검증을 통과한 outcome만 채운다(fail-closed) — 상세는
+     * {@link com.stockadvisor.service.DailyMarkHistoryBackfillService}.</p>
+     *
+     * @param maxHoldDays 채울 상한 거래일(기본 60 = 현 보유 상한)
+     * @param sinceDate   이 진입일(YYYYMMDD) 이후만 — 빈 값이면 전체
+     */
+    @PostMapping("/backfill-daily-mark-history")
+    public Object backfillDailyMarkHistory(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "60") int maxHoldDays,
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "") String sinceDate) {
+        if (dailyMarkHistoryBackfillService == null) return java.util.Map.of("error", "service unavailable");
+        return dailyMarkHistoryBackfillService.backfill(maxHoldDays, sinceDate);
     }
 
     /** 멀티데이 청산 트리거 시뮬 — 일봉 경로에 보유D+N/트레일%/MA이탈/손절 시뮬해 전략별 net 최대 방식(Phase 2). */

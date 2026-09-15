@@ -488,6 +488,14 @@ stockadvisor:
     refresh-enabled: ${DAILY_HISTORY_REFRESH_ENABLED:false}
     refresh-cron: ${DAILY_HISTORY_REFRESH_CRON:0 40 16 * * MON-FRI}   # 호출 간격(ms). 실측 무지연 15콜/2초에도 차단 없었으나 1,500콜은 얌전히
 
+  # 멀티데이 일봉 마크의 D+30 천장 제거(2026-09-15) — daily-history 갱신(16:40) 직후에 돈다.
+  # 🔴 마크 수집이 KIS 일봉(~30거래일 창)에서 오는 탓에 보유 상한 60거래일을 측정할 수 없었다
+  #    (실측 max(mark_days)=30, 초과 0건). 게이트도 같은 마크로 채점하므로 분석만의 문제가 아니다.
+  # 켜지 않으면 천장이 그대로다 — 수동 POST /admin/backfill-daily-mark-history 로도 같은 일을 한다.
+  daily-mark-history:
+    schedule-enabled: ${DAILY_MARK_HISTORY_SCHEDULE_ENABLED:false}
+    cron: ${DAILY_MARK_HISTORY_CRON:0 50 16 * * MON-FRI}
+
   # 멀티데이 섀도우 슬리브(SleeveService) — 96조합 백테스트의 유일 생존자 HIGH_52W_HIGH를 실시간 기록.
   # 실주문 없음. holdout을 3회 소진해 백테스트로는 더 검증 불가 → 포워드 기록만이 오염되지 않은 증거다.
   sleeve:
