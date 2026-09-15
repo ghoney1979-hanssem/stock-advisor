@@ -354,6 +354,10 @@ stockadvisor:
       # walk-forward(33일): 상태 무관 −0.84 → 국면×흐름 +0.1 → 국면×시장폭 +0.4~0.5/단위. 코드 기본 off, prod on(관찰).
       breadth-conditional: ${TRADING_PERF_GATE_BREADTH_CONDITIONAL:false}
       breadth-min-samples: ${TRADING_PERF_GATE_BREADTH_MIN_SAMPLES:20}
+      # 멀티데이 초과수익 채점(2026-09-15) — 절대 net 대신 '보유기간을 맞춘 유니버스 대비 초과수익'으로 채점.
+      # 룩백(20캘린더일)이 보유(60거래일)보다 짧아 어린 포지션을 최악 구간(D+3~5)에서 재던 문제 대응.
+      # horizon=multiday 에만 적용. 반사실 미상 표본은 제외(fail-closed), 벤치마크 미가용이면 사유에 표기 후 절대 net.
+      multiday-excess: ${TRADING_PERF_GATE_MULTIDAY_EXCESS:false}
       # net 추세 조건부(2026-09-02) — 게이트를 net의 '수준'이 아니라 '방향'으로 판정.
       # 총 net이 −여도 상승곡선이면 열고, +여도 하락곡선이면 닫는다. 데드밴드 안(평탄)이면 종전 절대 net 판정.
       # 비대칭: 닫기는 기울기만으로 즉시 / 열기는 기울기 + 전수 LOO(어느 하루를 빼도 기울기가 양수)
