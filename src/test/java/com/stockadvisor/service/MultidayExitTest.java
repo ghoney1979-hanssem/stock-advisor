@@ -312,4 +312,114 @@ class MultidayExitTest {
         assertThat(d.reason()).contains("손절-7.0%");   // 어떤 규칙으로 쟀는지 사유에 드러난다
         assertThat(d.allowed()).isFalse();
     }
+
+    // ── 멀티데이 초과수익 채점(2026-09-15, 사용자 결정) ──────────────────────────────────
+    // 게이트 룩백(20캘린더일)이 보유(60거래일)보다 짧아 어린 포지션을 현재 마크에서 채점하는데,
+    // D+3~D+5가 하필 최악 구간이라 전략이 구조적으로 가장 나쁜 지점에서 닫혔다.
+    // → 보유기간을 맞춘 유니버스 수익을 빼서 "시장이 빠진 것"과 "전략이 나쁜 것"을 가른다.
+
+    /** (진입일, k거래일, 평균등락률%, 종목수) — {@code universeForwardReturns} 의 반환 모양. */
+    private Object[] uniRow(String date, int k, double pct) {
+        return new Object[]{date, k, pct, 500L};
+    }
+
+    private java.util.List<Object[]> uniAll(int k, double pct) {
+        java.util.List<Object[]> out = new java.util.ArrayList<>();
+        for (String d : new String[]{"20260901", "20260902", "20260903"}) out.add(uniRow(d, k, pct));
+        return out;
+    }
+
+    /**
+     * 진입 6건(3거래일) — D+1 10,600(+6% 무장) → D+2 10,380(−2.08% 발동) → 청산 10,380, <b>보유 2거래일</b>.
+     * 절대 net = (10,380−10,000)/10,000 − 0.22 = <b>+3.58%</b>.
+     *
+     * @param uniRows null이면 벤치마크 미가용(절대 net으로 degrade)
+     */
+    private StrategyPerformanceGate excessGate(java.util.List<Object[]> uniRows, boolean excessOn) {
+        java.util.List<com.stockadvisor.domain.TradeOutcome> rows = new java.util.ArrayList<>();
+        java.util.List<com.stockadvisor.domain.OutcomeDailyMark> marks = new java.util.ArrayList<>();
+        String[] dates = {"20260901", "20260902", "20260903"};
+        for (int i = 0; i < 6; i++) {
+            var o = new com.stockadvisor.domain.TradeOutcome("MULTIDAY_REVERSION_P", null,
+                    String.format("%06d", i), dates[i % 3], 10_000L);
+            org.springframework.test.util.ReflectionTestUtils.setField(o, "id", (long) i);
+            rows.add(o);
+            marks.add(new com.stockadvisor.domain.OutcomeDailyMark((long) i, "MULTIDAY_REVERSION_P", 10_000L, 1, dates[i % 3], 10_600L));
+            marks.add(new com.stockadvisor.domain.OutcomeDailyMark((long) i, "MULTIDAY_REVERSION_P", 10_000L, 2, dates[i % 3], 10_380L));
+        }
+        var repo = org.mockito.Mockito.mock(com.stockadvisor.repository.TradeOutcomeRepository.class);
+        org.mockito.Mockito.when(repo.findByStrategyAndAlertDateGreaterThanEqual(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenReturn(rows);
+        var markRepo = org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeDailyMarkRepository.class);
+        org.mockito.Mockito.when(markRepo.findByStrategyOrderByOutcomeIdAscMarkDaysAsc("MULTIDAY_REVERSION_P"))
+                .thenReturn(marks);
+        var cost = org.mockito.Mockito.mock(ExecutionCostModel.class);
+        org.mockito.Mockito.when(cost.estimateRoundTripSlippagePct(org.mockito.ArgumentMatchers.anyLong())).thenReturn(0.0);
+        var props = new com.stockadvisor.config.properties.StrategyPerformanceProperties(
+                true, 20, 5, 0.3, "exit", false, false, false, 50, 0.5, 0.5, 10, 0.3, true, 30, "", 0, 999.0);
+        var gate = new StrategyPerformanceGate(repo, props,
+                org.mockito.Mockito.mock(MarketRegimeService.class), cost,
+                org.mockito.Mockito.mock(StrategyHoldTimeProvider.class),
+                org.mockito.Mockito.mock(com.stockadvisor.repository.OutcomeSampleRepository.class),
+                java.util.List.of(), 0.22, "", "nextClose", 0.0, false, false, "", "", "", "");
+        gate.configureMultidayScoring("MULTIDAY_REVERSION_P", ARM, DROP, MAX, markRepo);
+        com.stockadvisor.repository.DailyPriceRepository priceRepo = null;
+        if (uniRows != null) {
+            priceRepo = org.mockito.Mockito.mock(com.stockadvisor.repository.DailyPriceRepository.class);
+            org.mockito.Mockito.when(priceRepo.universeForwardReturns(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyLong(),
+                    org.mockito.ArgumentMatchers.anyLong())).thenReturn(uniRows);
+        }
+        gate.configureMultidayExcess(excessOn, priceRepo);
+        return gate;
+    }
+
+    @Test
+    void 초과수익_채점은_같은_보유기간의_유니버스_수익을_뺀다() {
+        // 절대 net 은 +3.58%지만 그 2거래일 동안 유니버스도 +3.0% 올랐다 → 초과수익 +0.58%.
+        var d = excessGate(uniAll(2, 3.0), true).evaluate("MULTIDAY_REVERSION_P");
+
+        assertThat(d.samples()).isEqualTo(6);
+        assertThat(d.netAvgReturnPct()).isEqualTo(0.58);
+        assertThat(d.reason()).contains("초과수익(유니버스대비)");
+        assertThat(d.allowed()).isTrue();          // +0.58% ≥ 기준 0.30%
+    }
+
+    @Test
+    void 시장이_더_오른_구간이면_절대net이_양수여도_초과수익은_음수로_차단된다() {
+        // 🔴 이게 이 레이어를 넣은 이유다 — 절대 net +3.58%는 좋아 보이지만
+        //    같은 기간 유니버스가 +5%였다면 전략은 시장에 1.42%p 진 것이다.
+        var d = excessGate(uniAll(2, 5.0), true).evaluate("MULTIDAY_REVERSION_P");
+
+        assertThat(d.netAvgReturnPct()).isEqualTo(-1.42);
+        assertThat(d.allowed()).isFalse();
+    }
+
+    @Test
+    void 보유기간이_다른_유니버스_행은_매칭되지_않아_표본에서_제외된다() {
+        // 실제 보유는 2거래일인데 벤치마크에 D+7만 있으면 매칭 실패 → 표본 0(fail-closed).
+        // ⚠️ 0으로 두면 "시장을 모르는 날"이 절대 net 으로 섞여 한 평균에 두 기준이 들어간다.
+        var d = excessGate(uniAll(7, 3.0), true).evaluate("MULTIDAY_REVERSION_P");
+
+        assertThat(d.samples()).isZero();
+        assertThat(d.allowed()).isFalse();
+    }
+
+    @Test
+    void 벤치마크_미가용이면_절대net으로_degrade하고_사유에_드러낸다() {
+        // 조용히 종전 동작으로 돌아가면 "초과수익으로 본다"고 믿으면서 드리프트를 채점하게 된다.
+        var d = excessGate(null, true).evaluate("MULTIDAY_REVERSION_P");
+
+        assertThat(d.netAvgReturnPct()).isEqualTo(3.58);
+        assertThat(d.reason()).contains("초과수익 미가용");
+    }
+
+    @Test
+    void 초과수익_off면_종전대로_절대net_채점() {
+        var d = excessGate(uniAll(2, 3.0), false).evaluate("MULTIDAY_REVERSION_P");
+
+        assertThat(d.netAvgReturnPct()).isEqualTo(3.58);
+        assertThat(d.reason()).doesNotContain("초과수익");
+    }
 }

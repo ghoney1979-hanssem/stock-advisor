@@ -120,6 +120,36 @@ public class StrategyPerformanceGate {
     /** 전략 → 구표본 재필터 술어(조이는 필터 임계). */
     private final java.util.Map<String, GateRefilter> refilters;
 
+    /**
+     * 유니버스 동일가중 보유 벤치마크(멀티데이 초과수익 채점용). 룩백 창을 한 번만 집계해 캐시한다.
+     *
+     * <p>⚠️ 캐시가 <b>필수</b>다 — {@code evaluate()}는 진입 시도마다 불리는데 이건 {@code daily_price}
+     * 전체를 훑는 윈도우 집계다. 캐시 없이 두면 신호가 몰리는 개장 직후에 진입 경로가 DB에 묶인다.
+     * 창은 진입일 기준이라 하루 단위로만 바뀌므로 시작일을 키로 쓴다.</p>
+     *
+     * <p>조회 실패·일봉 미적재면 {@link UniverseHoldIndex#unavailable()} → 호출측이 사유에
+     * "초과수익 미가용"을 실어 <b>절대 net으로 degrade</b>한다(조용히 바뀌지 않는다).</p>
+     */
+    private UniverseHoldIndex universeIndex() {
+        if (dailyPriceRepository == null) return UniverseHoldIndex.unavailable();
+        String from = LocalDate.now(SEOUL).minusDays(props.lookbackDays() + 5L).format(YYYYMMDD);
+        String to = LocalDate.now(SEOUL).format(YYYYMMDD);
+        synchronized (universeLock) {
+            if (from.equals(universeCacheKey) && universeCache != null) return universeCache;
+            UniverseHoldIndex idx;
+            try {
+                idx = UniverseHoldIndex.of(dailyPriceRepository.universeForwardReturns(
+                        from, to, multidayMaxHoldDays, universeMinPrice, universeMinTurnoverKrw),
+                        MIN_UNIVERSE_STOCKS);
+            } catch (Exception e) {
+                idx = UniverseHoldIndex.unavailable();
+            }
+            universeCacheKey = from;
+            universeCache = idx;
+            return idx;
+        }
+    }
+
     // ── 시장폭 조건부(4차원, 2026-08-29) ────────────────────────────────────────────────
     // walk-forward(섀도우 6/25~8/28, 33일 평가)에서 상태조건부 선택의 단위당 net: 상태 무관 −0.84 → 국면 −0.29 →
     // 국면×흐름 +0.07~+0.17 → **국면×시장폭 +0.40~+0.50(적중 73~77%)**. 시장폭은 진입 시 태깅만 하고
@@ -132,6 +162,49 @@ public class StrategyPerformanceGate {
     private int breadthMinSamples = 20;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private MarketBreadthService breadthService;   // 필드주입(생성자 무churn) — 미주입(테스트)이면 폭 레이어 생략
+
+    // ── 레이어 3.0 — 멀티데이 초과수익 채점(2026-09-15, 사용자 결정) ────────────────────────
+    // 🔴 <b>왜</b>: 게이트 룩백은 20캘린더일(≈14거래일)인데 보유는 60거래일이다. 트리거가 안 걸린 경로는
+    // {@link PositionExitService#simulateMultidayExitPrice}가 <b>마지막 관측일 종가</b>를 청산가로 돌려주므로
+    // (그 메서드 @return 규약), 게이트는 어린 포지션을 <b>현재 마크 시점</b>에서 채점한다. 실측(2026-09-15
+    // 룩백 내 평균 최대 mark_days): D 6.6 · L 6.5 · G 6.2 · H 5.5, <b>D+15 도달 표본 0건</b>.
+    // 그리고 D+3~D+5는 이 전략들의 <b>최악 구간</b>이라(G D+3 −0.37 → D+5 −4.46) 게이트가 구조적으로
+    // 전략을 가장 나쁜 지점에서 재고 닫는다. 실제로 L은 초과수익 +2.55%p인데 net 하락추세로 닫혀 있었다.
+    //
+    // ⚠️ <b>마크 백필로는 못 고친다</b> — 미래는 백필할 수 없다(9/15 실측: D+30 천장을 걷어낸 뒤에도
+    // 룩백 내 깊이는 불변이었다). 룩백을 60거래일로 늘리는 선택지는 "3개월 전 성과로 지금을 판단"하게 되고,
+    // 미해소분 제외는 표본이 거의 사라져 전면 차단이 된다.
+    //
+    // → <b>보유기간을 맞춘 유니버스 동일가중 수익률을 빼서 채점한다.</b> 어린 포지션을 어린 시점에 재는 것은
+    // 그대로 두되, 그 시점의 <b>시장 드리프트를 제거</b>한다. "D+5에 −4%"가 시장이 −4%였기 때문인지
+    // 전략이 나빠서인지를 가르는 것이 요점이다. 임계(min-net-avg-pct 등)의 의미도 함께 바뀐다 —
+    // 절대 수익이 아니라 <b>유니버스 대비 초과수익</b>이 기준선을 넘어야 한다.
+    //
+    // ⚠️ 적용 범위는 horizon="multiday"뿐이다. 인트라데이·close·nextClose는 보유가 짧아 드리프트가 작고,
+    //    INVERSE는 실현손익으로 따로 채점한다(그쪽은 지수 하락이 곧 수익이라 유니버스 차감이 의미를 뒤집는다).
+    // ⚠️ 반사실을 못 구한 표본은 <b>제외</b>한다(fail-closed) — 0으로 두면 "시장이 얼마였는지 모르는 날"이
+    //    전부 절대 net으로 섞여 두 기준이 한 평균에 들어간다.
+    // ⚠️ 코드 기본 off(종전 동작) — prod에서 켠다.
+    @Value("${stockadvisor.trading.perf-gate.multiday-excess:false}")
+    private boolean multidayExcess = false;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.repository.DailyPriceRepository dailyPriceRepository;   // 미주입(테스트)이면 종전 절대 net
+
+    /** 유니버스 진입일 유동성 필터 — 라이브 진입 판정·{@link MultidayExitAnalysisService}와 같은 값이라야 한다. */
+    @Value("${stockadvisor.signal.min-price:1000}")
+    private long universeMinPrice = 1000;
+    @Value("${stockadvisor.cost.execution.min-turnover-krw:500000000}")
+    private long universeMinTurnoverKrw = 500_000_000L;
+
+    /** (일자,k) 집계가 이 종목 수 미만이면 버린다 — 몇 종목짜리 평균은 벤치마크가 아니라 잡음이다. */
+    private static final int MIN_UNIVERSE_STOCKS = 50;
+
+    // 벤치마크 인덱스 캐시 — evaluate()는 진입 시도마다 불리는데 이건 룩백 전체를 훑는 집계라
+    // 매번 돌리면 진입 경로에 수 초가 붙는다. 창은 하루 단위로만 바뀌므로 키(from)로 캐시한다.
+    private final Object universeLock = new Object();
+    private String universeCacheKey;
+    private UniverseHoldIndex universeCache;
 
     // ── 멀티데이 채점(2026-09-03) ───────────────────────────────────────────────────
     // ⚠️ <b>PositionExitService를 주입하지 않는다</b> — Gate → PositionExitService → OrderService → Gate 로
@@ -191,6 +264,16 @@ public class StrategyPerformanceGate {
         this.multidayDropPct = dropPct;
         this.multidayMaxHoldDays = maxHoldDays;
         this.dailyMarkRepository = repo;
+    }
+
+    /** 테스트용 — 멀티데이 초과수익 채점 구성. repo=null이면 벤치마크 미가용(절대 net으로 degrade). */
+    void configureMultidayExcess(boolean enabled, com.stockadvisor.repository.DailyPriceRepository repo) {
+        this.multidayExcess = enabled;
+        this.dailyPriceRepository = repo;
+        synchronized (universeLock) {
+            this.universeCacheKey = null;
+            this.universeCache = null;
+        }
     }
 
     /** 테스트용 — 채점 손절·상한가 구성(라이브 provider 없이 값만 고정). */
@@ -589,6 +672,14 @@ public class StrategyPerformanceGate {
         final java.util.Map<Long, java.util.List<PositionExitService.DayBar>> mdPaths = multidayPaths;
         final java.util.Map<Long, Long> mdEntryClose = multidayEntryClose;
         final double mdStop = mdStopPct;
+        // 멀티데이 초과수익 채점 — 벤치마크를 못 만들면 조용히 절대 net으로 돌아가지 않고 사유에 드러낸다
+        // (미가용을 숨기면 "초과수익으로 본다"고 믿으면서 실제로는 드리프트를 채점하게 된다).
+        UniverseHoldIndex universe = (mdPaths != null && multidayExcess)
+                ? universeIndex() : UniverseHoldIndex.unavailable();
+        boolean excessMode = mdPaths != null && multidayExcess && universe.available();
+        if (mdPaths != null && multidayExcess) {
+            methodTag += excessMode ? "·초과수익(유니버스대비)" : "·초과수익 미가용(절대net)";
+        }
         // horizon="exit": 전략별 권장 보유시간(PositionExitService가 실제 청산하는 그 마크)의 가격을 OutcomeSample에서
         // 조회해 net을 측정 → "실제로 팔 시점의 수익"으로 검증(당일종가 아님).
         boolean exitMode = "exit".equals(horizon);
@@ -663,12 +754,16 @@ public class StrategyPerformanceGate {
             if (refilter != null && !refilter.test(o)) continue;   // 새 필터라면 걸렀을 구표본 제외(net 정밀 재검증)
             if (marketSplit && !market.equals(o.getEntryMarket())) continue;   // 2D: 다른 시장 제외(양쪽 공통)
             Long price;
+            int heldDays = 0;
             if (mdPaths != null) {
                 // 멀티데이: 일봉 경로에 라이브와 동일한 판정 함수를 적용해 청산가를 구한다(마크 미수집이면 null=제외).
                 Long d0 = mdEntryClose.get(o.getId());
-                price = PositionExitService.simulateMultidayExitPrice(o.getBuyPrice(), mdPaths.get(o.getId()),
+                PositionExitService.MultidayExit ex = PositionExitService.simulateMultidayExit(
+                        o.getBuyPrice(), mdPaths.get(o.getId()),
                         d0 == null ? 0 : d0, multidayArmPct, multidayDropPct, multidayMaxHoldDays,
                         mdStop, limitUpLockPct);
+                price = ex == null ? null : ex.price();
+                if (ex != null) heldDays = ex.heldDays();
             } else {
                 price = exitMode ? exitPriceByOutcome.get(o.getId()) : resultPrice(o, horizon);
             }
@@ -677,6 +772,14 @@ public class StrategyPerformanceGate {
                     : executionCostModel.estimateRoundTripSlippagePct(o.getBuyPrice());   // 없으면 tick 추정
             double cost = roundTripCostPct + slip;
             double net = (double) (price - o.getBuyPrice()) / o.getBuyPrice() * 100 - cost;
+            if (excessMode) {
+                // 같은 진입일·같은 보유 거래일의 유니버스 동일가중 수익을 뺀다 → 시장 드리프트 제거.
+                // ⚠️ 보유기간을 맞추는 것이 핵심이다 — 트리거로 일찍 나온 경로를 "만기까지 들고 있던 시장"과
+                //    비교하면 청산 방식의 효과가 드리프트로 둔갑한다(UniverseHoldIndex 주석과 같은 이유).
+                java.util.OptionalDouble uni = universe.hold(o.getAlertDate(), heldDays);
+                if (uni.isEmpty()) continue;   // 반사실 미상 → 제외(fail-closed). 0으로 두면 두 기준이 섞인다.
+                net -= uni.getAsDouble();
+            }
             String d = o.getAlertDate();
             sumAll += net; nAll++; bump(daysAll, d, net);                       // 전국면 pool
             boolean regimeMatch = regimeName == null || regimeName.equals(o.getEntryMarketTrend());
