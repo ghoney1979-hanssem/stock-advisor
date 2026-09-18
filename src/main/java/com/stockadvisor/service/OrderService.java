@@ -292,8 +292,41 @@ public class OrderService {
     private static final long NET_ASSETS_TTL_MS = 60_000;
     private volatile long cachedNetAssets = 0;
     private volatile long netAssetsAt = 0;
+    private volatile boolean balanceDistrusted = false;   // 퇴화 스냅샷 전이 알림용(edge-trigger)
 
-    /** 계좌 순자산(원) — TTL 캐시. 캐시 유효하면 재사용, 조회 실패 시 직전 정상값. 한 번도 못 받았으면 0. */
+    // 잔고 퇴화 스냅샷 가드(2026-09-18 실측). rt_cd=0 인데 보유 0·순자산 100만짜리 응답이 4회 중 1회 왔다.
+    // 그 값이 그대로 캐시되면 ① 사이징 cap 이 순자산×3.33% ≈ 3만으로 붕괴해 수량 0 스킵 ② 노출상한이
+    // 50만이 돼 실보유 4.6M 대비 **모든 신규 진입이 "총노출 한도 초과"로 조용히 차단**된다. 거부는 trade_order
+    // 행을 남기지 않으므로(정책상 "거부면 기록 없이 REJECTED") 로그가 유일한 단서고, 컨테이너 재생성 시
+    // 그 로그마저 사라져 사후 재현이 불가능하다 — 2026-08-14에 같은 유형으로 검증을 통째로 놓쳤다.
+    // → 내부 장부와 모순되는 스냅샷은 **채택하지 않고 직전 정상값을 유지**한다(fail-safe: 조용히 믿지 않는다).
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.trading.balance-sanity-min-ratio:0.5}")
+    private double balanceSanityMinRatio = 0.5;   // 0 이하면 가드 비활성(종전 동작)
+
+    /**
+     * 잔고 스냅샷 신뢰성 판정(순수) — 내부 장부와 대조해 "명백히 모순"이면 false.
+     *
+     * <p>두 가지만 본다(둘 다 임계가 아니라 구조적 모순):</p>
+     * <ol>
+     *   <li><b>보유 모순</b> — 내부 미청산 포지션이 있는데 계좌 보유수량 합이 0.</li>
+     *   <li><b>순자산 하한</b> — 순자산이 내부 미청산 매입금액의 {@code minRatio}배에도 못 미침.
+     *       보유가 반토막 나도 현금이 남아 있어 정상 계좌에선 성립하기 어렵다.</li>
+     * </ol>
+     *
+     * <p>⚠️ 내부 포지션이 0이면 판정하지 않는다 — 진짜 flat 계좌가 보유 0·소액 순자산을 주는 건 정상이다.
+     * ⚠️ 호출측이 LIVE 에서만 쓴다(DRY_RUN 포지션은 가상이라 계좌에 없다 = 전부 오탐).</p>
+     *
+     * @param minRatio 0 이하면 하한 검사를 건너뛴다(가드 비활성).
+     */
+    static boolean isPlausibleBalance(long netAsset, long accountHoldingQtySum,
+                                      long internalOpenCount, long internalOpenKrw, double minRatio) {
+        if (minRatio <= 0) return true;              // 가드 비활성
+        if (internalOpenCount <= 0) return true;     // 내부도 flat → 대조할 근거 없음
+        if (accountHoldingQtySum <= 0) return false; // ① 보유 모순
+        return netAsset >= Math.round(internalOpenKrw * minRatio);   // ② 순자산 하한
+    }
+
+    /** 계좌 순자산(원) — TTL 캐시. 캐시 유효하면 재사용, 조회 실패/퇴화 스냅샷이면 직전 정상값. 한 번도 못 받았으면 0. */
     private long fetchNetAssets() {
         long now = System.currentTimeMillis();
         if (cachedNetAssets > 0 && (now - netAssetsAt) < NET_ASSETS_TTL_MS) {
@@ -305,14 +338,52 @@ public class OrderService {
                 return cachedNetAssets;   // 응답 비면 직전값 유지
             }
             long na = parseLong(bal.summary().get(0).netAsset());
+            // 퇴화 스냅샷 가드 — LIVE 에서만(DRY_RUN 포지션은 가상이라 계좌에 없다).
+            if (policy.mode() == TradingMode.LIVE) {
+                long qtySum = accountHoldingQtySum(bal);
+                long openCnt = orderRepository.countOpenPositions();
+                long openKrw = riskGuard.openExposureKrw();
+                if (!isPlausibleBalance(na, qtySum, openCnt, openKrw, balanceSanityMinRatio)) {
+                    onDistrustedBalance(na, qtySum, openCnt, openKrw);
+                    return cachedNetAssets;   // 채택하지 않음 — 직전 정상값 유지(없으면 0 → 진입 스킵)
+                }
+            }
             if (na > 0) {
                 cachedNetAssets = na;
                 netAssetsAt = now;
+                if (balanceDistrusted) {
+                    balanceDistrusted = false;
+                    log.info("계좌 잔고 스냅샷 정상 복구 — 순자산 {}원", na);
+                    notifyEvent("✅ 계좌 잔고 스냅샷 정상 복구 — 순자산 " + String.format("%,d", na) + "원");
+                }
             }
             return na > 0 ? na : cachedNetAssets;
         } catch (Exception ex) {
             log.warn("계좌 평가액 조회 실패 — 직전 순자산({})으로 degrade: {}", cachedNetAssets, ex.getMessage());
             return cachedNetAssets;   // 실패 시 직전 정상값(없으면 0 → 사이징 거부)
+        }
+    }
+
+    /** 응답 보유수량 합(파싱 실패·null은 0). */
+    private long accountHoldingQtySum(KisBalanceResponse bal) {
+        if (bal.holdings() == null) return 0;
+        long sum = 0;
+        for (KisBalanceResponse.Holding h : bal.holdings()) {
+            sum += parseLong(h.holdingQty());
+        }
+        return sum;
+    }
+
+    /** 퇴화 스냅샷 로깅·통지 — 전이 시 1회만 알린다(매 틱 알림 스팸 방지, 서킷 전이 알림과 같은 사상). */
+    private void onDistrustedBalance(long netAsset, long qtySum, long openCnt, long openKrw) {
+        log.warn("[주문] 잔고 스냅샷 불신 — 채택 거부(직전 순자산 {}원 유지). 응답 순자산={} 보유합={} / 내부 미청산 {}건·{}원",
+                cachedNetAssets, netAsset, qtySum, openCnt, openKrw);
+        if (!balanceDistrusted) {
+            balanceDistrusted = true;
+            notifyEvent(String.format(
+                    "⚠️ 계좌 잔고 스냅샷 이상 — 순자산 %,d원·보유 %d주로 조회됨 (내부 미청산 %d건·%,d원)."
+                            + " 해당 값은 채택하지 않고 직전 순자산 %,d원을 유지합니다.",
+                    netAsset, qtySum, openCnt, openKrw, cachedNetAssets));
         }
     }
 

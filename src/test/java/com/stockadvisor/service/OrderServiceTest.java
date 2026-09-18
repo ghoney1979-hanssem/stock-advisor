@@ -394,4 +394,59 @@ class OrderServiceTest {
         org.assertj.core.api.Assertions.assertThat(OrderService.groupKeyOf(null)).isNull();
         org.assertj.core.api.Assertions.assertThat(OrderService.groupKeyOf("씨젠")).isEqualTo("씨젠");
     }
+
+    /** 보유종목까지 실은 잔고응답 — 퇴화 스냅샷 가드 검증용. */
+    private KisBalanceResponse balanceWith(long netAsset, long holdingQty) {
+        return new KisBalanceResponse("0", "ok",
+                java.util.List.of(new KisBalanceResponse.Holding(
+                        "005930", "삼성전자", String.valueOf(holdingQty), "70000", "70000", "700000", "0", "0.00")),
+                java.util.List.of(new KisBalanceResponse.Summary(
+                        null, null, null, null, String.valueOf(netAsset), null, null, null)));
+    }
+
+    @org.junit.jupiter.api.Test
+    void 잔고_퇴화스냅샷_판정() {
+        // 2026-09-18 실측: rt_cd=0 인데 보유 0·순자산 100만짜리 응답이 4회 중 1회 왔다.
+        // ① 보유 모순 — 내부 미청산 20건인데 계좌 보유수량 합 0
+        org.assertj.core.api.Assertions.assertThat(
+                OrderService.isPlausibleBalance(1_000_000, 0, 20, 4_611_160, 0.5)).isFalse();
+        // ② 순자산 하한 — 보유는 오는데 순자산이 미청산 매입금액의 절반에도 못 미침
+        org.assertj.core.api.Assertions.assertThat(
+                OrderService.isPlausibleBalance(1_000_000, 100, 20, 4_611_160, 0.5)).isFalse();
+        // 정상 스냅샷은 통과
+        org.assertj.core.api.Assertions.assertThat(
+                OrderService.isPlausibleBalance(10_386_433, 100, 20, 4_611_160, 0.5)).isTrue();
+        // 내부도 flat 이면 판정하지 않는다 — 진짜 빈 계좌가 보유 0을 주는 건 정상
+        org.assertj.core.api.Assertions.assertThat(
+                OrderService.isPlausibleBalance(1_000_000, 0, 0, 0, 0.5)).isTrue();
+        // ratio 0 = 가드 비활성(종전 동작)
+        org.assertj.core.api.Assertions.assertThat(
+                OrderService.isPlausibleBalance(1_000_000, 0, 20, 4_611_160, 0)).isTrue();
+    }
+
+    @Test
+    void LIVE_퇴화_잔고스냅샷은_채택하지않고_진입_스킵() {
+        // 퇴화 스냅샷을 그대로 믿으면 노출상한이 순자산×50% = 50만으로 붕괴해 실보유 4.6M 대비
+        // 모든 신규 진입이 "총노출 한도 초과"로 조용히 차단된다 — 거부는 trade_order 행을 안 남겨 사후 추적도 막힌다.
+        PolicyGate gate = mock(PolicyGate.class);
+        when(gate.evaluate(any(), any())).thenReturn(PolicyGate.PolicyDecision.allow());
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        when(kis.fetchBalance()).thenReturn(balanceWith(1_000_000, 0));   // 순자산 100만·보유 0 (퇴화)
+        when(repo.countOpenPositions()).thenReturn(20L);                  // 내부 장부는 미청산 20건
+        MarketRiskGuard risk = riskGuard();
+        when(risk.openExposureKrw()).thenReturn(4_611_160L);
+        StrategyPerformanceGate pg = mock(StrategyPerformanceGate.class);
+        when(pg.evaluate(any(), any())).thenReturn(new StrategyPerformanceGate.GateDecision(
+                "RSI_REVERSAL_G", true, "통과", 50, 1.0, "BULL", "KOSPI", false));
+        OrderService svc = new OrderService(policy(TradingMode.LIVE, java.util.List.of("RSI_REVERSAL_G")),
+                gate, repo, kis, mock(DiscordNotifier.class), pg, risk, sizer(kis), mock(StrategyHoldTimeProvider.class));
+
+        OrderService.OrderResult r = svc.submitEntry("RSI_REVERSAL_G", "005930", "전기·전자", "KOSPI", 30_000, "k1");
+
+        assertThat(r.status()).isEqualTo(OrderService.ResultStatus.REJECTED);
+        assertThat(r.message()).contains("순자산 산정 불가");     // 직전 정상값이 없으니 0 → 진입 스킵
+        verify(repo, never()).save(any());
+        verify(kis, never()).orderCash(any(), any(), anyLong(), anyLong(), any());
+    }
 }
