@@ -10,7 +10,9 @@
 #    실매매 판정에 영향이 갈 수 있다. 후자는 시뮬이라 KOSPI/KOSDAQ 상태를 건드리지 않고(INVERSE 줄만 갱신)
 #    국면 3종(BULL/NEUTRAL/BEAR)의 n을 모두 주므로 경로 전환과 표본 감소를 분리할 수 있다.
 #
-# 설치(VM): sudo install -m 755 gate-snap.sh /usr/local/bin/gate-snap.sh
+# 설치(VM): ⚠️ Windows 체크아웃에서 scp 하면 CRLF가 섞여 "bad interpreter"로 죽는다 — sed 를 먼저 돌릴 것.
+#           sudo sed -i 's/\r$//' gate-snap.sh gate-snap.cron
+#           sudo install -m 755 gate-snap.sh /usr/local/bin/gate-snap.sh
 #           sudo install -m 644 gate-snap.cron /etc/cron.d/gate-snap
 # 제거:     sudo rm /etc/cron.d/gate-snap /usr/local/bin/gate-snap.sh
 OUT=/home/user/stock-advisor/logs/gate-snap.jsonl
