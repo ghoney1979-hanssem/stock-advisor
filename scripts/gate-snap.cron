@@ -1,0 +1,11 @@
+# 게이트 표본 스냅샷 (2026-09-28 진단, 임시). /etc/cron.d/gate-snap 으로 설치.
+# ⚠️ VM 시계는 UTC다 — 아래는 KST 08:55 / 10:00 / 12:00 / 15:00 / 16:35 / 16:55 에 해당한다(KST = UTC+9).
+#    16:35(갱신 전)과 16:55(16:40 일봉 증분 갱신 후)를 둘 다 찍는 것이 요점 — 갱신이 표본을 되돌리는지 본다.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+55 23 * * * root /usr/local/bin/gate-snap.sh
+0 1 * * * root /usr/local/bin/gate-snap.sh
+0 3 * * * root /usr/local/bin/gate-snap.sh
+0 6 * * * root /usr/local/bin/gate-snap.sh
+35 7 * * * root /usr/local/bin/gate-snap.sh
+55 7 * * * root /usr/local/bin/gate-snap.sh
