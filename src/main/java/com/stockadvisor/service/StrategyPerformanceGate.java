@@ -130,6 +130,31 @@ public class StrategyPerformanceGate {
      * <p>조회 실패·일봉 미적재면 {@link UniverseHoldIndex#unavailable()} → 호출측이 사유에
      * "초과수익 미가용"을 실어 <b>절대 net으로 degrade</b>한다(조용히 바뀌지 않는다).</p>
      */
+    /**
+     * 일봉 마크 경로를 벤치마크가 덮는 보유일({@code maxK})까지만 남긴다(순수). {@code maxK<=0}(그 진입일 벤치마크 없음)이면 그대로.
+     *
+     * <p>🐞 <b>마감 후 게이트 아티팩트(2026-09-30 확정, 10-01 수정)</b>: 벤치마크 캐시는 하루 한 번(자정 이후 첫 조회)
+     * 만들어져 그 시점 {@code daily_price} 최신일(=전 거래일)까지만 덮는다. 16:3x에 오늘 마크가 들어오면 트리거 미발동
+     * 경로의 보유일이 오늘을 가리켜 {@code hold()}가 empty → <b>미결 경로가 통째로 제외</b>되고, 남은 표본(이미 청산된 승자·손절)
+     * 때문에 n이 절반가량 줄고 net이 +4~6%대로 부풀었다(실측 F/KOSDAQ·BULL 장중 n=89·+0.38 → 마감 후 n=41·+4.17).
+     * 마감 후 조회는 히스테리시스 상태까지 그 값으로 갱신했다.</p>
+     *
+     * <p>→ 벤치마크 쪽을 늘리는 대신 <b>전략 쪽을 벤치마크 날짜에 맞춘다</b>. 둘 다 같은 날짜까지만 보므로 비교가 정합하고,
+     * 오늘 하루를 빼고 재는 것은 장중 판정이 원래 하던 일과 같다. ⚠️ 반대(벤치마크 보유일을 클램프)는 택하지 않았다 —
+     * 전략 경로엔 오늘 등락이 들어가고 유니버스엔 안 들어가 오늘 시장 움직임이 그대로 초과수익으로 둔갑한다.</p>
+     */
+    static java.util.List<PositionExitService.DayBar> trimToBenchmark(
+            java.util.List<PositionExitService.DayBar> bars, int maxK) {
+        if (bars == null || maxK <= 0) return bars;
+        java.util.List<PositionExitService.DayBar> out = new java.util.ArrayList<>(bars.size());
+        for (int i = 0; i < bars.size(); i++) {
+            PositionExitService.DayBar b = bars.get(i);
+            int day = b != null && b.day() > 0 ? b.day() : i + 1;   // simulateMultidayExit과 같은 보유일 규칙
+            if (day <= maxK) out.add(b);
+        }
+        return out;
+    }
+
     private UniverseHoldIndex universeIndex() {
         if (dailyPriceRepository == null) return UniverseHoldIndex.unavailable();
         String from = LocalDate.now(SEOUL).minusDays(props.lookbackDays() + 5L).format(YYYYMMDD);
@@ -758,8 +783,10 @@ public class StrategyPerformanceGate {
             if (mdPaths != null) {
                 // 멀티데이: 일봉 경로에 라이브와 동일한 판정 함수를 적용해 청산가를 구한다(마크 미수집이면 null=제외).
                 Long d0 = mdEntryClose.get(o.getId());
+                java.util.List<PositionExitService.DayBar> bars = mdPaths.get(o.getId());
+                if (excessMode) bars = trimToBenchmark(bars, universe.maxK(o.getAlertDate()));
                 PositionExitService.MultidayExit ex = PositionExitService.simulateMultidayExit(
-                        o.getBuyPrice(), mdPaths.get(o.getId()),
+                        o.getBuyPrice(), bars,
                         d0 == null ? 0 : d0, multidayArmPct, multidayDropPct, multidayMaxHoldDays,
                         mdStop, limitUpLockPct);
                 price = ex == null ? null : ex.price();

@@ -62,4 +62,29 @@ class UniverseHoldIndexTest {
         assertThat(idx.rows()).isEqualTo(1);
         assertThat(idx.hold("20260720", 15).getAsDouble()).isCloseTo(10.88, within(1e-9));
     }
+
+    @Test
+    void 벤치마크가_덮는_최대_보유일() {
+        UniverseHoldIndex idx = UniverseHoldIndex.of(List.of(
+                row("20260925", 1, 0.5, 900), row("20260925", 3, 1.2, 900), row("20260925", 2, 0.8, 900)), 50);
+        assertThat(idx.maxK("20260925")).isEqualTo(3);
+        assertThat(idx.maxK("20260926")).isZero();   // 그 날짜 없음
+        assertThat(idx.maxK(null)).isZero();
+    }
+
+    @Test
+    void 마크가_벤치마크보다_앞서면_경로를_벤치마크_날짜까지_자른다() {
+        // 16:3x 오늘 마크 적재 ~ 캐시 재빌드 사이: 마크는 D+4까지, 벤치마크는 D+3까지.
+        // 자르지 않으면 미결 경로의 보유일(4)이 벤치마크 밖이라 표본이 통째로 빠졌다(2026-09-30 아티팩트).
+        List<PositionExitService.DayBar> bars = List.of(
+                new PositionExitService.DayBar(1, 100, null, null, null),
+                new PositionExitService.DayBar(2, 101, null, null, null),
+                new PositionExitService.DayBar(3, 102, null, null, null),
+                new PositionExitService.DayBar(4, 110, null, null, null));
+        List<PositionExitService.DayBar> out = StrategyPerformanceGate.trimToBenchmark(bars, 3);
+        assertThat(out).extracting(PositionExitService.DayBar::day).containsExactly(1, 2, 3);
+        // 벤치마크가 없는 진입일(maxK=0)은 손대지 않는다 — 어차피 hold()가 empty라 종전대로 제외된다.
+        assertThat(StrategyPerformanceGate.trimToBenchmark(bars, 0)).hasSize(4);
+        assertThat(StrategyPerformanceGate.trimToBenchmark(null, 3)).isNull();
+    }
 }

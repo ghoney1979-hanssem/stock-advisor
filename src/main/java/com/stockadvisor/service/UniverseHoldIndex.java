@@ -69,6 +69,21 @@ public record UniverseHoldIndex(Map<String, Map<Integer, Double>> byDateAndK, in
         return v == null ? OptionalDouble.empty() : OptionalDouble.of(v);
     }
 
+    /**
+     * 그 진입일에 대해 벤치마크가 덮는 <b>최대 보유 거래일</b>(없으면 0) — 곧 {@code daily_price} 최신일까지의 거리다.
+     *
+     * <p>호출측(게이트)이 일봉 마크 경로를 이 길이로 자르는 데 쓴다 — 마크가 벤치마크보다 하루 앞서면
+     * (16:3x 마크 적재 ~ 다음 캐시 재빌드 사이) 미결 경로의 보유일이 벤치마크 밖으로 나가 표본이 통째로 빠지기 때문이다.</p>
+     */
+    public int maxK(String entryDate) {
+        if (entryDate == null) return 0;
+        Map<Integer, Double> byK = byDateAndK.get(entryDate);
+        if (byK == null || byK.isEmpty()) return 0;
+        int max = 0;
+        for (int k : byK.keySet()) max = Math.max(max, k);
+        return max;
+    }
+
     /** 인덱스가 덮는 진입일(진단용). */
     public List<String> dates() {
         List<String> out = new ArrayList<>(byDateAndK.keySet());
