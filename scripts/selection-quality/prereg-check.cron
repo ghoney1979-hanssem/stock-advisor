@@ -1,0 +1,4 @@
+# 선정 품질 사전등록 1회성 점검 — 2026-10-16 17:20 KST (VM 시계 UTC). 실행 후 스크립트가 자기 파일을 지운다.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+20 8 16 10 * root /usr/local/bin/prereg-check.sh
