@@ -91,6 +91,35 @@ class NetTrendGateTest {
         assertThat(d.reason()).contains("net추세 +0.500%p/일(5거래일");
     }
 
+    /** 2026-10-06 사용자 결정 — 추세 AND 절대 net: 상승추세가 net 미달을 덮어 열지 못한다. */
+    @Test
+    void AND모드에선_상승곡선이어도_절대net_미달이면_닫는다() {
+        var rows = daily("REVERSAL_L", new double[]{-1.5, -1.0, -0.5, 0.0, 0.5}, 6);   // 위 케이스: 대체 모드면 열림
+        var g = gate(props(30, 0.3), rows, true);
+        g.configureNetTrendRequiresNet(true);
+
+        var d = g.evaluate("REVERSAL_L");
+        assertThat(d.allowed()).isFalse();
+        assertThat(d.reason()).contains("성과 미달");
+        assertThat(d.reason()).doesNotContain("net 상승추세 통과");
+    }
+
+    @Test
+    void AND모드에서도_절대net_통과에_상승곡선이면_열고_하락곡선이면_닫는다() {
+        var up = daily("REVERSAL_L", new double[]{0.5, 1.0, 1.5, 2.0, 2.5}, 6);   // net +1.32, 상승
+        var gUp = gate(props(30, 0.3), up, true);
+        gUp.configureNetTrendRequiresNet(true);
+        var dUp = gUp.evaluate("REVERSAL_L");
+        assertThat(dUp.allowed()).isTrue();
+        assertThat(dUp.reason()).doesNotContain("net 상승추세 통과");   // 연 건 수준이다
+
+        var down = daily("REVERSAL_L", new double[]{2.0, 1.5, 1.0, 0.5, 0.0}, 6);   // net +0.82, 하락
+        var gDown = gate(props(30, 0.3), down, true);
+        gDown.configureNetTrendRequiresNet(true);
+        assertThat(gDown.evaluate("REVERSAL_L").reason()).contains("net 하락추세 차단");
+        assertThat(gDown.evaluate("REVERSAL_L").allowed()).isFalse();
+    }
+
     @Test
     void 총net이_양수여도_하락곡선이면_닫는다() {
         // 일별 gross +2.0 → 0.0 (기울기 −0.5%p/일). 평균 gross +1.0 → net +0.82 ≥ 기준 0.3 → 수준 판정은 통과.

@@ -366,6 +366,25 @@ public class StrategyPerformanceGate {
      */
     @Value("${stockadvisor.trading.perf-gate.net-trend-closes-bootstrap:false}")
     private boolean netTrendClosesBootstrap = false;
+    /**
+     * 추세 AND 절대 net 모드(2026-10-06, 사용자 결정 — 기본 false = 종전 '추세가 수준을 대체').
+     *
+     * <p>켜면 <b>상승추세가 절대 net 미달을 덮어 열지 못한다</b> — 열려면 절대 net(+LOO) 통과 AND 하락추세 아님.
+     * 하락추세는 종전대로 즉시 닫는다. 계기: 9/15 초과수익 채점 이후 "시장보다 덜 지는 중"이 상승곡선으로 읽혀
+     * net −1.98%인 F KOSPI가 열렸다. 사용자 원칙 "살지 말지는 절대수익으로" — 추세는 닫는 쪽 거부권만 갖는다.</p>
+     */
+    @Value("${stockadvisor.trading.perf-gate.net-trend-requires-net:false}")
+    private boolean netTrendRequiresNet = false;
+
+    /** 테스트용 — 추세 AND 절대 net 모드. */
+    void configureNetTrendRequiresNet(boolean enabled) {
+        this.netTrendRequiresNet = enabled;
+    }
+
+    /** 현재 모드로 최종 허용 판정. */
+    private boolean allowOf(boolean netOk, NetTrend tr) {
+        return decide(netOk, tr, netTrendRequiresNet);
+    }
 
     /** 테스트용 — 추세 레이어 구성. */
     void configureNetTrend(boolean enabled, int minDays, double upPct, double downPct, double lastDayMinPct) {
@@ -397,8 +416,16 @@ public class StrategyPerformanceGate {
      * @param tr    추세(null이면 미판정)
      */
     static boolean decide(boolean netOk, NetTrend tr) {
+        return decide(netOk, tr, false);
+    }
+
+    /**
+     * @param requiresNet true면 추세 AND 절대 net — 상승추세도 net 미달을 덮지 못한다(하락추세 거부권만 유지)
+     */
+    static boolean decide(boolean netOk, NetTrend tr, boolean requiresNet) {
         if (tr == null) return netOk;
         if (tr.falling()) return false;   // + 여도 하락곡선이면 닫는다
+        if (requiresNet) return netOk;    // AND 모드: 상승·평탄 모두 수준으로 판정
         if (tr.rising()) return true;     // − 여도 상승곡선이면 연다
         return netOk;                      // 평탄 → 수준으로 판정(종전)
     }
@@ -553,7 +580,7 @@ public class StrategyPerformanceGate {
         String poolTag = inversePooled ? "·통합" : "";
         if (n >= minSamples) {
             NetTrend trInv = trendOf(daysInv);
-            boolean allow = decide(avg >= props.inverseMinNetAvgPct(), trInv);
+            boolean allow = allowOf(avg >= props.inverseMinNetAvgPct(), trInv);
             String trTag = trInv == null ? "" : trInv.tag();
             if (!allow) {
                 return new GateDecision(strategy, false,
@@ -844,7 +871,7 @@ public class StrategyPerformanceGate {
             }
             LooNet looB = looTopDay ? looExcludingTopDay(daysB, sumB, nB) : null;
             NetTrend trB = trendOf(daysB);
-            boolean allow = decide(avgB >= effMinNetB && (looB == null || looB.net() >= effMinNetB), trB);
+            boolean allow = allowOf(avgB >= effMinNetB && (looB == null || looB.net() >= effMinNetB), trB);
             if (mutateHyst) openState.put(keyB, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s폭버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
@@ -868,7 +895,7 @@ public class StrategyPerformanceGate {
             }
             LooNet looF = looTopDay ? looExcludingTopDay(daysF, sumF, nF) : null;
             NetTrend trF = trendOf(daysF);
-            boolean allow = decide(avgF >= effMinNetF && (looF == null || looF.net() >= effMinNetF), trF);
+            boolean allow = allowOf(avgF >= effMinNetF && (looF == null || looF.net() >= effMinNetF), trF);
             if (mutateHyst) openState.put(keyF, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s흐름버킷 %s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
@@ -888,7 +915,7 @@ public class StrategyPerformanceGate {
             }
             LooNet looR = looTopDay ? looExcludingTopDay(daysR, sumR, n) : null;
             NetTrend trR = trendOf(daysR);
-            boolean allow = decide(avg >= effMinNetR && (looR == null || looR.net() >= effMinNetR), trR);
+            boolean allow = allowOf(avg >= effMinNetR && (looR == null || looR.net() >= effMinNetR), trR);
             if (mutateHyst) openState.put(keyR, allow);
             return new GateDecision(strategy, allow,
                     String.format("%s%s(net %.2f%% %s 기준 %.2f%%, n=%d)%s%s%s",
@@ -920,7 +947,7 @@ public class StrategyPerformanceGate {
             boolean sampleOkAllPass = nAll >= props.fallbackMinSamples() && avgAll != null;
             boolean netOkAllPass = sampleOkAllPass && avgAll >= props.fallbackMinNetAvgPct()
                     && (looAll == null || looAll.net() >= props.fallbackMinNetAvgPct());
-            if (sampleOkAllPass && decide(netOkAllPass, trAll)) {
+            if (sampleOkAllPass && allowOf(netOkAllPass, trAll)) {
                 // ③ 통과 → fallback=true(OrderService가 축소사이징 적용)
                 return new GateDecision(strategy, true,
                         // ⚠️ 부등호를 %s로 둔 게 요점 — 추세가 열어준 경우 net은 기준 <b>아래</b>이므로
@@ -1112,7 +1139,8 @@ public class StrategyPerformanceGate {
      */
     static String verdictLabel(boolean allow, boolean netOk, NetTrend tr) {
         if (tr != null && tr.falling()) return "net 하락추세 차단";
-        if (tr != null && tr.rising()) return "net 상승추세 통과";
+        // 상승추세가 판정자인 건 '수준 미달인데 열린' 경우뿐 — AND 모드에선 그런 경우가 없다.
+        if (tr != null && tr.rising() && allow && !netOk) return "net 상승추세 통과";
         return verdictLabel(allow, netOk);
     }
 
