@@ -91,6 +91,9 @@ public class SignalAdminController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.stockadvisor.service.DailyMarkHistoryBackfillService dailyMarkHistoryBackfillService;   // 일봉마크 D+30 천장 제거 — 필드주입
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.stockadvisor.service.SelectionQualityService selectionQualityService;   // 선정 품질 탐색·사전등록 — 필드주입
+
     private final DisclosurePollingService pollingService;
     private final SignalAlertService signalAlertService;
     private final MarketSignalService marketSignalService;
@@ -389,6 +392,32 @@ public class SignalAdminController {
     public SleeveService.RebalanceReport sleeveRebalance(
             @RequestParam(defaultValue = "false") boolean dryRun) {
         return sleeveService.rebalance(dryRun);
+    }
+
+    /**
+     * 선정 품질 탐색(표본 내) — 진입분·대조군의 D+5/10/15 유니버스 대비 초과수익(gross)으로 전략별
+     * "거른 것보다 나았나"·feature 3분위 상−하·복합 점수 crowd를 본다. 여기서 고른 컷은 <b>사전등록 후보</b>이지 채택 근거가 아니다.
+     */
+    @GetMapping("/selection-quality")
+    public com.stockadvisor.service.SelectionQualityService.ExploreReport selectionQuality(
+            @RequestParam(defaultValue = "20260620") String since,
+            @RequestParam(required = false) String until,
+            @RequestParam(defaultValue = "10") int horizon) {
+        return selectionQualityService.explore(since, until, horizon);
+    }
+
+    /** 선정 품질 사전등록 규칙 등록 — 같은 이름은 거부(수정 불가가 설계). oosFrom 생략 시 내일부터. */
+    @PostMapping("/selection-prereg")
+    public com.stockadvisor.domain.SelectionPrereg registerSelectionPrereg(
+            @org.springframework.web.bind.annotation.RequestBody
+            com.stockadvisor.service.SelectionQualityService.RegisterRequest request) {
+        return selectionQualityService.register(request);
+    }
+
+    /** 사전등록 규칙 전체를 각자의 표본 밖 데이터로 판정(PASS/FAIL/판정보류). */
+    @GetMapping("/selection-prereg")
+    public com.stockadvisor.service.SelectionQualityService.CheckReport checkSelectionPrereg() {
+        return selectionQualityService.check();
     }
 
     /** 슬리브 사이클별 성과 — <b>절대 수익이 아니라 excessPct(유니버스 대비)로 판정할 것</b>. */
