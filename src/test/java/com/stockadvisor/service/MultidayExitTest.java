@@ -100,7 +100,7 @@ class MultidayExitTest {
         org.mockito.Mockito.lenient().when(props.meanReversionMaxDrop()).thenReturn(12.0);
         org.mockito.Mockito.lenient().when(props.meanReversionRequireRebound()).thenReturn(true);
         org.mockito.Mockito.lenient().when(props.meanReversionMinScore()).thenReturn(40.0);
-        return new MultidayReversionStrategy(props, enabled);
+        return new MultidayReversionStrategy(props, enabled, true);
     }
 
     @Test
@@ -112,6 +112,20 @@ class MultidayExitTest {
         assertThat(s.rejectReason(ctx(-5.0, false, true, 50))).isEqualTo("NO_VOLUME");
         assertThat(s.rejectReason(ctx(-5.0, true, false, 50))).isEqualTo("NO_REBOUND");
         assertThat(s.rejectReason(ctx(-5.0, true, true, 30))).isEqualTo("SCORE");
+    }
+
+    @Test
+    void C의_반등확인을_꺼도_P는_자기_플래그로_판정한다() {
+        // 2026-10-07: C만 완화(SIGNAL_C_REQUIRE_REBOUND=false). P는 LIVE 부트스트랩 중이라 반등확인 유지.
+        SignalProperties props = org.mockito.Mockito.mock(SignalProperties.class);
+        org.mockito.Mockito.lenient().when(props.meanReversionMinDrop()).thenReturn(3.0);
+        org.mockito.Mockito.lenient().when(props.meanReversionMaxDrop()).thenReturn(12.0);
+        org.mockito.Mockito.lenient().when(props.meanReversionRequireRebound()).thenReturn(false);
+        org.mockito.Mockito.lenient().when(props.meanReversionMinScore()).thenReturn(40.0);
+        assertThat(new MultidayReversionStrategy(props, true, true)
+                .rejectReason(ctx(-5.0, true, false, 50))).isEqualTo("NO_REBOUND");
+        assertThat(new MultidayReversionStrategy(props, true, false)
+                .rejectReason(ctx(-5.0, true, false, 50))).isNull();
     }
 
     @Test

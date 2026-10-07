@@ -211,6 +211,7 @@ stockadvisor:
     quiet-enabled: ${SIGNAL_QUIET_ENABLED:true}
     # 전략 P(눌림목 멀티데이 트레일) — 진입은 C와 동일(mean-reversion-* 프로퍼티 공유), 청산만 멀티데이 트레일.
     multiday-reversion-enabled: ${SIGNAL_MULTIDAY_REVERSION_ENABLED:false}
+    multiday-reversion-require-rebound: ${SIGNAL_P_REQUIRE_REBOUND:true}   # [P] 분봉 반등확인 — C와 분리(2026-10-07, C만 완화). C와 같게 두면 다시 '청산만 다른' 대조 실험
     quiet-max-volume-ratio: ${SIGNAL_QUIET_MAX_VOLUME_RATIO:0.5}     # 이 배수 이상이면 "관심 받은 종목"이라 제외
     quiet-min-ma-dist-pct: ${SIGNAL_QUIET_MIN_MA_DIST_PCT:0.0}       # MA20 위
     quiet-max-ma-dist-pct: ${SIGNAL_QUIET_MAX_MA_DIST_PCT:3.0}       # 이격 과열 제외

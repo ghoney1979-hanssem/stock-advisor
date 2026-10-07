@@ -36,12 +36,26 @@ public class MultidayReversionStrategy implements TradingStrategy {
     /** C와 같은 진입 임계를 쓴다(복제 금지 — 갈라지면 대조 실험이 깨진다). */
     private final SignalProperties props;
     private final boolean enabled;
+    /**
+     * 분봉 반등확인 요구 — <b>C와 분리된 유일한 진입 조건</b>(2026-10-07, 사용자 결정).
+     *
+     * <p>C의 반등확인을 끄면서(prod {@code SIGNAL_C_REQUIRE_REBOUND=false}) P는 유지하기로 했다. C는 반등확인이
+     * 후보의 ~98%를 걸러 주 0~8건만 진입해 게이트 표본(20일 룩백·n≥30)이 구조적으로 안 찼고, P는 부트스트랩으로
+     * LIVE 실주문 중이라 같은 완화가 곧바로 "반등 미확인 하락 종목" 실주문 급증이 된다.</p>
+     *
+     * <p>⚠️ <b>이 분리로 C·P는 더 이상 "진입 동일·청산만 다른" 대조 실험이 아니다</b> — 둘의 성과 차이에
+     * 반등확인 효과가 섞인다. 다시 묶으려면 이 값을 C와 같게 둘 것.</p>
+     */
+    private final boolean requireRebound;
 
     public MultidayReversionStrategy(SignalProperties props,
                                      @Value("${stockadvisor.signal.multiday-reversion-enabled:false}")
-                                     boolean enabled) {
+                                     boolean enabled,
+                                     @Value("${stockadvisor.signal.multiday-reversion-require-rebound:true}")
+                                     boolean requireRebound) {
         this.props = props;
         this.enabled = enabled;
+        this.requireRebound = requireRebound;
     }
 
     @Override
@@ -59,7 +73,7 @@ public class MultidayReversionStrategy implements TradingStrategy {
         return rejectReason(ctx) == null;
     }
 
-    /** C({@link MeanReversionStrategy#rejectReason})와 동일한 판정 — 사유 문자열까지 같게 둬 대조군 비교가 맞물리게 한다. */
+    /** C({@link MeanReversionStrategy#rejectReason})와 같은 판정(반등확인 요구 여부만 별도 설정) — 사유 문자열까지 같게 둬 대조군 비교가 맞물리게 한다. */
     @Override
     public String rejectReason(StrategyContext ctx) {
         if (!enabled) return "DISABLED";
@@ -68,7 +82,7 @@ public class MultidayReversionStrategy implements TradingStrategy {
                 && change >= -props.meanReversionMaxDrop();
         if (!inDropRange) return "DROP_RANGE";
         if (!ctx.signal().volumeSpike()) return "NO_VOLUME";
-        if (props.meanReversionRequireRebound() && !ctx.signal().reboundActive()) return "NO_REBOUND";
+        if (requireRebound && !ctx.signal().reboundActive()) return "NO_REBOUND";
         if (ctx.recScore() < props.meanReversionMinScore()) return "SCORE";
         return null;
     }
