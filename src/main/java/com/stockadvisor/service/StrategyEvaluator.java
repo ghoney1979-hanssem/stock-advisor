@@ -190,6 +190,12 @@ public class StrategyEvaluator {
     // ④ 뉴스 과다(2026-08-24) — 진입 직전 1시간 내 뉴스 건수 ≥ 이값이면 보류(NEWS_HEAVY). 0=비활성.
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-news-cnt-1h:0}")
     private int maxEntryNewsCnt1h = 0;
+    // ⑤ 전략별 대형주 상한(2026-10-19) — csv "STRATEGY:억". 시총 ≥ 이값이면 진입 보류(LARGE_CAP). 빈값=비활성.
+    //    근거: 사전등록 "L 시총 (10/01)" 표본 밖(≥20260916) PASS — L 상위 3분위(≥15,400억) vs 하위(≤3,975억)
+    //    D+10 −3.66%p, LOO −4.51~−2.31, 같은부호 8/10일. 적용 컷은 등록 action 문구("≥1.5조") 그대로.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-market-cap-eok-per-strategy:}")
+    private String maxEntryMarketCapPerStrategyCsv = "";
+    private volatile java.util.Map<String, Long> maxEntryMarketCapPerStrategy;
 
     // 체결강도 전(全)후보 수집(2026-08-24) — 대조군 커버리지 0%를 메우려고 수집 지점을 '진입 시 lazy'에서
     // '후보 전원'으로 옮긴다. ⚠️ 이 축은 fetchCcnl이 당일치만 줘서 **소급이 불가능**한 유일한 축이라,
@@ -307,6 +313,25 @@ public class StrategyEvaluator {
      * <p>⚠️ 전략명을 함께 보는 이유: {@code SCORE}·{@code TOO_DEEP}는 다른 전략도 쓰는 공용 사유라
      * 사유 문자열만 매칭하면 전 전략의 대조군 정책이 조용히 바뀐다.</p>
      */
+    /**
+     * 전략별 대형주 상한 판정(순수). 상한 미지정·시총 미상(≤0)이면 통과(degrade open — 데이터 결손으로 매매를 막지 않는다).
+     * csv 파싱은 {@link OrderService#parsePositionCaps}를 공유한다(오타·0·음수는 조용히 무시).
+     */
+    static boolean largeCapReject(String strategy, long marketCapEok, java.util.Map<String, Long> caps) {
+        if (caps == null || marketCapEok <= 0) return false;
+        Long cap = caps.get(strategy);
+        return cap != null && marketCapEok >= cap;
+    }
+
+    private java.util.Map<String, Long> maxEntryMarketCaps() {
+        java.util.Map<String, Long> m = maxEntryMarketCapPerStrategy;
+        if (m == null) {
+            m = OrderService.parsePositionCaps(maxEntryMarketCapPerStrategyCsv);
+            maxEntryMarketCapPerStrategy = m;
+        }
+        return m;
+    }
+
     static boolean reversalControl(String strategy, String reject) {
         return "REVERSAL_L".equals(strategy) && reject != null && REVERSAL_CONTROL_REASONS.contains(reject);
     }
@@ -685,6 +710,11 @@ public class StrategyEvaluator {
                     reject = "MICRO_CAP";
                     log.info("[{}] 전역 초소형주 보류 [{}] — 시총 {}억", strategy.name(), stockCode, marketCap);
                 }
+                // ⑤ 전략별 대형주 상한(2026-10-19, 사전등록 PASS 규칙 적용 — 현재 L만).
+                else if (largeCapReject(strategy.name(), marketCap, maxEntryMarketCaps())) {
+                    reject = "LARGE_CAP";
+                    log.info("[{}] 대형주 상한 보류 [{}] — 시총 {}억", strategy.name(), stockCode, marketCap);
+                }
                 // ④ 뉴스 과다(2026-08-24): 뉴스1h건수 축이 진입·대조군·edge 셋 다 단조 악화다.
                 //    진입 net <1건 −0.64 / 1~3 −1.00 / ≥3 −1.40, 대조군도 같은 방향(−0.78/−0.89/−0.96 =
                 //    뉴스 나는 종목 자체가 나쁘다), 그 위에 edge가 추가로 −0.44까지 벌어진다(그 구간에선
@@ -732,6 +762,8 @@ public class StrategyEvaluator {
                         // "차단이 옳았나"를 검증할 수 없다. 진입 직전 후보에만 걸리므로 표본 부담은 작다.
                         || "CHANGE_OVERHEAT".equals(reject) || "VOLUME_EXTREME".equals(reject)
                         || "MICRO_CAP".equals(reject) || "NEWS_HEAVY".equals(reject)
+                        // LARGE_CAP(2026-10-19)도 강제 기록 — 차단 후에도 "막은 게 옳았나"를 같은 축으로 계속 잰다.
+                        || "LARGE_CAP".equals(reject)
                         // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
                         // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
                         || "NOT_FADING".equals(reject)
