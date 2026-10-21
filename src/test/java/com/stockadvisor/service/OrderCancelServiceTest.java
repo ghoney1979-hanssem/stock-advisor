@@ -126,6 +126,43 @@ class OrderCancelServiceTest {
     }
 
     @Test
+    void 취소_직전_체결분은_KIS_재조회로_반영해_FILLED_전환() {
+        // 2026-10-21 IPARK현대산업개발 294870: 8주 중 1주가 직전 체결동기화 뒤·취소 직전에 체결 → DB 체결 0만 믿고
+        // CANCELLED로 닫아 실계좌 1주가 고아가 됐다. 취소 성공 직후 KIS 체결 재조회로 1주를 반영해야 한다.
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order buy = pending(4, "O12");
+        when(buy.getSide()).thenReturn(com.stockadvisor.domain.OrderSide.BUY);
+        when(buy.getFilledQty()).thenReturn(0L, 1L);   // 재조회 전 0 → markPartiallyFilled 이후 1
+        when(buy.getAvgFillPrice()).thenReturn(20_550L);
+        when(repo.findByModeAndStatusIn(any(), any())).thenReturn(List.of(buy));
+        when(kis.cancelOrder("91252", "O12")).thenReturn(new KisOrderResponse("0", "c", "취소완료", null));
+        when(kis.fetchTodayFills()).thenReturn(List.of(
+                new KisApiClient.FillInfo("OTHER", 5, 5, 0, 1_000),
+                new KisApiClient.FillInfo("O12", 8, 1, 0, 20_550)));
+        OrderCancelService svc = new OrderCancelService(repo, kis, policy);
+
+        assertThat(svc.cancelStaleOrders()).isEqualTo(1);
+        verify(buy).markPartiallyFilled(1L, 20_550L);
+        verify(buy).markFilled(1L, 20_550L);
+        verify(buy, never()).markCancelled();
+    }
+
+    @Test
+    void 체결_재조회_실패해도_취소_정산은_진행() {
+        OrderRepository repo = mock(OrderRepository.class);
+        KisApiClient kis = mock(KisApiClient.class);
+        Order o = pending(10, "O13");
+        when(repo.findByModeAndStatusIn(any(), any())).thenReturn(List.of(o));
+        when(kis.cancelOrder("91252", "O13")).thenReturn(new KisOrderResponse("0", "c", "취소완료", null));
+        when(kis.fetchTodayFills()).thenThrow(new RuntimeException("timeout"));
+        OrderCancelService svc = new OrderCancelService(repo, kis, policy);
+
+        assertThat(svc.cancelStaleOrders()).isEqualTo(1);
+        verify(o).markCancelled();
+    }
+
+    @Test
     void LIVE_미체결주문_없으면_no_op() {
         OrderRepository repo = mock(OrderRepository.class);
         KisApiClient kis = mock(KisApiClient.class);

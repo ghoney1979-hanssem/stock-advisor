@@ -78,6 +78,7 @@ public class OrderCancelService {
                 }
                 KisOrderResponse resp = kisApiClient.cancelOrder(o.getBrokerOrgNo(), o.getBrokerOrderNo());
                 if (resp.isSuccess()) {
+                    syncFillAtCancel(o);
                     settleCancelled(o);
                     cancelled++;
                     log.info("[취소] 미체결 {}분 경과 [{}] {} ODNO={}",
@@ -93,6 +94,35 @@ public class OrderCancelService {
             log.info("미체결 주문 취소 {}건", cancelled);
         }
         return cancelled;
+    }
+
+    /**
+     * 취소 직전 체결 경합 보정 — 취소 성공 직후 그 주문의 체결수량을 KIS에서 다시 읽어 반영한다.
+     * <b>2026-10-21 IPARK현대산업개발 294870 실측</b>: 매수 8주 중 1주가 직전 체결동기화(1분 주기) 뒤·취소 직전에
+     * 체결됐는데, DB 체결수량(0)만 믿고 CANCELLED로 닫아 실계좌 1주가 청산 추적 밖 고아가 됐다
+     * (FillSync는 SUBMITTED/PARTIALLY_FILLED만 보므로 이후 영영 반영 안 됨 — 7/16 안트로젠 수정이 못 잡는 경합 변형).
+     * 취소가 성공했으면 잔량은 죽었으므로 이 시점 체결수량이 최종값이다. 매도도 같은 경합이면 판 수량이 정산에서
+     * 빠져 재매도가 "주문 가능 수량 초과"로 고착되므로 양방향 적용.
+     * 조회 실패 시엔 종전대로 DB 값으로 정산한다(취소 자체를 되돌릴 수 없으므로) — 경고 로그로 reconcile 확인 유도.
+     */
+    private void syncFillAtCancel(Order o) {
+        try {
+            for (KisApiClient.FillInfo f : kisApiClient.fetchTodayFills()) {
+                if (!f.orderNo().equals(o.getBrokerOrderNo())) continue;
+                Long filled = o.getFilledQty();
+                long known = filled == null ? 0 : filled;
+                if (f.filledQty() > known) {
+                    o.markPartiallyFilled(f.filledQty(), f.avgFillPrice());
+                    log.warn("[취소] 취소 직전 체결 반영 [{}] {} {} {}→{}주 @ {}원 ODNO={}",
+                            o.getStrategy(), o.getSide(), o.getStockCode(), known, f.filledQty(),
+                            f.avgFillPrice(), o.getBrokerOrderNo());
+                }
+                return;
+            }
+        } catch (Exception ex) {
+            log.warn("[취소] 체결 재조회 실패 ODNO={} — DB 체결수량 기준 정산(고아 가능, reconcile 확인): {}",
+                    o.getBrokerOrderNo(), ex.getMessage());
+        }
     }
 
     /**
