@@ -196,6 +196,12 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.max-entry-market-cap-eok-per-strategy:}")
     private String maxEntryMarketCapPerStrategyCsv = "";
     private volatile java.util.Map<String, Long> maxEntryMarketCapPerStrategy;
+    // ⑥ 전략별 저PBR 하한(2026-10-29) — csv "STRATEGY:PBR". PBR ≤ 이값이면 진입 보류(LOW_PBR). 빈값=비활성.
+    //    근거: 사전등록 "J PBR (10/01)" 표본 밖(≥20260916) PASS — J 상위 3분위(≥1.26) vs 하위(≤0.64)
+    //    D+10 +9.95%p, LOO +3.32~+13.27, 같은부호 7/10일. 적용 컷은 등록 action 문구("PBR <= 0.64") 그대로.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.min-entry-pbr-per-strategy:}")
+    private String minEntryPbrPerStrategyCsv = "";
+    private volatile java.util.Map<String, Double> minEntryPbrPerStrategy;
 
     // 체결강도 전(全)후보 수집(2026-08-24) — 대조군 커버리지 0%를 메우려고 수집 지점을 '진입 시 lazy'에서
     // '후보 전원'으로 옮긴다. ⚠️ 이 축은 fetchCcnl이 당일치만 줘서 **소급이 불가능**한 유일한 축이라,
@@ -328,6 +334,44 @@ public class StrategyEvaluator {
         if (m == null) {
             m = OrderService.parsePositionCaps(maxEntryMarketCapPerStrategyCsv);
             maxEntryMarketCapPerStrategy = m;
+        }
+        return m;
+    }
+
+    /**
+     * 전략별 저PBR 하한 판정(순수). 하한 미지정·PBR 미상(≤0)이면 통과(degrade open). 경계값(=컷)은 보류 —
+     * 사전등록 하위 버킷 정의가 "≤ loCut"이다.
+     */
+    static boolean lowPbrReject(String strategy, double pbr, java.util.Map<String, Double> floors) {
+        if (floors == null || pbr <= 0) return false;
+        Double floor = floors.get(strategy);
+        return floor != null && pbr <= floor;
+    }
+
+    /** csv "STRATEGY:값"(소수) 파싱. 오타·0·음수는 조용히 무시({@link OrderService#parsePositionCaps}와 같은 규약). */
+    static java.util.Map<String, Double> parseDoubleCaps(String csv) {
+        java.util.Map<String, Double> m = new java.util.HashMap<>();
+        if (csv == null) return m;
+        for (String part : csv.split(",")) {
+            String[] kv = part.split(":");
+            if (kv.length != 2) continue;
+            String k = kv[0].trim();
+            if (k.isEmpty()) continue;
+            try {
+                double v = Double.parseDouble(kv[1].trim());
+                if (v > 0) m.put(k, v);
+            } catch (NumberFormatException ignored) {
+                // 잘못된 값은 무시 — 설정 오타로 진입이 전면 차단되는 것보다 낫다(degrade open)
+            }
+        }
+        return m;
+    }
+
+    private java.util.Map<String, Double> minEntryPbrs() {
+        java.util.Map<String, Double> m = minEntryPbrPerStrategy;
+        if (m == null) {
+            m = parseDoubleCaps(minEntryPbrPerStrategyCsv);
+            minEntryPbrPerStrategy = m;
         }
         return m;
     }
@@ -715,6 +759,11 @@ public class StrategyEvaluator {
                     reject = "LARGE_CAP";
                     log.info("[{}] 대형주 상한 보류 [{}] — 시총 {}억", strategy.name(), stockCode, marketCap);
                 }
+                // ⑥ 전략별 저PBR 하한(2026-10-29, 사전등록 PASS 규칙 적용 — 현재 J만).
+                else if (lowPbrReject(strategy.name(), pbr, minEntryPbrs())) {
+                    reject = "LOW_PBR";
+                    log.info("[{}] 저PBR 하한 보류 [{}] — PBR {}", strategy.name(), stockCode, String.format("%.2f", pbr));
+                }
                 // ④ 뉴스 과다(2026-08-24): 뉴스1h건수 축이 진입·대조군·edge 셋 다 단조 악화다.
                 //    진입 net <1건 −0.64 / 1~3 −1.00 / ≥3 −1.40, 대조군도 같은 방향(−0.78/−0.89/−0.96 =
                 //    뉴스 나는 종목 자체가 나쁘다), 그 위에 edge가 추가로 −0.44까지 벌어진다(그 구간에선
@@ -764,6 +813,8 @@ public class StrategyEvaluator {
                         || "MICRO_CAP".equals(reject) || "NEWS_HEAVY".equals(reject)
                         // LARGE_CAP(2026-10-19)도 강제 기록 — 차단 후에도 "막은 게 옳았나"를 같은 축으로 계속 잰다.
                         || "LARGE_CAP".equals(reject)
+                        // LOW_PBR(2026-10-29)도 같은 이유로 강제 기록.
+                        || "LOW_PBR".equals(reject)
                         // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
                         // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
                         || "NOT_FADING".equals(reject)
