@@ -202,6 +202,18 @@ public class StrategyEvaluator {
     @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.min-entry-pbr-per-strategy:}")
     private String minEntryPbrPerStrategyCsv = "";
     private volatile java.util.Map<String, Double> minEntryPbrPerStrategy;
+    // ⑦ 전략별 외인 순매도 하한(2026-11-05) — csv "STRATEGY:값"(음수 허용). 직전 거래일 외인 순매수 비중
+    //    (순매수수량 ÷ 3주체 매수수량 × 100, 소급 태깅과 같은 정의)이 이 값 이하면 진입 보류(FRGN_SELL). 빈값=비활성.
+    //    근거: 사전등록 "D 외인순매수 (10/01)" 표본 밖 PASS — D 상위(≥6.23) vs 하위(≤−8.93) D+10 +1.54%p
+    //    (표본 내 +1.93), LOO +0.55~+2.57, 같은부호 6/11일. 적용 컷은 등록 하위 컷(≤−8.93) 그대로.
+    //    ⚠️ 순매수 우대가 아니라 강한 순매도 제외다 — 중간 구간은 검정되지 않았다.
+    @org.springframework.beans.factory.annotation.Value("${stockadvisor.signal.min-entry-frgn-ratio-per-strategy:}")
+    private String minEntryFrgnRatioPerStrategyCsv = "";
+    private volatile java.util.Map<String, Double> minEntryFrgnRatioPerStrategy;
+    /** 직전 거래일 수급은 장중 불변 → 종목별 하루 1회만 조회. 일자가 바뀌면 비운다. 조회 실패는 캐시하지 않는다. */
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Optional<com.stockadvisor.market.dto.KisInvestorResponse.Flow>>
+            priorFlowCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile String priorFlowCacheDate;
 
     // 체결강도 전(全)후보 수집(2026-08-24) — 대조군 커버리지 0%를 메우려고 수집 지점을 '진입 시 lazy'에서
     // '후보 전원'으로 옮긴다. ⚠️ 이 축은 fetchCcnl이 당일치만 줘서 **소급이 불가능**한 유일한 축이라,
@@ -374,6 +386,68 @@ public class StrategyEvaluator {
             minEntryPbrPerStrategy = m;
         }
         return m;
+    }
+
+    /**
+     * 전략별 외인 순매도 하한 판정(순수). 하한 미지정·수급 미상(null)이면 통과(degrade open).
+     * 경계값(=컷)은 보류 — 사전등록 하위 버킷 정의가 "≤ loCut"이다.
+     */
+    static boolean frgnSellReject(String strategy, Double frgnRatioPct, java.util.Map<String, Double> floors) {
+        if (floors == null || frgnRatioPct == null || frgnRatioPct.isNaN()) return false;
+        Double floor = floors.get(strategy);
+        return floor != null && frgnRatioPct <= floor;
+    }
+
+    /** csv "STRATEGY:값"(부호 무관 소수) 파싱. 오타·비유한값은 조용히 무시(degrade open). */
+    static java.util.Map<String, Double> parseSignedDoubles(String csv) {
+        java.util.Map<String, Double> m = new java.util.HashMap<>();
+        if (csv == null) return m;
+        for (String part : csv.split(",")) {
+            String[] kv = part.split(":");
+            if (kv.length != 2) continue;
+            String k = kv[0].trim();
+            if (k.isEmpty()) continue;
+            try {
+                double v = Double.parseDouble(kv[1].trim());
+                if (Double.isFinite(v)) m.put(k, v);
+            } catch (NumberFormatException ignored) {
+                // 잘못된 값은 무시 — 설정 오타로 진입이 전면 차단되는 것보다 낫다
+            }
+        }
+        return m;
+    }
+
+    private java.util.Map<String, Double> minEntryFrgnRatios() {
+        java.util.Map<String, Double> m = minEntryFrgnRatioPerStrategy;
+        if (m == null) {
+            m = parseSignedDoubles(minEntryFrgnRatioPerStrategyCsv);
+            minEntryFrgnRatioPerStrategy = m;
+        }
+        return m;
+    }
+
+    /**
+     * 직전 거래일 외인·기관 수급({@link com.stockadvisor.market.dto.KisInvestorResponse#priorTo} — 당일 행 제외, look-ahead 없음).
+     * 소급 태깅({@link InvestorFlowBacktagService})과 같은 API·같은 정의라 라이브 값과 판정 표본이 정합한다.
+     * 조회 실패면 null(캐시 안 함 → 다음 평가에서 재시도).
+     */
+    private com.stockadvisor.market.dto.KisInvestorResponse.Flow priorDayFlow(String stockCode, String alertDate) {
+        if (!alertDate.equals(priorFlowCacheDate)) {
+            priorFlowCache.clear();
+            priorFlowCacheDate = alertDate;
+        }
+        var cached = priorFlowCache.get(stockCode);
+        if (cached != null) return cached.orElse(null);
+        try {
+            var r = kisApiClient.fetchInvestorDaily(stockCode);
+            if (r == null) return null;   // 무효 응답 — 재시도 허용
+            var f = com.stockadvisor.market.dto.KisInvestorResponse.priorTo(r.output(), alertDate);
+            priorFlowCache.put(stockCode, java.util.Optional.ofNullable(f));
+            return f;
+        } catch (Exception ex) {
+            log.debug("수급 조회 실패(가드 생략) stockCode={}: {}", stockCode, ex.getMessage());
+            return null;
+        }
     }
 
     static boolean reversalControl(String strategy, String reject) {
@@ -669,6 +743,7 @@ public class StrategyEvaluator {
         // 뉴스·체결강도 feature(진입 시 태깅) — 종목당 각 1콜 lazy(첫 진입 때만 조회, 대조군은 부하상 미태깅)
         Integer newsCnt1h = null, newsAgeMin = null;
         boolean newsFetched = false;
+        com.stockadvisor.market.dto.KisInvestorResponse.Flow investorFlow = null;   // 직전 거래일 수급(⑦ 가드가 조회했을 때만)
         // execStrength/strengthFetched 는 위(후보 전원 수집 지점)에서 선언·초기화됨 —
         // collectExecStrengthAll=false면 여기서도 종전처럼 과열 가드·진입 태깅이 lazy로 채운다.
         java.util.List<com.stockadvisor.market.dto.KisNewsResponse.NewsItem> newsItems = null;
@@ -793,6 +868,18 @@ public class StrategyEvaluator {
                     }
                 }
             }
+            // ⑦ 전략별 외인 순매도 하한(2026-11-05, 사전등록 PASS 규칙 적용 — 현재 D만).
+            //    다른 모든 가드 뒤(진입했을 후보만) + 지정 전략만 조회 → 추가 KIS는 그 후보의 종목당 하루 1콜.
+            //    else-if 체인 밖에 둔 이유: 체인 안이면 지정 전략의 NEWS_HEAVY 판정을 건너뛰게 된다.
+            if (reject == null && !inverse && minEntryFrgnRatios().containsKey(strategy.name())) {
+                if (investorFlow == null) investorFlow = priorDayFlow(stockCode, alertDate);
+                Double fr = investorFlow == null ? null : investorFlow.frgnRatioPct();
+                if (frgnSellReject(strategy.name(), fr, minEntryFrgnRatios())) {
+                    reject = "FRGN_SELL";
+                    log.info("[{}] 외인 순매도 보류 [{}] — 직전일({}) 외인 순매수 비중 {}%", strategy.name(), stockCode,
+                            investorFlow.basisDate(), String.format("%.2f", fr));
+                }
+            }
             // 대조군 기록: 전역 controlTracking + 전략별 tracksControl + 집중(검증승자 제외) 모두 충족해야.
             // REBOUND_DAY 차단분은 전략의 대조군 설정(tracksControl/집중)과 무관하게 기록(2026-07-23) —
             // H/F 등 control-off 전략이 가드에 막히면 흔적이 없어 "가드가 막은 게 옳았나"를 검증할 수 없다.
@@ -815,6 +902,8 @@ public class StrategyEvaluator {
                         || "LARGE_CAP".equals(reject)
                         // LOW_PBR(2026-10-29)도 같은 이유로 강제 기록.
                         || "LOW_PBR".equals(reject)
+                        // FRGN_SELL(2026-11-05)도 같은 이유로 강제 기록.
+                        || "FRGN_SELL".equals(reject)
                         // NOT_FADING(I 반등일 fade 확인, 2026-08-20)도 강제 기록 — 확대창을 좁히는 변경이라
                         // "막은 게 옳았나"(차단분 net vs 진입분 net)를 forward로 봐야 한다. 반등일 × 인버스 한정.
                         || "NOT_FADING".equals(reject)
@@ -877,6 +966,10 @@ public class StrategyEvaluator {
             // ⚠️ 전체 커버리지는 여전히 부분적이다(가드 경로를 지난 후보만). 전 후보 커버리지는 수집 지점을
             //    호가 조회 옆으로 옮겨야 하고 그건 후보당 1콜이 늘어난다 — 별건.
             outcome.setEntryExecStrength(execStrength);
+            // 수급 — ⑦ 가드가 이미 조회했으면 그 값으로 바로 태깅(소급과 같은 정의·같은 기준일). 아니면 소급이 채운다.
+            if (investorFlow != null && outcome.getEntryFrgnNtbyRatio() == null) {
+                outcome.setEntryInvestorFlow(investorFlow.frgnRatioPct(), investorFlow.orgnRatioPct(), investorFlow.basisDate());
+            }
 
             if (reject != null) {
                 // 대조군(미진입): 알림·주문 없이 수익률 horizon만 추적 → 필터 검증/개선용
