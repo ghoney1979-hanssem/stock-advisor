@@ -9,6 +9,7 @@
 - OS: Ubuntu 22.04 LTS
 - 디스크: 30GB `pd-balanced`
 - 예상 비용: 약 월 $30 (약정 시 ~30% 절감, $300 크레딧으로 수개월 무료)
+- **가동 스케줄(2026-11-05, 유료 전환 후)**: 인스턴스 스케줄 `sa-weekday-hours`로 **평일 07:30~18:00 KST만 가동**(VM 과금 약 2/3 절감, 디스크는 계속 과금). 컨테이너는 `restart: unless-stopped`라 부팅 시 자동 기동. 18:00 이후·주말엔 VM이 꺼져 있는 게 정상이고, 장 마감 후 배포·백필은 18:00 전에 끝낼 것. 스케줄이 동작하려면 Compute Engine 서비스 에이전트(`service-<프로젝트번호>@compute-system.iam.gserviceaccount.com`)에 `roles/compute.instanceAdmin.v1`이 필요하다. 해제: `gcloud compute instances remove-resource-policies stock-advisor --zone=asia-northeast3-a --resource-policies=sa-weekday-hours`. 약정 할인은 가동시간 축소와 상충해 미채택, e2-small은 VM 내 빌드 OOM 위험, Spot은 장중 회수 위험으로 기각.
 
 ## 0. 사전 준비 (로컬)
 ```bash
